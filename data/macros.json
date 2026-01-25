@@ -1,0 +1,76 @@
+{
+  "_example": {
+    "description": "Example macro - delete this entry",
+    "steps": [
+      {
+        "type": "cmd",
+        "value": "echo 'Hello World'"
+      }
+    ]
+  },
+  "hello world": {
+    "description": "Simple hello world test",
+    "steps": [
+      {
+        "type": "cmd",
+        "value": "echo Hello, World!"
+      }
+    ]
+  },
+  "show info": {
+    "description": "Display system information",
+    "steps": [
+      {
+        "type": "cmd",
+        "value": "echo === System Information ==="
+      },
+      {
+        "type": "cmd",
+        "value": "echo Current Directory: %CD%"
+      },
+      {
+        "type": "cmd",
+        "value": "echo Python Version:"
+      },
+      {
+        "type": "cmd",
+        "value": "python --version"
+      }
+    ]
+  },
+  "repeat {count}": {
+    "description": "Repeat a message",
+    "steps": [
+      {
+        "type": "cmd",
+        "value": "echo Repeating {count} times..."
+      },
+      {
+        "type": "cmd",
+        "value": "echo Count is: {count}"
+      }
+    ]
+  },
+  "git status": {
+    "description": "Show git status and branch",
+    "steps": [
+      {
+        "type": "cmd",
+        "value": "git status -s"
+      },
+      {
+        "type": "cmd",
+        "value": "git branch"
+      }
+    ]
+  },
+  "gs": {
+    "description": "Runs: git status -s...",
+    "steps": [
+      {
+        "type": "cmd",
+        "value": "git status -s"
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+# Natural Language Macros CLI
+# Core dependencies for MVP
+
+# Optional: Add LLM support later
+# openai>=1.0.0
+# anthropic>=0.8.0
+
+# For fuzzy matching
+thefuzz>=0.20.0
+python-Levenshtein>=0.20.0

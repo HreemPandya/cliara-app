@@ -1,10 +1,14 @@
-# Natural Language Macros CLI
-# Core dependencies for MVP
+# Cliara Dependencies
 
-# Optional: Add LLM support later
-# openai>=1.0.0
-# anthropic>=0.8.0
+# Core shell interaction
+prompt-toolkit>=3.0.0    # Rich terminal UI
+pygments>=2.0.0          # Syntax highlighting
 
-# For fuzzy matching
+# Optional: Fuzzy matching (from old implementation)
 thefuzz>=0.20.0
 python-Levenshtein>=0.20.0
+
+# Phase 2: LLM integration (optional)
+# Uncomment when implementing Phase 2:
+# openai>=1.0.0
+# anthropic>=0.8.0

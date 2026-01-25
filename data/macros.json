@@ -51,25 +51,12 @@
       }
     ]
   },
-  "git status": {
-    "description": "Show git status and branch",
-    "steps": [
-      {
-        "type": "cmd",
-        "value": "git status -s"
-      },
-      {
-        "type": "cmd",
-        "value": "git branch"
-      }
-    ]
-  },
   "gs": {
-    "description": "Runs: git status -s...",
+    "description": "Runs: git status...",
     "steps": [
       {
         "type": "cmd",
-        "value": "git status -s"
+        "value": "git status"
       }
     ]
   }

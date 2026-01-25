@@ -35,8 +35,40 @@ wheels/
 Thumbs.db
 
 # Project specific
-data/macros.json
 *.log
 
-# Keep example macros file
-!data/macros.json
+# User data
+~/.cliara/
+data/macros.json
+
+# Old documentation (archived)
+ARCHITECTURE.md
+CHANGELOG.md
+CLEANUP_SUMMARY.md
+COMPLETION_REPORT.md
+COMPLETE_WORKFLOW_EXAMPLE.md
+EXAMPLES.md
+INDEX.md
+LIVE_DEMO_GUIDE.md
+PHASE1_COMPLETE.md
+PHASE1_SUMMARY.md
+PROJECT_SUMMARY.md
+QUICK_REFERENCE.md
+QUICK_START.md
+START_HERE.md
+TODO.md
+TRANSFORMATION_COMPLETE.md
+USAGE.md
+VERIFICATION.md
+
+# Old implementation (kept for reference)
+app/
+
+# Test/demo files
+integration_test.py
+setup_demo.py
+examples.py
+demo.bat
+start.bat
+start.sh
+tests/

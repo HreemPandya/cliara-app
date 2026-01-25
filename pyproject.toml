@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cliara"
+version = "0.2.0"
+description = "An AI-powered shell that understands natural language and macros"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Cliara Contributors"}
+]
+keywords = ["cli", "shell", "ai", "natural-language", "macros", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: System :: Shells",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "prompt-toolkit>=3.0.0",
+    "pygments>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+ai = [
+    "openai>=1.0.0",
+    "anthropic>=0.8.0",
+]
+
+[project.scripts]
+cliara = "cliara.main:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/cliara"
+Documentation = "https://github.com/yourusername/cliara#readme"
+Repository = "https://github.com/yourusername/cliara"
+Issues = "https://github.com/yourusername/cliara/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cliara*"]
+exclude = ["tests*", "docs*"]

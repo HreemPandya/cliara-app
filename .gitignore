@@ -72,3 +72,6 @@ demo.bat
 start.bat
 start.sh
 tests/
+
+#env
+.env

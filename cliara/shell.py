@@ -61,19 +61,43 @@ class CliaraShell:
         self.running = True
         self.shell_path = self.config.get("shell")
         
+        # Initialize LLM if API key is available
+        self._initialize_llm()
+        
         # First-run setup
         if self.config.is_first_run():
             self.config.setup_first_run()
+    
+    def _initialize_llm(self):
+        """Initialize LLM if API key is configured."""
+        provider = self.config.get_llm_provider()
+        api_key = self.config.get_llm_api_key()
+        
+        if provider and api_key:
+            if self.nl_handler.initialize_llm(provider, api_key):
+                print(f"[OK] LLM initialized ({provider})")
+            else:
+                print(f"[Warning] Failed to initialize LLM ({provider})")
+        else:
+            # LLM not configured, will use stub responses
+            pass
     
     def print_banner(self):
         """Print welcome banner."""
         print("\n" + "="*60)
         print("  Cliara - AI-Powered Shell")
         print(f"  Shell: {self.shell_path}")
+        if self.nl_handler.llm_enabled:
+            print(f"  LLM: {self.nl_handler.provider.upper()} (Ready)")
+        else:
+            print("  LLM: Not configured (set OPENAI_API_KEY in .env)")
         print("="*60)
         print("\nQuick tips:")
         print("  • Normal commands work as usual")
-        print(f"  • Use '{self.config.get('nl_prefix')}' for natural language (Phase 2)")
+        if self.nl_handler.llm_enabled:
+            print(f"  • Use '{self.config.get('nl_prefix')}' for natural language")
+        else:
+            print(f"  • Use '{self.config.get('nl_prefix')}' for natural language (requires API key)")
         print("  • Type 'macro help' for macro commands")
         print("  • Type 'help' for all commands")
         print("  • Type 'exit' to quit")
@@ -155,18 +179,73 @@ class CliaraShell:
     
     def handle_nl_query(self, query: str):
         """
-        Handle natural language query (Phase 2 - stubbed).
+        Handle natural language query using LLM.
         
         Args:
             query: Natural language query
         """
-        print(f"\n[NL Query] {query}")
-        print("\n[Phase 2 Feature - Coming Soon!]")
-        print("This will use LLM to convert your query into commands.")
-        print("\nFor now, you can:")
-        print("  • Use normal commands")
-        print("  • Create macros with 'macro add <name>'")
-        print("  • Run macros by typing their name\n")
+        if not query:
+            print("[Error] Please provide a query after '?'")
+            return
+        
+        print(f"\n[Processing] {query}")
+        print("Generating commands...\n")
+        
+        # Build context
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash")
+        }
+        
+        # Process with LLM
+        commands, explanation, danger_level = self.nl_handler.process_query(query, context)
+        
+        if not commands:
+            print(f"[Error] {explanation}")
+            return
+        
+        # Show generated commands
+        print(f"[Explanation] {explanation}\n")
+        print("Generated commands:")
+        for i, cmd in enumerate(commands, 1):
+            print(f"  {i}. {cmd}")
+        
+        # Safety check
+        if danger_level != DangerLevel.SAFE:
+            print(self.safety.get_warning_message(commands, danger_level))
+            prompt = self.safety.get_confirmation_prompt(danger_level)
+            response = input(prompt).strip()
+            if not self.safety.validate_confirmation(response, danger_level):
+                print("[Cancelled]")
+                return
+        else:
+            confirm = input("\nRun these commands? (y/n): ").strip().lower()
+            if confirm not in ['y', 'yes']:
+                print("[Cancelled]")
+                return
+        
+        # Execute commands
+        print("\n" + "="*60)
+        print("EXECUTING COMMANDS")
+        print("="*60 + "\n")
+        
+        for i, cmd in enumerate(commands, 1):
+            print(f"[{i}/{len(commands)}] {cmd}")
+            print("-" * 60)
+            success = self.execute_shell_command(cmd, capture=False)
+            print()
+            
+            if not success:
+                print(f"[X] Command {i} failed")
+                break
+        else:
+            print("="*60)
+            print("[OK] All commands completed successfully")
+            print("="*60 + "\n")
+        
+        # Save to history for "save last"
+        self.history.set_last_execution(commands)
     
     def handle_macro_command(self, args: str):
         """
@@ -185,7 +264,15 @@ class CliaraShell:
         args_rest = parts[1] if len(parts) > 1 else ""
         
         if cmd == 'add':
-            self.macro_add(args_rest)
+            # Check for --nl flag
+            if args_rest.startswith('--nl') or '--nl' in args_rest:
+                # Remove --nl flag and get name
+                name = args_rest.replace('--nl', '').strip()
+                if not name:
+                    name = None
+                self.macro_add_nl(name)
+            else:
+                self.macro_add(args_rest)
         elif cmd == 'list':
             self.macro_list()
         elif cmd == 'show':
@@ -237,6 +324,82 @@ class CliaraShell:
         
         self.macros.add(name, commands, description)
         print(f"\n[OK] Macro '{name}' created with {len(commands)} command(s)")
+    
+    def macro_add_nl(self, name: Optional[str] = None):
+        """Create a macro using natural language description."""
+        if not self.nl_handler.llm_enabled:
+            print("[Error] LLM not configured. Set OPENAI_API_KEY in .env file.")
+            return
+        
+        if not name:
+            name = input("Macro name: ").strip()
+            if not name:
+                print("[Error] Macro name required")
+                return
+        
+        print(f"\nCreating macro '{name}' from natural language")
+        print("Describe what this macro should do:")
+        nl_description = input("  > ").strip()
+        
+        if not nl_description:
+            print("[Error] Description required")
+            return
+        
+        print("\n[Generating commands...]")
+        
+        # Build context
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash")
+        }
+        
+        # Generate commands from NL
+        commands = self.nl_handler.generate_commands_from_nl(nl_description, context)
+        
+        if not commands or (len(commands) == 1 and commands[0].startswith("#")):
+            print(f"[Error] Could not generate commands: {commands[0] if commands else 'Unknown error'}")
+            return
+        
+        # Show generated commands
+        print("\nGenerated commands:")
+        for i, cmd in enumerate(commands, 1):
+            print(f"  {i}. {cmd}")
+        
+        # Allow user to edit
+        edit = input("\nEdit commands? (y/n): ").strip().lower()
+        if edit in ['y', 'yes']:
+            print("\nEnter commands (one per line, empty line to finish):")
+            new_commands = []
+            for i, cmd in enumerate(commands, 1):
+                new_cmd = input(f"  {i}. [{cmd}] ").strip()
+                if new_cmd:
+                    new_commands.append(new_cmd)
+                else:
+                    new_commands.append(cmd)
+            
+            # Allow adding more
+            while True:
+                extra = input("  > ").strip()
+                if not extra:
+                    break
+                new_commands.append(extra)
+            
+            commands = new_commands
+        
+        # Safety check
+        level, dangerous = self.safety.check_commands(commands)
+        if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
+            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            confirm = input("\nSave anyway? (yes/no): ").strip().lower()
+            if confirm not in ['yes', 'y']:
+                print("[Cancelled]")
+                return
+        
+        description = input("Description (optional): ").strip() or nl_description
+        
+        self.macros.add(name, commands, description)
+        print(f"\n[OK] Macro '{name}' created with {len(commands)} command(s) from natural language")
     
     def macro_list(self):
         """List all macros."""
@@ -330,6 +493,7 @@ class CliaraShell:
         """Show macro help."""
         print("\n[Macro Commands]\n")
         print("  macro add <name>          Create a new macro")
+        print("  macro add <name> --nl      Create macro from natural language")
         print("  macro list                List all macros")
         print("  macro show <name>         Show macro details")
         print("  macro run <name>          Run a macro")
@@ -443,11 +607,17 @@ class CliaraShell:
         print("Normal Commands:")
         print("  Just type any command - it passes through to your shell")
         print("  Examples: ls, cd, git status, npm install\n")
-        print("Natural Language (Phase 2 - Coming Soon):")
-        print(f"  {self.config.get('nl_prefix')} <query>  - Use natural language")
-        print(f"  Example: {self.config.get('nl_prefix')} kill process on port 3000\n")
+        if self.nl_handler.llm_enabled:
+            print("Natural Language:")
+            print(f"  {self.config.get('nl_prefix')} <query>  - Use natural language")
+            print(f"  Example: {self.config.get('nl_prefix')} kill process on port 3000\n")
+        else:
+            print("Natural Language:")
+            print(f"  {self.config.get('nl_prefix')} <query>  - Use natural language (requires OPENAI_API_KEY)")
+            print(f"  Example: {self.config.get('nl_prefix')} kill process on port 3000\n")
         print("Macros:")
         print("  macro add <name>    - Create a macro")
+        print("  macro add <name> --nl - Create macro from natural language")
         print("  macro list          - List all macros")
         print("  macro help          - Show macro commands")
         print("  <macro-name>        - Run a macro\n")

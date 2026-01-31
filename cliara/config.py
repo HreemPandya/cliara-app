@@ -9,6 +9,13 @@ import platform
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, skip
+
 
 class Config:
     """Manages Cliara configuration and settings."""
@@ -44,6 +51,7 @@ class Config:
         
         self._ensure_directories()
         self.settings = self._load_config()
+        self._load_env_vars()
     
     def _ensure_directories(self):
         """Create config directory if it doesn't exist."""
@@ -152,3 +160,32 @@ class Config:
         """Get the path to macros storage."""
         macro_path = self.settings.get("macro_storage", "~/.cliara/macros.json")
         return Path(macro_path).expanduser()
+    
+    def _load_env_vars(self):
+        """Load environment variables into config."""
+        # Load OpenAI API key from .env if present
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            self.settings["llm_provider"] = "openai"
+            self.settings["llm_api_key"] = openai_key
+            # Don't save API key to config file for security
+            # It will be loaded from .env each time
+    
+    def get_llm_api_key(self) -> Optional[str]:
+        """Get LLM API key from environment or config."""
+        # First check environment (most secure)
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        if api_key:
+            return api_key
+        # Fallback to config (less secure, but allows manual setup)
+        return self.settings.get("llm_api_key")
+    
+    def get_llm_provider(self) -> Optional[str]:
+        """Get LLM provider name."""
+        # Auto-detect from env vars
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
+        if os.getenv("ANTHROPIC_API_KEY"):
+            return "anthropic"
+        # Fallback to config
+        return self.settings.get("llm_provider")

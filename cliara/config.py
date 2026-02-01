@@ -25,6 +25,7 @@ class Config:
         "os": None,  # Auto-detected
         "nl_prefix": "?",
         "macro_storage": "~/.cliara/macros.json",
+        "storage_backend": "json",  # "json" or "postgres"
         "history_size": 1000,
         "safety_checks": True,
         "auto_confirm_safe": False,
@@ -32,6 +33,15 @@ class Config:
         "llm_provider": None,  # "openai" or "anthropic" (Phase 2)
         "llm_api_key": None,  # Encrypted in real impl (Phase 2)
         "first_run_complete": False,
+        # PostgreSQL configuration (optional)
+        "postgres": {
+            "host": "localhost",
+            "port": 5432,
+            "database": "cliara",
+            "user": "cliara",
+            "password": "",  # Should be in environment variable
+        },
+        "connection_string": None,  # Alternative: full connection string
     }
     
     def __init__(self, config_dir: Optional[str] = None):
@@ -93,8 +103,33 @@ class Config:
     
     def save(self):
         """Save current configuration to file."""
+        # Create a copy without sensitive data
+        settings_to_save = self.settings.copy()
+        # Never save API keys to config file - they come from .env
+        settings_to_save.pop("llm_api_key", None)
+        
+        # Never save passwords in postgres config - they come from .env
+        if "postgres" in settings_to_save and isinstance(settings_to_save["postgres"], dict):
+            postgres_copy = settings_to_save["postgres"].copy()
+            postgres_copy.pop("password", None)
+            settings_to_save["postgres"] = postgres_copy
+        
+        # Never save connection strings with passwords
+        if "connection_string" in settings_to_save and settings_to_save["connection_string"]:
+            conn_str = settings_to_save["connection_string"]
+            # Remove password from connection string if present
+            if "@" in conn_str and ":" in conn_str.split("@")[0]:
+                # Format: postgresql://user:password@host
+                parts = conn_str.split("@")
+                auth_part = parts[0].split("://")[1] if "://" in parts[0] else parts[0]
+                if ":" in auth_part:
+                    user = auth_part.split(":")[0]
+                    settings_to_save["connection_string"] = conn_str.replace(
+                        f"{user}:{auth_part.split(':')[1]}", user
+                    )
+        
         with open(self.config_file, 'w') as f:
-            json.dump(self.settings, f, indent=2)
+            json.dump(settings_to_save, f, indent=2)
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration value."""

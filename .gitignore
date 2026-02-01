@@ -60,19 +60,46 @@ TODO.md
 TRANSFORMATION_COMPLETE.md
 USAGE.md
 VERIFICATION.md
-PHASE2_COMPLETE.md
 
 # Old implementation (kept for reference)
 app/
 
-# Test/demo files
+# Test files
+test*.py
+*test*.py
 integration_test.py
+tests/
+test_postgres.py
+
+# Demo/setup files
 setup_demo.py
 examples.py
 demo.bat
 start.bat
 start.sh
-tests/
+setup-postgres.bat
 
-#env
+# Development/testing documentation
+SCALABILITY_ROADMAP.md
+UX_TESTING_GUIDE.md
+TEST_SCENARIOS.md
+QUICK_TEST_COMMANDS.md
+PHASE2_COMPLETE.md
+
+# Temporary files
+echo
+*.tmp
+*.bak
+*.swp
+*~
+
+# Environment files
 .env
+.env.local
+.env.*.local
+
+# Build artifacts
+cliara.egg-info/
+build/
+dist/
+*.egg-info/

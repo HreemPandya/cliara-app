@@ -11,3 +11,6 @@ python-Levenshtein>=0.20.0
 # Phase 2: LLM integration
 openai>=1.0.0
 python-dotenv>=1.0.0  # For loading .env files
+
+# Database backends (optional)
+psycopg2-binary>=2.9.0  # PostgreSQL support

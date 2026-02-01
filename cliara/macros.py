@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+import getpass
+
+from cliara.storage import StorageBackend
+from cliara.storage.factory import get_storage_backend
 
 
 class Macro:
@@ -51,49 +55,49 @@ class Macro:
         """Mark this macro as run (update stats)."""
         self.run_count += 1
         self.last_run = datetime.now().isoformat()
+    
+    def save(self, storage: StorageBackend, user_id: Optional[str] = None):
+        """Save this macro to storage."""
+        storage.add(self, user_id=user_id)
 
 
 class MacroManager:
     """Manages macro storage and operations."""
     
-    def __init__(self, storage_path: Optional[Path] = None):
+    def __init__(self, storage_backend: Optional[StorageBackend] = None, 
+                 storage_path: Optional[Path] = None, config: Optional[Dict[str, Any]] = None):
         """
         Initialize macro manager.
         
         Args:
-            storage_path: Path to macros JSON file
+            storage_backend: Optional StorageBackend instance (if None, will create from config)
+            storage_path: Path to macros JSON file (legacy, for backward compatibility)
+            config: Configuration dictionary for storage backend creation
         """
-        if storage_path:
-            self.storage_path = Path(storage_path).expanduser()
+        if storage_backend:
+            self.storage = storage_backend
+        elif config:
+            self.storage = get_storage_backend(config)
         else:
-            self.storage_path = Path.home() / ".cliara" / "macros.json"
+            # Default to JSON for backward compatibility
+            if storage_path:
+                storage_path = Path(storage_path).expanduser()
+            else:
+                storage_path = Path.home() / ".cliara" / "macros.json"
+            from cliara.storage.json_backend import JSONStorage
+            self.storage = JSONStorage(storage_path)
         
-        self._ensure_storage()
-        self.macros: Dict[str, Macro] = self._load_macros()
+        # Get current user ID (for multi-user support)
+        self.user_id = self._get_user_id()
     
-    def _ensure_storage(self):
-        """Ensure storage directory and file exist."""
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.storage_path.exists():
-            self.storage_path.write_text("{}")
-    
-    def _load_macros(self) -> Dict[str, Macro]:
-        """Load macros from storage."""
+    def _get_user_id(self) -> Optional[str]:
+        """Get current user ID."""
+        # For now, use system username
+        # In future, could be from config or authentication
         try:
-            with open(self.storage_path, 'r') as f:
-                data = json.load(f)
-                return {
-                    name: Macro.from_dict(name, macro_data)
-                    for name, macro_data in data.items()
-                }
-        except (json.JSONDecodeError, FileNotFoundError):
-            return {}
-    
-    def _save_macros(self):
-        """Save macros to storage."""
-        data = {name: macro.to_dict() for name, macro in self.macros.items()}
-        with open(self.storage_path, 'w') as f:
-            json.dump(data, f, indent=2)
+            return getpass.getuser()
+        except:
+            return None
     
     def add(self, name: str, commands: List[str], description: str = "", 
             tags: Optional[List[str]] = None) -> Macro:
@@ -110,13 +114,12 @@ class MacroManager:
             Created/updated Macro object
         """
         macro = Macro(name, commands, description, tags=tags)
-        self.macros[name] = macro
-        self._save_macros()
+        self.storage.add(macro, user_id=self.user_id)
         return macro
     
     def get(self, name: str) -> Optional[Macro]:
         """Get a macro by name."""
-        return self.macros.get(name)
+        return self.storage.get(name, user_id=self.user_id)
     
     def delete(self, name: str) -> bool:
         """
@@ -125,15 +128,11 @@ class MacroManager:
         Returns:
             True if deleted, False if not found
         """
-        if name in self.macros:
-            del self.macros[name]
-            self._save_macros()
-            return True
-        return False
+        return self.storage.delete(name, user_id=self.user_id)
     
     def list_all(self) -> Dict[str, Macro]:
         """Return all macros."""
-        return self.macros.copy()
+        return self.storage.list_all(user_id=self.user_id)
     
     def search(self, query: str) -> List[Macro]:
         """
@@ -145,16 +144,7 @@ class MacroManager:
         Returns:
             List of matching macros
         """
-        query_lower = query.lower()
-        results = []
-        
-        for macro in self.macros.values():
-            if (query_lower in macro.name.lower() or
-                query_lower in macro.description.lower() or
-                any(query_lower in tag.lower() for tag in macro.tags)):
-                results.append(macro)
-        
-        return results
+        return self.storage.search(query, user_id=self.user_id)
     
     def find_fuzzy(self, query: str, threshold: int = 70) -> Optional[str]:
         """
@@ -174,7 +164,8 @@ class MacroManager:
             best_match = None
             best_score = threshold
             
-            for name in self.macros.keys():
+            macros = self.list_all()
+            for name in macros.keys():
                 score = fuzz.ratio(query_normalized, name.lower())
                 if score > best_score:
                     best_score = score
@@ -183,31 +174,32 @@ class MacroManager:
             return best_match
         except ImportError:
             # Fallback to exact match if thefuzz not installed
-            return query if query in self.macros else None
+            return query if self.exists(query) else None
     
     def exists(self, name: str) -> bool:
         """Check if a macro exists."""
-        return name in self.macros
+        return self.storage.exists(name, user_id=self.user_id)
     
     def count(self) -> int:
         """Return number of macros."""
-        return len(self.macros)
+        return self.storage.count(user_id=self.user_id)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get macro statistics."""
-        if not self.macros:
+        macros = self.list_all()
+        if not macros:
             return {
                 "total": 0,
                 "most_used": None,
                 "recently_used": None,
             }
         
-        most_used = max(self.macros.values(), key=lambda m: m.run_count)
-        recently_used_list = [m for m in self.macros.values() if m.last_run]
+        most_used = max(macros.values(), key=lambda m: m.run_count)
+        recently_used_list = [m for m in macros.values() if m.last_run]
         recently_used = max(recently_used_list, key=lambda m: m.last_run) if recently_used_list else None
         
         return {
-            "total": len(self.macros),
+            "total": len(macros),
             "most_used": most_used.name if most_used.run_count > 0 else None,
             "recently_used": recently_used.name if recently_used else None,
         }
@@ -222,6 +214,5 @@ class MacroManager:
     def import_macro(self, name: str, data: Dict[str, Any]) -> Macro:
         """Import a macro from dictionary."""
         macro = Macro.from_dict(name, data)
-        self.macros[name] = macro
-        self._save_macros()
+        self.storage.add(macro, user_id=self.user_id)
         return macro

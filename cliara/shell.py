@@ -54,7 +54,15 @@ class CliaraShell:
             config: Configuration object (creates default if None)
         """
         self.config = config or Config()
-        self.macros = MacroManager(self.config.get_macros_path())
+        # Pass config dict to MacroManager for storage backend selection
+        config_dict = {
+            "storage_backend": self.config.get("storage_backend", "json"),
+            "storage_path": str(self.config.get_macros_path()),
+            "macro_storage": str(self.config.get_macros_path()),
+            "postgres": self.config.get("postgres", {}),
+            "connection_string": self.config.get("connection_string"),
+        }
+        self.macros = MacroManager(config=config_dict)
         self.safety = SafetyChecker()
         self.nl_handler = NLHandler(self.safety)
         self.history = CommandHistory(self.config.get("history_size", 1000))
@@ -551,7 +559,8 @@ class CliaraShell:
             print(f"[OK] Macro '{name}' completed successfully")
             print("="*60 + "\n")
             macro.mark_run()
-            self.macros._save_macros()
+            # Save updated macro back to storage
+            self.macros.storage.add(macro, user_id=self.macros.user_id)
         
         # Save to history for "save last"
         self.history.set_last_execution(macro.commands)

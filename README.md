@@ -65,10 +65,15 @@ cliara:proj ❯ macro save last as hello
 - Multi-tier safety checks
 - Auto-configuration
 
-### Phase 2 🚧 (Coming)
-- LLM integration (OpenAI/Anthropic)
+### Phase 2 ✅ (Complete)
+- LLM integration (OpenAI)
 - Natural language → commands
 - Context-aware suggestions
+
+### Storage Backends
+- **JSON** (default) - Simple file-based storage
+- **PostgreSQL** - Scalable database backend for millions of macros
+  - See [PostgreSQL Setup Guide](docs/POSTGRES_SETUP.md)
 
 ## Requirements
 

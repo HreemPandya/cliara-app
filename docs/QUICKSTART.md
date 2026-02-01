@@ -18,11 +18,11 @@ pip install -e .
 ## Run Cliara
 
 ```bash
-# Start Cliara shell
-python -m cliara.main
-
-# Or if PATH is set:
+# Start Cliara shell (after installation)
 cliara
+
+# Alternative (if cliara command not found):
+python -m cliara.main
 ```
 
 ---
@@ -326,7 +326,7 @@ Goodbye!
 ### Cliara command not found
 
 ```bash
-# Use Python module instead:
+# Use Python module as fallback:
 python -m cliara.main
 
 # Or add Scripts to PATH (Windows)

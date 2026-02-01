@@ -115,11 +115,14 @@ class CliaraShell:
         """Main shell loop."""
         self.print_banner()
         
+        # Use safe prompt character for Windows
+        prompt_arrow = ">" if platform.system() == "Windows" else "❯"
+        
         while self.running:
             try:
                 # Get current directory for prompt
                 cwd = Path.cwd().name
-                prompt = f"cliara:{cwd} ❯ "
+                prompt = f"cliara:{cwd} {prompt_arrow} "
                 
                 user_input = input(prompt).strip()
                 
@@ -508,7 +511,7 @@ class CliaraShell:
         print("  macro delete <name>       Delete a macro")
         print("  macro save last as <name> Save last commands as macro")
         print("\nYou can also run macros by just typing their name:")
-        print("  cliara ❯ my-macro\n")
+        print("  cliara > my-macro\n")
     
     def run_macro(self, name: str):
         """Execute a macro."""

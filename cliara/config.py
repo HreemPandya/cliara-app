@@ -9,10 +9,16 @@ import platform
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-# Load .env file if it exists
+# Load .env file if it exists - search in common locations
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
+    from dotenv import load_dotenv, find_dotenv
+    # Try to find .env file starting from current directory
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path, override=True)
+    else:
+        # Fallback: try to load from current directory
+        load_dotenv(override=True)
 except ImportError:
     pass  # python-dotenv not installed, skip
 
@@ -176,15 +182,15 @@ class Config:
         print("  Quick Start Guide")
         print("="*60)
         print("\n1. Normal commands work as usual:")
-        print("   cliara ❯ ls -la")
-        print("   cliara ❯ cd projects")
+        print("   cliara > ls -la")
+        print("   cliara > cd projects")
         print("\n2. Use ? for natural language (Phase 2):")
-        print("   cliara ❯ ? kill whatever is using port 3000")
+        print("   cliara > ? kill whatever is using port 3000")
         print("\n3. Create and run macros:")
-        print("   cliara ❯ macro add mycommand")
-        print("   cliara ❯ macro run mycommand")
+        print("   cliara > macro add mycommand")
+        print("   cliara > macro run mycommand")
         print("\n4. Save your last command as a macro:")
-        print("   cliara ❯ macro save last as quickfix")
+        print("   cliara > macro save last as quickfix")
         print("\nType 'help' anytime for more info!")
         print("="*60 + "\n")
         

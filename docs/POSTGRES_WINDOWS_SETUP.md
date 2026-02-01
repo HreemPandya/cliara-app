@@ -197,7 +197,7 @@ Edit `~/.cliara/config.json` (or create it):
 ### Step 4: Test Cliara with PostgreSQL
 
 ```powershell
-python -m cliara.main
+cliara
 ```
 
 Try creating a macro:
@@ -329,6 +329,6 @@ If you installed pgAdmin 4:
 2. ✅ Database `cliara` created
 3. ✅ User `cliara` created
 4. ✅ Cliara config updated
-5. ✅ Test with: `python -m cliara.main`
+5. ✅ Test with: `cliara`
 
 **You're ready to use PostgreSQL with Cliara!** 🚀

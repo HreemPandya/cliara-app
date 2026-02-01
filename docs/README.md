@@ -19,11 +19,14 @@ Cliara wraps your existing shell (bash, zsh, PowerShell, cmd) and adds:
 # Install with pip
 pip install -e .
 
-# Or with pipx (recommended)
+# Or with pipx (recommended - handles PATH automatically)
 pipx install .
 
 # Start Cliara
 cliara
+
+# If cliara command not found, use:
+python -m cliara.main
 ```
 
 ### First Run

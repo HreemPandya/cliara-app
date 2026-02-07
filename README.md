@@ -8,8 +8,12 @@ An intelligent shell wrapper that understands natural language and macros.
 # Install
 pip install -e .
 
+# Setup environment
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY
+
 # Run
-python -m cliara.main
+cliara
 ```
 
 ## Documentation
@@ -29,31 +33,46 @@ Cliara wraps your existing shell and adds:
 ## Installation
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/yourusername/cliara.git
+cd cliara
+
+# 2. Install dependencies
 pip install -e .
+
+# 3. Setup environment
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY
+
+# 4. Run
+cliara
 ```
 
 ## Usage
 
 ```bash
 # Start Cliara
-python -m cliara.main
+cliara
 
 # Normal commands work
-cliara:proj ❯ ls -la
-cliara:proj ❯ git status
+cliara:proj > ls -la
+cliara:proj > git status
+
+# Natural language (requires OPENAI_API_KEY)
+cliara:proj > ? kill process on port 3000
 
 # Create a macro
-cliara:proj ❯ macro add test
+cliara:proj > macro add test
   > echo Step 1
   > echo Step 2
   > 
 
 # Run it
-cliara:proj ❯ test
+cliara:proj > test
 
 # Save last command
-cliara:proj ❯ echo "hello"
-cliara:proj ❯ macro save last as hello
+cliara:proj > echo "hello"
+cliara:proj > macro save last as hello
 ```
 
 ## Features
@@ -80,9 +99,19 @@ cliara:proj ❯ macro save last as hello
 - Python 3.8+
 - Windows, macOS, or Linux
 
+### Windows Users
+After installation, you may need to add Python Scripts to your PATH:
+```
+C:\Users\<YourName>\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\LocalCache\local-packages\Python312\Scripts
+```
+Or restart your computer for PATH changes to take effect.
+
 ## Version
 
-**v0.2.0** - Phase 1 Complete
+**v0.2.0** - Phase 2 Complete
+- ✅ Natural language support
+- ✅ Windows compatibility fixes
+- ✅ PostgreSQL backend support
 
 ## License
 

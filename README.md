@@ -25,7 +25,8 @@ cliara
 
 Cliara wraps your existing shell and adds:
 - 🗣️ Natural language commands with `?` prefix (Phase 2)
-- 📦 Powerful macro system
+- 📦 Powerful macro system (create, edit, delete, run)
+
 - 🛡️ Safety checks for dangerous operations
 - 💾 Save last command as macro instantly
 - 🚀 Normal commands work unchanged
@@ -67,6 +68,12 @@ cliara:proj > macro add test
   > echo Step 2
   > 
 
+# Edit an existing macro
+cliara:proj > macro edit test
+  > echo Updated Step 1
+  > echo Updated Step 2
+  > 
+
 # Run it
 cliara:proj > test
 
@@ -79,7 +86,7 @@ cliara:proj > macro save last as hello
 
 ### Phase 1 ✅ (Complete)
 - Shell wrapper with pass-through
-- Interactive macro system
+- Interactive macro system (add, edit, delete, show, run)
 - Save last command as macro
 - Multi-tier safety checks
 - Auto-configuration

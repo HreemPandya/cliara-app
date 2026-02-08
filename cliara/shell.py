@@ -268,7 +268,7 @@ class CliaraShell:
         parts = args.split(maxsplit=1)
         if not parts:
             print("Usage: macro <command> [args]")
-            print("Commands: add, list, show, run, delete, save, help")
+            print("Commands: add, edit, list, show, run, delete, save, help")
             return
         
         cmd = parts[0].lower()
@@ -290,6 +290,8 @@ class CliaraShell:
             self.macro_show(args_rest)
         elif cmd == 'run':
             self.run_macro(args_rest)
+        elif cmd == 'edit':
+            self.macro_edit(args_rest)
         elif cmd == 'delete':
             self.macro_delete(args_rest)
         elif cmd == 'save':
@@ -453,6 +455,58 @@ class CliaraShell:
             print(f"Last run: {macro.last_run}")
         print()
     
+    def macro_edit(self, name: str):
+        """Edit an existing macro's commands and description."""
+        if not name:
+            name = input("Macro name: ").strip()
+            if not name:
+                print("[Error] Macro name required")
+                return
+
+        macro = self.macros.get(name)
+        if not macro:
+            print(f"[Error] Macro '{name}' not found")
+            return
+
+        # Show current commands
+        print(f"\n[Editing] {name}")
+        print(f"Current description: {macro.description or 'None'}")
+        print(f"Current commands ({len(macro.commands)}):")
+        for i, cmd in enumerate(macro.commands, 1):
+            print(f"  {i}. {cmd}")
+
+        print("\nEnter new commands (one per line, empty line to finish).")
+        print("Press Enter on the first prompt with no input to keep existing commands.\n")
+
+        commands = []
+        first = True
+        while True:
+            cmd = input("  > ").strip()
+            if not cmd:
+                if first:
+                    # User pressed Enter immediately — keep existing commands
+                    commands = macro.commands
+                    print("  (keeping existing commands)")
+                break
+            first = False
+            commands.append(cmd)
+
+        # Update description
+        new_desc = input(f"New description (Enter to keep '{macro.description or ''}'): ").strip()
+        description = new_desc if new_desc else macro.description
+
+        # Safety check on the (possibly new) commands
+        level, dangerous = self.safety.check_commands(commands)
+        if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
+            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            confirm = input("\nSave anyway? (yes/no): ").strip().lower()
+            if confirm not in ['yes', 'y']:
+                print("[Cancelled]")
+                return
+
+        self.macros.add(name, commands, description)
+        print(f"\n[OK] Macro '{name}' updated with {len(commands)} command(s)")
+
     def macro_delete(self, name: str):
         """Delete a macro."""
         if not name:
@@ -505,6 +559,7 @@ class CliaraShell:
         print("\n[Macro Commands]\n")
         print("  macro add <name>          Create a new macro")
         print("  macro add <name> --nl      Create macro from natural language")
+        print("  macro edit <name>         Edit an existing macro")
         print("  macro list                List all macros")
         print("  macro show <name>         Show macro details")
         print("  macro run <name>          Run a macro")
@@ -630,6 +685,7 @@ class CliaraShell:
         print("Macros:")
         print("  macro add <name>    - Create a macro")
         print("  macro add <name> --nl - Create macro from natural language")
+        print("  macro edit <name>   - Edit an existing macro")
         print("  macro list          - List all macros")
         print("  macro help          - Show macro commands")
         print("  <macro-name>        - Run a macro\n")

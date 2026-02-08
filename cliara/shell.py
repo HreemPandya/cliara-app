@@ -268,7 +268,7 @@ class CliaraShell:
         parts = args.split(maxsplit=1)
         if not parts:
             print("Usage: macro <command> [args]")
-            print("Commands: add, edit, list, show, run, delete, save, help")
+            print("Commands: add, edit, list, search, show, run, delete, save, help")
             return
         
         cmd = parts[0].lower()
@@ -286,6 +286,8 @@ class CliaraShell:
                 self.macro_add(args_rest)
         elif cmd == 'list':
             self.macro_list()
+        elif cmd == 'search':
+            self.macro_search(args_rest)
         elif cmd == 'show':
             self.macro_show(args_rest)
         elif cmd == 'run':
@@ -433,6 +435,29 @@ class CliaraShell:
                 print(f"    Run {macro.run_count} time{'s' if macro.run_count != 1 else ''}")
         print()
     
+    def macro_search(self, keyword: str):
+        """Search macros by name, description, or tags."""
+        if not keyword or not keyword.strip():
+            print("[Error] Search keyword required")
+            print("Usage: macro search <keyword>")
+            return
+        
+        results = self.macros.search(keyword.strip())
+        
+        if not results:
+            print(f"\nNo macros matching '{keyword.strip()}'.")
+            return
+        
+        print(f"\n[Search: '{keyword.strip()}'] {len(results)} result(s)\n")
+        for macro in sorted(results, key=lambda m: m.name):
+            desc = macro.description or "No description"
+            cmd_count = len(macro.commands)
+            print(f"  • {macro.name}")
+            print(f"    {desc} ({cmd_count} command{'s' if cmd_count != 1 else ''})")
+            if macro.run_count > 0:
+                print(f"    Run {macro.run_count} time{'s' if macro.run_count != 1 else ''}")
+        print()
+    
     def macro_show(self, name: str):
         """Show details of a macro."""
         if not name:
@@ -561,6 +586,7 @@ class CliaraShell:
         print("  macro add <name> --nl      Create macro from natural language")
         print("  macro edit <name>         Edit an existing macro")
         print("  macro list                List all macros")
+        print("  macro search <keyword>    Search macros by name, description, or tags")
         print("  macro show <name>         Show macro details")
         print("  macro run <name>          Run a macro")
         print("  macro delete <name>       Delete a macro")
@@ -687,6 +713,7 @@ class CliaraShell:
         print("  macro add <name> --nl - Create macro from natural language")
         print("  macro edit <name>   - Edit an existing macro")
         print("  macro list          - List all macros")
+        print("  macro search <word> - Search macros")
         print("  macro help          - Show macro commands")
         print("  <macro-name>        - Run a macro\n")
         print("Other:")

@@ -17,18 +17,113 @@ from cliara.nl_handler import NLHandler
 
 
 class CommandHistory:
-    """Track command history for 'macro save last' feature."""
+    """Track command history with on-disk persistence and readline support."""
     
-    def __init__(self, max_size: int = 1000):
+    def __init__(self, max_size: int = 1000, history_file: Optional[Path] = None):
         self.history: List[str] = []
         self.max_size = max_size
         self.last_commands: List[str] = []  # Commands from last execution
+        self.history_file: Optional[Path] = history_file
+        self._readline = None  # Will be set during setup_readline()
+        
+        # Load persisted history from disk
+        if self.history_file:
+            self._load_from_file()
     
+    # ------------------------------------------------------------------
+    # Readline integration (arrow-key recall across sessions)
+    # ------------------------------------------------------------------
+    def setup_readline(self):
+        """
+        Set up readline so arrow-up/down recalls previous commands.
+        Must be called once before the main input loop.
+        """
+        try:
+            # On Windows, the built-in readline stub doesn't work.
+            # Try pyreadline3 first, then fall back to the stdlib module.
+            try:
+                import pyreadline3  # noqa: F401  (import activates it)
+                import readline
+            except ImportError:
+                import readline
+            
+            self._readline = readline
+            
+            # Feed persisted history into readline's buffer
+            for cmd in self.history:
+                readline.add_history(cmd)
+            
+            # Try to bind tab-completion (nice-to-have, not essential)
+            try:
+                readline.parse_and_bind("tab: complete")
+            except Exception:
+                pass
+            
+        except ImportError:
+            # readline completely unavailable – arrow keys won't work,
+            # but file persistence still will.
+            self._readline = None
+    
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+    def _load_from_file(self):
+        """Load history lines from the on-disk file."""
+        if not self.history_file or not self.history_file.exists():
+            return
+        try:
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                lines = [line.rstrip("\n") for line in f if line.strip()]
+            # Keep only the last max_size entries
+            self.history = lines[-self.max_size:]
+        except Exception:
+            # Corrupt / unreadable file – start fresh
+            self.history = []
+    
+    def _append_to_file(self, command: str):
+        """Append a single command to the on-disk history file."""
+        if not self.history_file:
+            return
+        try:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.history_file, "a", encoding="utf-8") as f:
+                f.write(command + "\n")
+        except Exception:
+            pass  # Non-critical – don't crash the shell
+    
+    def _trim_file(self):
+        """Trim the on-disk file to max_size lines (called occasionally)."""
+        if not self.history_file or not self.history_file.exists():
+            return
+        try:
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if len(lines) > self.max_size * 2:
+                # Only trim when the file is significantly over limit
+                with open(self.history_file, "w", encoding="utf-8") as f:
+                    f.writelines(lines[-self.max_size:])
+        except Exception:
+            pass
+    
+    # ------------------------------------------------------------------
+    # Public API (unchanged signatures)
+    # ------------------------------------------------------------------
     def add(self, command: str):
-        """Add command to history."""
+        """Add command to history (memory + disk + readline)."""
         self.history.append(command)
         if len(self.history) > self.max_size:
             self.history.pop(0)
+        
+        # Persist to disk
+        self._append_to_file(command)
+        self._trim_file()
+        
+        # Push into readline buffer so arrow-up sees it immediately
+        if self._readline:
+            try:
+                self._readline.add_history(command)
+            except Exception:
+                pass
     
     def set_last_execution(self, commands: List[str]):
         """Store commands from last execution."""
@@ -65,7 +160,11 @@ class CliaraShell:
         self.macros = MacroManager(config=config_dict)
         self.safety = SafetyChecker()
         self.nl_handler = NLHandler(self.safety)
-        self.history = CommandHistory(self.config.get("history_size", 1000))
+        history_file = self.config.config_dir / "history.txt"
+        self.history = CommandHistory(
+            max_size=self.config.get("history_size", 1000),
+            history_file=history_file,
+        )
         self.running = True
         self.shell_path = self.config.get("shell")
         
@@ -114,6 +213,9 @@ class CliaraShell:
     def run(self):
         """Main shell loop."""
         self.print_banner()
+        
+        # Enable arrow-key history recall
+        self.history.setup_readline()
         
         # Use safe prompt character for Windows
         prompt_arrow = ">" if platform.system() == "Windows" else "❯"

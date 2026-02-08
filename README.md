@@ -29,6 +29,7 @@ Cliara wraps your existing shell and adds:
 
 - 🛡️ Safety checks for dangerous operations
 - 💾 Save last command as macro instantly
+- 🔄 Persistent command history with arrow-key recall across sessions
 - 🚀 Normal commands work unchanged
 
 ## Installation
@@ -86,8 +87,9 @@ cliara:proj > macro save last as hello
 
 ### Phase 1 ✅ (Complete)
 - Shell wrapper with pass-through
-- Interactive macro system (add, edit, delete, show, run)
+- Interactive macro system (add, edit, delete, show, run, search)
 - Save last command as macro
+- Persistent command history (`~/.cliara/history.txt`) with arrow-key recall
 - Multi-tier safety checks
 - Auto-configuration
 

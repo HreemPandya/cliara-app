@@ -287,6 +287,11 @@ class CliaraShell:
                 self.run_macro(fuzzy_match)
                 return
         
+        # Intercept cd commands so they change Cliara's own working directory
+        if user_input == 'cd' or user_input.startswith('cd '):
+            self._handle_cd(user_input)
+            return
+
         # Default: pass through to underlying shell
         self.execute_shell_command(user_input)
     
@@ -370,7 +375,7 @@ class CliaraShell:
         parts = args.split(maxsplit=1)
         if not parts:
             print("Usage: macro <command> [args]")
-            print("Commands: add, edit, list, search, show, run, delete, save, help")
+            print("Commands: add, edit, list, search, show, run, delete, rename, save, help")
             return
         
         cmd = parts[0].lower()
@@ -398,6 +403,8 @@ class CliaraShell:
             self.macro_edit(args_rest)
         elif cmd == 'delete':
             self.macro_delete(args_rest)
+        elif cmd == 'rename':
+            self.macro_rename(args_rest)
         elif cmd == 'save':
             self.macro_save_last(args_rest)
         elif cmd == 'help':
@@ -651,6 +658,29 @@ class CliaraShell:
         else:
             print("[Cancelled]")
     
+    def macro_rename(self, args: str):
+        """Rename a macro."""
+        parts = args.split()
+        if len(parts) != 2:
+            print("Usage: macro rename <old_name> <new_name>")
+            return
+
+        old_name, new_name = parts
+
+        macro = self.macros.get(old_name)
+        if not macro:
+            print(f"[Error] Macro '{old_name}' not found")
+            return
+
+        if self.macros.exists(new_name):
+            print(f"[Error] Macro '{new_name}' already exists")
+            return
+
+        # Re-create under new name, then delete old
+        self.macros.add(new_name, macro.commands, macro.description, tags=macro.tags)
+        self.macros.delete(old_name)
+        print(f"[OK] Macro '{old_name}' renamed to '{new_name}'")
+
     def macro_save_last(self, args: str):
         """Save last executed commands as a macro."""
         # Parse "save last as <name>"
@@ -692,6 +722,7 @@ class CliaraShell:
         print("  macro show <name>         Show macro details")
         print("  macro run <name>          Run a macro")
         print("  macro delete <name>       Delete a macro")
+        print("  macro rename <old> <new>  Rename a macro")
         print("  macro save last as <name> Save last commands as macro")
         print("\nYou can also run macros by just typing their name:")
         print("  cliara > my-macro\n")
@@ -751,6 +782,35 @@ class CliaraShell:
         # Save to history for "save last"
         self.history.set_last_execution(macro.commands)
     
+    def _handle_cd(self, user_input: str):
+        """
+        Handle cd commands by changing Cliara's own working directory.
+        
+        subprocess.run spawns a child shell, so cd in a subprocess has no
+        effect on the parent process. We intercept it here and use os.chdir()
+        so the prompt reflects the real working directory.
+        """
+        # Parse target directory
+        args = user_input[2:].strip()
+        if not args:
+            # Bare "cd" goes to home directory
+            target = Path.home()
+        elif args == '-':
+            # "cd -" is not supported without tracking OLDPWD
+            print("[Error] cd - is not supported")
+            return
+        else:
+            target = Path(args).expanduser()
+
+        try:
+            os.chdir(target)
+        except FileNotFoundError:
+            print(f"[Error] cd: no such directory: {args}")
+        except PermissionError:
+            print(f"[Error] cd: permission denied: {args}")
+        except Exception as e:
+            print(f"[Error] cd: {e}")
+
     def execute_shell_command(self, command: str, capture: bool = False) -> bool:
         """
         Execute a command in the underlying shell.

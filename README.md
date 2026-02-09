@@ -30,6 +30,8 @@ Cliara wraps your existing shell and adds:
 - 🛡️ Safety checks for dangerous operations
 - 💾 Save last command as macro instantly
 - 🔄 Persistent command history with arrow-key recall across sessions
+- ✏️ Rename macros without recreating them
+- 📂 Proper `cd` handling (changes Cliara's own working directory)
 - 🚀 Normal commands work unchanged
 
 ## Installation
@@ -78,16 +80,23 @@ cliara:proj > macro edit test
 # Run it
 cliara:proj > test
 
+# Rename a macro
+cliara:proj > macro rename old-name new-name
+
 # Save last command
 cliara:proj > echo "hello"
 cliara:proj > macro save last as hello
+
+# cd works correctly (changes Cliara's own directory)
+cliara:proj > cd src
+cliara:src >
 ```
 
 ## Features
 
 ### Phase 1 ✅ (Complete)
 - Shell wrapper with pass-through
-- Interactive macro system (add, edit, delete, show, run, search)
+- Interactive macro system (add, edit, delete, rename, show, run, search)
 - Save last command as macro
 - Persistent command history (`~/.cliara/history.txt`) with arrow-key recall
 - Multi-tier safety checks

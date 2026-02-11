@@ -16,6 +16,60 @@ from cliara.safety import SafetyChecker, DangerLevel
 from cliara.nl_handler import NLHandler
 
 
+# ---------------------------------------------------------------------------
+# Colorized output helpers
+# ---------------------------------------------------------------------------
+
+def _supports_color() -> bool:
+    """Check if the terminal supports ANSI colors."""
+    if os.getenv("NO_COLOR"):
+        return False
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    return True
+
+_COLOR = _supports_color()
+
+# Enable ANSI escape sequences on Windows 10+
+if _COLOR and platform.system() == "Windows":
+    os.system("")
+
+
+def _c(code: str, text: str) -> str:
+    """Wrap *text* with an ANSI escape if colors are enabled."""
+    return f"\033[{code}m{text}\033[0m" if _COLOR else text
+
+
+def print_success(msg: str):
+    """Print a green success message."""
+    print(_c("32", msg))
+
+
+def print_error(msg: str, **kw):
+    """Print a red error message."""
+    print(_c("31", msg), **kw)
+
+
+def print_warning(msg: str):
+    """Print a yellow warning message."""
+    print(_c("33", msg))
+
+
+def print_info(msg: str):
+    """Print a cyan informational message."""
+    print(_c("36", msg))
+
+
+def print_header(msg: str):
+    """Print a bold header message."""
+    print(_c("1", msg))
+
+
+def print_dim(msg: str):
+    """Print a dimmed/muted message."""
+    print(_c("2", msg))
+
+
 class CommandHistory:
     """Track command history with on-disk persistence and readline support."""
     
@@ -182,32 +236,32 @@ class CliaraShell:
         
         if provider and api_key:
             if self.nl_handler.initialize_llm(provider, api_key):
-                print(f"[OK] LLM initialized ({provider})")
+                print_success(f"[OK] LLM initialized ({provider})")
             else:
-                print(f"[Warning] Failed to initialize LLM ({provider})")
+                print_warning(f"[Warning] Failed to initialize LLM ({provider})")
         else:
             # LLM not configured, will use stub responses
             pass
     
     def print_banner(self):
         """Print welcome banner."""
-        print("\n" + "="*60)
-        print("  Cliara - AI-Powered Shell")
+        print_header("\n" + "="*60)
+        print_info("  Cliara - AI-Powered Shell")
         print(f"  Shell: {self.shell_path}")
         if self.nl_handler.llm_enabled:
-            print(f"  LLM: {self.nl_handler.provider.upper()} (Ready)")
+            print_success(f"  LLM: {self.nl_handler.provider.upper()} (Ready)")
         else:
-            print("  LLM: Not configured (set OPENAI_API_KEY in .env)")
-        print("="*60)
+            print_dim("  LLM: Not configured (set OPENAI_API_KEY in .env)")
+        print_header("="*60)
         print("\nQuick tips:")
-        print("  • Normal commands work as usual")
+        print_dim("  • Normal commands work as usual")
         if self.nl_handler.llm_enabled:
-            print(f"  • Use '{self.config.get('nl_prefix')}' for natural language")
+            print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language")
         else:
-            print(f"  • Use '{self.config.get('nl_prefix')}' for natural language (requires API key)")
-        print("  • Type 'macro help' for macro commands")
-        print("  • Type 'help' for all commands")
-        print("  • Type 'exit' to quit")
+            print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language (requires API key)")
+        print_dim("  • Type 'macro help' for macro commands")
+        print_dim("  • Type 'help' for all commands")
+        print_dim("  • Type 'exit' to quit")
         print()
     
     def run(self):
@@ -240,7 +294,7 @@ class CliaraShell:
                 print("\nGoodbye!")
                 break
             except Exception as e:
-                print(f"[Error] {e}")
+                print_error(f"[Error] {e}")
                 if os.getenv("DEBUG"):
                     import traceback
                     traceback.print_exc()
@@ -303,11 +357,11 @@ class CliaraShell:
             query: Natural language query
         """
         if not query:
-            print("[Error] Please provide a query after '?'")
+            print_error("[Error] Please provide a query after '?'")
             return
         
-        print(f"\n[Processing] {query}")
-        print("Generating commands...\n")
+        print_info(f"\n[Processing] {query}")
+        print_dim("Generating commands...\n")
         
         # Build context
         context = {
@@ -320,11 +374,11 @@ class CliaraShell:
         commands, explanation, danger_level = self.nl_handler.process_query(query, context)
         
         if not commands:
-            print(f"[Error] {explanation}")
+            print_error(f"[Error] {explanation}")
             return
         
         # Show generated commands
-        print(f"[Explanation] {explanation}\n")
+        print_info(f"[Explanation] {explanation}\n")
         print("Generated commands:")
         for i, cmd in enumerate(commands, 1):
             print(f"  {i}. {cmd}")
@@ -335,32 +389,32 @@ class CliaraShell:
             prompt = self.safety.get_confirmation_prompt(danger_level)
             response = input(prompt).strip()
             if not self.safety.validate_confirmation(response, danger_level):
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
         else:
             confirm = input("\nRun these commands? (y/n): ").strip().lower()
             if confirm not in ['y', 'yes']:
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
         
         # Execute commands
-        print("\n" + "="*60)
-        print("EXECUTING COMMANDS")
-        print("="*60 + "\n")
+        print_header("\n" + "="*60)
+        print_header("EXECUTING COMMANDS")
+        print_header("="*60 + "\n")
         
         for i, cmd in enumerate(commands, 1):
-            print(f"[{i}/{len(commands)}] {cmd}")
+            print_info(f"[{i}/{len(commands)}] {cmd}")
             print("-" * 60)
             success = self.execute_shell_command(cmd, capture=False)
             print()
             
             if not success:
-                print(f"[X] Command {i} failed")
+                print_error(f"[X] Command {i} failed")
                 break
         else:
-            print("="*60)
-            print("[OK] All commands completed successfully")
-            print("="*60 + "\n")
+            print_header("="*60)
+            print_success("[OK] All commands completed successfully")
+            print_header("="*60 + "\n")
         
         # Save to history for "save last"
         self.history.set_last_execution(commands)
@@ -410,19 +464,19 @@ class CliaraShell:
         elif cmd == 'help':
             self.macro_help()
         else:
-            print(f"Unknown macro command: {cmd}")
-            print("Type 'macro help' for available commands")
+            print_error(f"Unknown macro command: {cmd}")
+            print_dim("Type 'macro help' for available commands")
     
     def macro_add(self, name: str):
         """Create a new macro interactively."""
         if not name:
             name = input("Macro name: ").strip()
             if not name:
-                print("[Error] Macro name required")
+                print_error("[Error] Macro name required")
                 return
         
-        print(f"\nCreating macro '{name}'")
-        print("Enter commands (one per line, empty line to finish):")
+        print_info(f"\nCreating macro '{name}'")
+        print_dim("Enter commands (one per line, empty line to finish):")
         
         commands = []
         while True:
@@ -432,7 +486,7 @@ class CliaraShell:
             commands.append(cmd)
         
         if not commands:
-            print("[Error] At least one command required")
+            print_error("[Error] At least one command required")
             return
         
         description = input("Description (optional): ").strip()
@@ -440,36 +494,36 @@ class CliaraShell:
         # Safety check
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
-            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            print_warning(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
         
         self.macros.add(name, commands, description)
-        print(f"\n[OK] Macro '{name}' created with {len(commands)} command(s)")
+        print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s)")
     
     def macro_add_nl(self, name: Optional[str] = None):
         """Create a macro using natural language description."""
         if not self.nl_handler.llm_enabled:
-            print("[Error] LLM not configured. Set OPENAI_API_KEY in .env file.")
+            print_error("[Error] LLM not configured. Set OPENAI_API_KEY in .env file.")
             return
         
         if not name:
             name = input("Macro name: ").strip()
             if not name:
-                print("[Error] Macro name required")
+                print_error("[Error] Macro name required")
                 return
         
-        print(f"\nCreating macro '{name}' from natural language")
+        print_info(f"\nCreating macro '{name}' from natural language")
         print("Describe what this macro should do:")
         nl_description = input("  > ").strip()
         
         if not nl_description:
-            print("[Error] Description required")
+            print_error("[Error] Description required")
             return
         
-        print("\n[Generating commands...]")
+        print_info("\n[Generating commands...]")
         
         # Build context
         context = {
@@ -482,7 +536,7 @@ class CliaraShell:
         commands = self.nl_handler.generate_commands_from_nl(nl_description, context)
         
         if not commands or (len(commands) == 1 and commands[0].startswith("#")):
-            print(f"[Error] Could not generate commands: {commands[0] if commands else 'Unknown error'}")
+            print_error(f"[Error] Could not generate commands: {commands[0] if commands else 'Unknown error'}")
             return
         
         # Show generated commands
@@ -514,27 +568,27 @@ class CliaraShell:
         # Safety check
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
-            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            print_warning(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
         
         description = input("Description (optional): ").strip() or nl_description
         
         self.macros.add(name, commands, description)
-        print(f"\n[OK] Macro '{name}' created with {len(commands)} command(s) from natural language")
+        print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s) from natural language")
     
     def macro_list(self):
         """List all macros."""
         macros = self.macros.list_all()
         
         if not macros:
-            print("\nNo macros yet.")
-            print("Create one with: macro add <name>")
+            print_dim("\nNo macros yet.")
+            print_dim("Create one with: macro add <name>")
             return
         
-        print(f"\n[Macros] {len(macros)} total\n")
+        print_info(f"\n[Macros] {len(macros)} total\n")
         for name, macro in sorted(macros.items()):
             desc = macro.description or "No description"
             cmd_count = len(macro.commands)
@@ -547,17 +601,17 @@ class CliaraShell:
     def macro_search(self, keyword: str):
         """Search macros by name, description, or tags."""
         if not keyword or not keyword.strip():
-            print("[Error] Search keyword required")
-            print("Usage: macro search <keyword>")
+            print_error("[Error] Search keyword required")
+            print_dim("Usage: macro search <keyword>")
             return
         
         results = self.macros.search(keyword.strip())
         
         if not results:
-            print(f"\nNo macros matching '{keyword.strip()}'.")
+            print_dim(f"\nNo macros matching '{keyword.strip()}'.")
             return
         
-        print(f"\n[Search: '{keyword.strip()}'] {len(results)} result(s)\n")
+        print_info(f"\n[Search: '{keyword.strip()}'] {len(results)} result(s)\n")
         for macro in sorted(results, key=lambda m: m.name):
             desc = macro.description or "No description"
             cmd_count = len(macro.commands)
@@ -570,15 +624,15 @@ class CliaraShell:
     def macro_show(self, name: str):
         """Show details of a macro."""
         if not name:
-            print("[Error] Macro name required")
+            print_error("[Error] Macro name required")
             return
         
         macro = self.macros.get(name)
         if not macro:
-            print(f"[Error] Macro '{name}' not found")
+            print_error(f"[Error] Macro '{name}' not found")
             return
         
-        print(f"\n[Macro] {name}")
+        print_info(f"\n[Macro] {name}")
         print(f"Description: {macro.description or 'None'}")
         print(f"Commands ({len(macro.commands)}):")
         for i, cmd in enumerate(macro.commands, 1):
@@ -594,16 +648,16 @@ class CliaraShell:
         if not name:
             name = input("Macro name: ").strip()
             if not name:
-                print("[Error] Macro name required")
+                print_error("[Error] Macro name required")
                 return
 
         macro = self.macros.get(name)
         if not macro:
-            print(f"[Error] Macro '{name}' not found")
+            print_error(f"[Error] Macro '{name}' not found")
             return
 
         # Show current commands
-        print(f"\n[Editing] {name}")
+        print_info(f"\n[Editing] {name}")
         print(f"Current description: {macro.description or 'None'}")
         print(f"Current commands ({len(macro.commands)}):")
         for i, cmd in enumerate(macro.commands, 1):
@@ -632,88 +686,88 @@ class CliaraShell:
         # Safety check on the (possibly new) commands
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
-            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            print_warning(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
 
         self.macros.add(name, commands, description)
-        print(f"\n[OK] Macro '{name}' updated with {len(commands)} command(s)")
+        print_success(f"\n[OK] Macro '{name}' updated with {len(commands)} command(s)")
 
     def macro_delete(self, name: str):
         """Delete a macro."""
         if not name:
-            print("[Error] Macro name required")
+            print_error("[Error] Macro name required")
             return
         
         if not self.macros.exists(name):
-            print(f"[Error] Macro '{name}' not found")
+            print_error(f"[Error] Macro '{name}' not found")
             return
         
         confirm = input(f"Delete macro '{name}'? (y/n): ").strip().lower()
         if confirm in ['y', 'yes']:
             self.macros.delete(name)
-            print(f"[OK] Macro '{name}' deleted")
+            print_success(f"[OK] Macro '{name}' deleted")
         else:
-            print("[Cancelled]")
+            print_warning("[Cancelled]")
     
     def macro_rename(self, args: str):
         """Rename a macro."""
         parts = args.split()
         if len(parts) != 2:
-            print("Usage: macro rename <old_name> <new_name>")
+            print_dim("Usage: macro rename <old_name> <new_name>")
             return
 
         old_name, new_name = parts
 
         macro = self.macros.get(old_name)
         if not macro:
-            print(f"[Error] Macro '{old_name}' not found")
+            print_error(f"[Error] Macro '{old_name}' not found")
             return
 
         if self.macros.exists(new_name):
-            print(f"[Error] Macro '{new_name}' already exists")
+            print_error(f"[Error] Macro '{new_name}' already exists")
             return
 
         # Re-create under new name, then delete old
         self.macros.add(new_name, macro.commands, macro.description, tags=macro.tags)
         self.macros.delete(old_name)
-        print(f"[OK] Macro '{old_name}' renamed to '{new_name}'")
+        print_success(f"[OK] Macro '{old_name}' renamed to '{new_name}'")
 
     def macro_save_last(self, args: str):
         """Save last executed commands as a macro."""
         # Parse "save last as <name>"
         if not args.startswith("last as "):
-            print("Usage: macro save last as <name>")
+            print_dim("Usage: macro save last as <name>")
             return
         
         name = args[8:].strip()  # Remove "last as "
         if not name:
-            print("[Error] Macro name required")
+            print_error("[Error] Macro name required")
             return
         
         last_commands = self.history.get_last()
         if not last_commands:
-            print("[Error] No recent commands to save")
+            print_error("[Error] No recent commands to save")
             return
         
-        print(f"\nSaving last execution as '{name}':")
+        print_info(f"\nSaving last execution as '{name}':")
         for i, cmd in enumerate(last_commands, 1):
             print(f"  {i}. {cmd}")
         
         confirm = input("\nSave these commands? (y/n): ").strip().lower()
         if confirm not in ['y', 'yes']:
-            print("[Cancelled]")
+            print_warning("[Cancelled]")
             return
         
         description = input("Description (optional): ").strip()
         self.macros.add(name, last_commands, description)
-        print(f"[OK] Macro '{name}' saved!")
+        print_success(f"[OK] Macro '{name}' saved!")
     
     def macro_help(self):
         """Show macro help."""
-        print("\n[Macro Commands]\n")
+        print_info("\n[Macro Commands]\n")
         print("  macro add <name>          Create a new macro")
         print("  macro add <name> --nl      Create macro from natural language")
         print("  macro edit <name>         Edit an existing macro")
@@ -731,11 +785,11 @@ class CliaraShell:
         """Execute a macro."""
         macro = self.macros.get(name)
         if not macro:
-            print(f"[Error] Macro '{name}' not found")
+            print_error(f"[Error] Macro '{name}' not found")
             return
         
         # Show preview
-        print(f"\n[Macro] {name}")
+        print_info(f"\n[Macro] {name}")
         if macro.description:
             print(f"{macro.description}\n")
         print("Commands:")
@@ -749,32 +803,32 @@ class CliaraShell:
             prompt = self.safety.get_confirmation_prompt(level)
             response = input(prompt).strip()
             if not self.safety.validate_confirmation(response, level):
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
         else:
             confirm = input("\nRun? (y/n): ").strip().lower()
             if confirm not in ['y', 'yes']:
-                print("[Cancelled]")
+                print_warning("[Cancelled]")
                 return
         
         # Execute
-        print("\n" + "="*60)
-        print(f"EXECUTING: {name}")
-        print("="*60 + "\n")
+        print_header("\n" + "="*60)
+        print_header(f"EXECUTING: {name}")
+        print_header("="*60 + "\n")
         
         for i, cmd in enumerate(macro.commands, 1):
-            print(f"[{i}/{len(macro.commands)}] {cmd}")
+            print_info(f"[{i}/{len(macro.commands)}] {cmd}")
             print("-" * 60)
             success = self.execute_shell_command(cmd, capture=False)
             print()
             
             if not success:
-                print(f"[X] Command {i} failed")
+                print_error(f"[X] Command {i} failed")
                 break
         else:
-            print("="*60)
-            print(f"[OK] Macro '{name}' completed successfully")
-            print("="*60 + "\n")
+            print_header("="*60)
+            print_success(f"[OK] Macro '{name}' completed successfully")
+            print_header("="*60 + "\n")
             macro.mark_run()
             # Save updated macro back to storage
             self.macros.storage.add(macro, user_id=self.macros.user_id)
@@ -797,7 +851,7 @@ class CliaraShell:
             target = Path.home()
         elif args == '-':
             # "cd -" is not supported without tracking OLDPWD
-            print("[Error] cd - is not supported")
+            print_error("[Error] cd - is not supported")
             return
         else:
             target = Path(args).expanduser()
@@ -805,11 +859,11 @@ class CliaraShell:
         try:
             os.chdir(target)
         except FileNotFoundError:
-            print(f"[Error] cd: no such directory: {args}")
+            print_error(f"[Error] cd: no such directory: {args}")
         except PermissionError:
-            print(f"[Error] cd: permission denied: {args}")
+            print_error(f"[Error] cd: permission denied: {args}")
         except Exception as e:
-            print(f"[Error] cd: {e}")
+            print_error(f"[Error] cd: {e}")
 
     def execute_shell_command(self, command: str, capture: bool = False) -> bool:
         """
@@ -850,15 +904,15 @@ class CliaraShell:
                 return result.returncode == 0
         
         except subprocess.TimeoutExpired:
-            print("[Error] Command timed out (5 minutes)")
+            print_error("[Error] Command timed out (5 minutes)")
             return False
         except Exception as e:
-            print(f"[Error] {e}")
+            print_error(f"[Error] {e}")
             return False
     
     def show_help(self):
         """Show main help message."""
-        print("\n[Cliara Help]\n")
+        print_info("\n[Cliara Help]\n")
         print("Normal Commands:")
         print("  Just type any command - it passes through to your shell")
         print("  Examples: ls, cd, git status, npm install\n")

@@ -346,6 +346,11 @@ class CliaraShell:
             self._handle_cd(user_input)
             return
 
+        # Intercept clear/cls so the host terminal is cleared properly
+        if user_input.lower() in ('clear', 'cls'):
+            os.system('cls' if platform.system() == 'Windows' else 'clear')
+            return
+
         # Default: pass through to underlying shell
         self.execute_shell_command(user_input)
     

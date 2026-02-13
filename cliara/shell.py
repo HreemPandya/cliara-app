@@ -358,12 +358,28 @@ class CliaraShell:
         """
         Handle natural language query using LLM.
         
+        Supports --save-as <name> flag to save generated commands as a macro
+        instead of executing them immediately.
+        
         Args:
-            query: Natural language query
+            query: Natural language query (may contain --save-as <name>)
         """
         if not query:
             print_error("[Error] Please provide a query after '?'")
             return
+        
+        # Check for --save-as <name> flag
+        save_as_name = None
+        if '--save-as' in query:
+            parts = query.split('--save-as', 1)
+            query = parts[0].strip()
+            save_as_name = parts[1].strip()
+            if not save_as_name:
+                print_error("[Error] Macro name required after --save-as")
+                return
+            if not query:
+                print_error("[Error] Please provide a query before --save-as")
+                return
         
         print_info(f"\n[Processing] {query}")
         print_dim("Generating commands...\n")
@@ -387,6 +403,17 @@ class CliaraShell:
         print("Generated commands:")
         for i, cmd in enumerate(commands, 1):
             print(f"  {i}. {cmd}")
+        
+        # --save-as: save as macro instead of executing
+        if save_as_name:
+            confirm = input(f"\nSave as macro '{save_as_name}'? (y/n): ").strip().lower()
+            if confirm not in ['y', 'yes']:
+                print_warning("[Cancelled]")
+                return
+            description = input("Description (optional): ").strip() or query
+            self.macros.add(save_as_name, commands, description)
+            print_success(f"[OK] Macro '{save_as_name}' saved with {len(commands)} command(s)")
+            return
         
         # Safety check
         if danger_level != DangerLevel.SAFE:
@@ -924,10 +951,12 @@ class CliaraShell:
         if self.nl_handler.llm_enabled:
             print("Natural Language:")
             print(f"  {self.config.get('nl_prefix')} <query>  - Use natural language")
+            print(f"  {self.config.get('nl_prefix')} <query> --save-as <name> - Generate & save as macro")
             print(f"  Example: {self.config.get('nl_prefix')} kill process on port 3000\n")
         else:
             print("Natural Language:")
             print(f"  {self.config.get('nl_prefix')} <query>  - Use natural language (requires OPENAI_API_KEY)")
+            print(f"  {self.config.get('nl_prefix')} <query> --save-as <name> - Generate & save as macro")
             print(f"  Example: {self.config.get('nl_prefix')} kill process on port 3000\n")
         print("Macros:")
         print("  macro add <name>    - Create a macro")

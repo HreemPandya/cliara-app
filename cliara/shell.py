@@ -14,6 +14,13 @@ from cliara.config import Config
 from cliara.macros import MacroManager
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.nl_handler import NLHandler
+from cliara.cross_platform import (
+    get_base_command,
+    command_exists,
+    is_powershell,
+    translate_command,
+    translate_pipeline,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +268,7 @@ class CliaraShell:
             print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language (requires API key)")
         print_dim("  • Use 'explain <cmd>' to understand any command")
         print_dim("  • Type 'macro help' for macro commands")
+        print_dim("  • Cross-platform commands are auto-translated")
         print_dim("  • Type 'help' for all commands")
         print_dim("  • Type 'exit' to quit")
         print()
@@ -358,7 +366,9 @@ class CliaraShell:
             return
 
         # Default: pass through to underlying shell
-        self.execute_shell_command(user_input)
+        success = self.execute_shell_command(user_input)
+        if not success:
+            self._check_cross_platform(user_input)
     
     def handle_nl_query(self, query: str):
         """
@@ -903,6 +913,78 @@ class CliaraShell:
         except Exception as e:
             print_error(f"[Error] cd: {e}")
 
+    # ------------------------------------------------------------------
+    # Cross-platform command translation
+    # ------------------------------------------------------------------
+    def _check_cross_platform(self, command: str):
+        """
+        After a command fails, check whether it failed because the
+        executable doesn't exist on this platform.  If a known
+        cross-platform translation is available, offer it to the user.
+        """
+        base_cmd = get_base_command(command)
+        if not base_cmd:
+            return
+
+        # If the executable is actually on the system, the failure was
+        # caused by something else (bad args, permissions, …) — skip.
+        if command_exists(base_cmd):
+            return
+
+        os_name = platform.system()
+        shell = self.shell_path or ""
+
+        # Try to translate the full pipeline; fall back to single command.
+        translated = translate_pipeline(command, os_name, shell)
+        if not translated:
+            return
+
+        # Present the suggestion
+        label = "PowerShell" if (os_name == "Windows" and is_powershell(shell)) else os_name
+        print_info(f"\n[Cliara] {label} equivalent: {translated}")
+        try:
+            response = input("         Run? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if response in ("y", "yes"):
+            self._execute_translated_command(translated)
+
+    def _execute_translated_command(self, command: str) -> bool:
+        """
+        Execute a translated command using the appropriate shell.
+
+        On Windows with PowerShell, translated commands may be PowerShell
+        cmdlets that ``cmd.exe`` doesn't understand, so we invoke
+        ``powershell`` / ``pwsh`` directly.
+        """
+        # Record in history
+        self.history.add(command)
+        self.history.set_last_execution([command])
+
+        if platform.system() == "Windows" and is_powershell(self.shell_path or ""):
+            try:
+                ps_exe = (
+                    "pwsh"
+                    if "pwsh" in (self.shell_path or "").lower()
+                    else "powershell"
+                )
+                result = subprocess.run(
+                    [ps_exe, "-NoProfile", "-Command", command],
+                    timeout=300,
+                )
+                return result.returncode == 0
+            except subprocess.TimeoutExpired:
+                print_error("[Error] Command timed out (5 minutes)")
+                return False
+            except Exception as e:
+                print_error(f"[Error] {e}")
+                return False
+        else:
+            # CMD or Unix — just pass through to the regular shell
+            return self.execute_shell_command(command, capture=False)
+
     def execute_shell_command(self, command: str, capture: bool = False) -> bool:
         """
         Execute a command in the underlying shell.
@@ -1022,6 +1104,10 @@ class CliaraShell:
         print("  macro search <word> - Search macros")
         print("  macro help          - Show macro commands")
         print("  <macro-name>        - Run a macro\n")
+        print("Cross-Platform Translation:")
+        print("  If a command fails because it doesn't exist on your OS,")
+        print("  Cliara will suggest the equivalent command automatically.")
+        print("  Example: grep on Windows -> Select-String (PowerShell)\n")
         print("Other:")
         print("  help                - Show this help")
         print("  exit                - Quit Cliara\n")

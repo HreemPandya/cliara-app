@@ -259,6 +259,7 @@ class CliaraShell:
             print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language")
         else:
             print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language (requires API key)")
+        print_dim("  • Use 'explain <cmd>' to understand any command")
         print_dim("  • Type 'macro help' for macro commands")
         print_dim("  • Type 'help' for all commands")
         print_dim("  • Type 'exit' to quit")
@@ -317,6 +318,11 @@ class CliaraShell:
             self.show_help()
             return
         
+        # Check for explain command
+        if user_input.lower().startswith('explain '):
+            self.handle_explain(user_input[8:].strip())
+            return
+
         # Check for NL prefix (Phase 2 - stubbed for now)
         nl_prefix = self.config.get('nl_prefix', '?')
         if user_input.startswith(nl_prefix):
@@ -942,6 +948,53 @@ class CliaraShell:
             print_error(f"[Error] {e}")
             return False
     
+    def handle_explain(self, command: str):
+        """
+        Explain a shell command in plain English using the LLM.
+
+        Args:
+            command: The shell command to explain (e.g. "git rebase -i HEAD~3")
+        """
+        if not command:
+            print_error("[Error] Please provide a command to explain")
+            print_dim("Usage: explain <command>")
+            print_dim("Example: explain git rebase -i HEAD~3")
+            return
+
+        print_info(f"\n[Explain] {command}")
+        print_dim("Analyzing command...\n")
+
+        # Build context
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+
+        explanation = self.nl_handler.explain_command(command, context)
+
+        # Display the explanation with a nice header/footer
+        print_header("-" * 60)
+        print(explanation)
+        print_header("-" * 60)
+
+        # Offer to run the command
+        print()
+        run = input("Run this command? (y/n): ").strip().lower()
+        if run in ['y', 'yes']:
+            # Safety check first
+            level, dangerous = self.safety.check_commands([command])
+            if level != DangerLevel.SAFE:
+                print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+                prompt = self.safety.get_confirmation_prompt(level)
+                response = input(prompt).strip()
+                if not self.safety.validate_confirmation(response, level):
+                    print_warning("[Cancelled]")
+                    return
+
+            print()
+            self.execute_shell_command(command, capture=False)
+
     def show_help(self):
         """Show main help message."""
         print_info("\n[Cliara Help]\n")
@@ -958,6 +1011,9 @@ class CliaraShell:
             print(f"  {self.config.get('nl_prefix')} <query>  - Use natural language (requires OPENAI_API_KEY)")
             print(f"  {self.config.get('nl_prefix')} <query> --save-as <name> - Generate & save as macro")
             print(f"  Example: {self.config.get('nl_prefix')} kill process on port 3000\n")
+        print("Explain:")
+        print("  explain <command>   - Get a plain-English explanation of any command")
+        print("  Example: explain git rebase -i HEAD~3\n")
         print("Macros:")
         print("  macro add <name>    - Create a macro")
         print("  macro add <name> --nl - Create macro from natural language")

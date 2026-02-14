@@ -35,6 +35,7 @@ class Config:
         "history_size": 1000,
         "safety_checks": True,
         "auto_confirm_safe": False,
+        "error_translation": True,  # Analyse stderr on failure and show plain-English fix
         "prompt_style": "cliara",
         "llm_provider": None,  # "openai" or "anthropic" (Phase 2)
         "llm_api_key": None,  # Encrypted in real impl (Phase 2)
@@ -125,7 +126,7 @@ class Config:
             conn_str = settings_to_save["connection_string"]
             # Remove password from connection string if present
             if "@" in conn_str and ":" in conn_str.split("@")[0]:
-                # Format: postgresql://user:password@host
+                # Format: postgresql://user:<pass>@host
                 parts = conn_str.split("@")
                 auth_part = parts[0].split("://")[1] if "://" in parts[0] else parts[0]
                 if ":" in auth_part:

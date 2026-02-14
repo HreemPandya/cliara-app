@@ -345,6 +345,281 @@ Command: {command}"""
             f"Set OPENAI_API_KEY in your .env file for detailed, AI-powered explanations."
         )
 
+    # ------------------------------------------------------------------
+    # Error Translation (intercept stderr → plain-English explanation)
+    # ------------------------------------------------------------------
+
+    def translate_error(
+        self,
+        command: str,
+        exit_code: int,
+        stderr: str,
+        context: Optional[dict] = None,
+    ) -> Dict:
+        """
+        Translate a command's stderr into a plain-English explanation
+        with an optional suggested fix.
+
+        Args:
+            command: The shell command that failed
+            exit_code: The process exit code
+            stderr: Captured stderr output
+            context: Optional context (cwd, os, shell, etc.)
+
+        Returns:
+            Dict with keys:
+                explanation (str): Plain-English explanation
+                fix_commands (List[str]): Suggested fix commands (may be empty)
+                fix_explanation (str): What the fix does (empty if no fix)
+        """
+        if not self.llm_enabled:
+            return self._stub_error_translation(command, exit_code, stderr)
+
+        try:
+            context_info = self._build_context(context)
+            prompt = self._create_error_prompt(command, exit_code, stderr, context_info)
+            response = self._call_llm_error_translate(prompt)
+            return self._parse_error_response(response)
+        except Exception as e:
+            return {
+                "explanation": f"Could not analyze error: {e}",
+                "fix_commands": [],
+                "fix_explanation": "",
+            }
+
+    def _create_error_prompt(
+        self, command: str, exit_code: int, stderr: str, context: dict
+    ) -> str:
+        """Build the LLM prompt for error translation."""
+        os_name = context.get("os", "Unknown")
+        shell = context.get("shell", "bash")
+        cwd = context.get("cwd", "")
+        project_type = context.get("project_type", "")
+
+        # Truncate very long stderr: keep first 60 + last 30 lines
+        lines = stderr.splitlines()
+        if len(lines) > 100:
+            truncated = (
+                "\n".join(lines[:60])
+                + f"\n\n... ({len(lines) - 90} lines omitted) ...\n\n"
+                + "\n".join(lines[-30:])
+            )
+        else:
+            truncated = stderr
+
+        prompt = f"""A shell command failed. Analyse the error output and respond with a helpful explanation and, if possible, a concrete fix.
+
+Command: {command}
+Exit code: {exit_code}
+
+Error output:
+{truncated}
+
+Context:
+- OS: {os_name}
+- Shell: {shell}
+- Working directory: {cwd}
+"""
+        if project_type:
+            prompt += f"- Project type: {project_type}\n"
+        if context.get("has_git"):
+            prompt += "- Inside a Git repository\n"
+
+        prompt += """
+Respond with ONLY valid JSON in this exact format (no markdown, no code blocks):
+{
+  "explanation": "One or two sentences in plain English explaining what went wrong and why.",
+  "fix_commands": ["command1", "command2"],
+  "fix_explanation": "Brief description of what the fix commands do."
+}
+
+Rules:
+- explanation should be concise, beginner-friendly, and avoid jargon where possible.
+- fix_commands should contain concrete, runnable commands for the user's OS and shell. Leave the array empty if there is no clear automated fix.
+- fix_explanation should summarise the fix in one sentence. Leave empty string if no fix.
+- Return ONLY the JSON. No commentary, no markdown fences.
+"""
+        return prompt
+
+    def _call_llm_error_translate(self, prompt: str) -> str:
+        """Call the LLM with an error-translation-specific system prompt."""
+        if self.provider == "openai":
+            try:
+                response = self.llm_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are Cliara, an AI shell assistant. "
+                                "The user just ran a command that failed. "
+                                "Your job is to explain the error in plain English "
+                                "and suggest a concrete fix when possible. "
+                                "Always respond with valid JSON only — no markdown, "
+                                "no explanation outside the JSON object."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=400,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                raise Exception(f"OpenAI API error: {e}")
+        else:
+            raise Exception(f"Unsupported provider: {self.provider}")
+
+    def _parse_error_response(self, response: str) -> Dict:
+        """Parse the LLM's JSON response for error translation."""
+        # Strip markdown fences if the model added them anyway
+        response = re.sub(r"```json\s*", "", response)
+        response = re.sub(r"```\s*", "", response)
+        response = response.strip()
+
+        try:
+            data = json.loads(response)
+            return {
+                "explanation": data.get("explanation", "Unknown error."),
+                "fix_commands": data.get("fix_commands", []),
+                "fix_explanation": data.get("fix_explanation", ""),
+            }
+        except json.JSONDecodeError:
+            # Fallback: treat the whole response as the explanation
+            return {
+                "explanation": response[:500] if response else "Could not parse error analysis.",
+                "fix_commands": [],
+                "fix_explanation": "",
+            }
+
+    def _stub_error_translation(
+        self, command: str, exit_code: int, stderr: str
+    ) -> Dict:
+        """
+        Pattern-match common errors when the LLM is unavailable.
+        Returns a best-effort explanation and fix.
+        """
+        stderr_lower = stderr.lower()
+        explanation = ""
+        fix_commands: List[str] = []
+        fix_explanation = ""
+
+        # --- npm / Node errors ---
+        if "eresolve" in stderr_lower or "peer dep" in stderr_lower:
+            explanation = (
+                "npm could not resolve the dependency tree because some packages "
+                "require conflicting versions of a shared dependency (a peer-dependency conflict)."
+            )
+            fix_commands = ["npm install --legacy-peer-deps"]
+            fix_explanation = "Re-run install while ignoring peer-dependency conflicts."
+
+        elif "eacces" in stderr_lower or "permission denied" in stderr_lower:
+            explanation = (
+                "The command failed because it does not have permission to access "
+                "a file or directory. You may need elevated privileges."
+            )
+            if "npm" in command:
+                fix_commands = ["npm install --prefix ."]
+                fix_explanation = "Install to current directory to avoid system-level permission issues."
+
+        elif "enoent" in stderr_lower or "no such file or directory" in stderr_lower:
+            explanation = (
+                "A file or directory referenced by the command does not exist. "
+                "Double-check the path or ensure required files are present."
+            )
+
+        elif "eaddrinuse" in stderr_lower or "address already in use" in stderr_lower:
+            import re as _re
+            port_match = _re.search(r"(?:port\s*|:)(\d{2,5})", stderr_lower)
+            port = port_match.group(1) if port_match else "PORT"
+            explanation = (
+                f"Port {port} is already in use by another process. "
+                "You need to stop that process or use a different port."
+            )
+            import platform
+            if platform.system() == "Windows":
+                fix_commands = [
+                    f'netstat -ano | findstr ":{port}"',
+                ]
+                fix_explanation = f"Find the process using port {port} so you can stop it."
+            else:
+                fix_commands = [f"lsof -ti :{port} | xargs kill -9"]
+                fix_explanation = f"Kill the process occupying port {port}."
+
+        # --- Python errors ---
+        elif "modulenotfounderror" in stderr_lower or "no module named" in stderr_lower:
+            import re as _re
+            mod_match = _re.search(r"no module named ['\"]?([a-zA-Z0-9_.]+)", stderr_lower)
+            mod = mod_match.group(1) if mod_match else "the_module"
+            explanation = (
+                f"Python cannot find the module '{mod}'. "
+                "It may not be installed in your current environment."
+            )
+            fix_commands = [f"pip install {mod}"]
+            fix_explanation = f"Install the missing '{mod}' package."
+
+        elif "syntaxerror" in stderr_lower:
+            explanation = (
+                "Python encountered a syntax error — there is likely a typo, "
+                "missing colon, or unmatched bracket in the source code."
+            )
+
+        # --- Git errors ---
+        elif "fatal: not a git repository" in stderr_lower:
+            explanation = (
+                "This directory is not a Git repository. "
+                "You need to initialise one or navigate to an existing repo."
+            )
+            fix_commands = ["git init"]
+            fix_explanation = "Initialise a new Git repository in the current directory."
+
+        elif "fatal: remote origin already exists" in stderr_lower:
+            explanation = "A remote named 'origin' is already configured for this repository."
+            fix_commands = ["git remote -v"]
+            fix_explanation = "List existing remotes to decide next steps."
+
+        elif "merge conflict" in stderr_lower or "conflict" in stderr_lower and "git" in command:
+            explanation = (
+                "Git encountered merge conflicts — the same lines were changed in "
+                "both branches. You need to resolve them manually."
+            )
+
+        # --- Docker errors ---
+        elif "cannot connect to the docker daemon" in stderr_lower:
+            explanation = (
+                "Docker is not running. Start the Docker daemon or Docker Desktop first."
+            )
+
+        # --- Generic fallback ---
+        elif "command not found" in stderr_lower or "'.' is not recognized" in stderr_lower:
+            base = command.split()[0] if command.split() else command
+            explanation = (
+                f"'{base}' is not installed or not on your PATH. "
+                "You may need to install it or check your environment."
+            )
+
+        else:
+            # No pattern matched — give a generic message
+            # Pull the last non-empty stderr line as a summary
+            last_line = ""
+            for line in reversed(stderr.strip().splitlines()):
+                stripped = line.strip()
+                if stripped:
+                    last_line = stripped
+                    break
+            explanation = (
+                f"The command exited with code {exit_code}. "
+                f"Last error line: {last_line}"
+                if last_line
+                else f"The command exited with code {exit_code}."
+            )
+
+        return {
+            "explanation": explanation,
+            "fix_commands": fix_commands,
+            "fix_explanation": fix_explanation,
+        }
+
     def _stub_response(self, query: str) -> Tuple[List[str], str, DangerLevel]:
         """
         Stub responses when LLM is not enabled.

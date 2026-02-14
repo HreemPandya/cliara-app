@@ -7,6 +7,7 @@ import subprocess
 import sys
 import os
 import platform
+import threading
 from typing import Optional, List, Tuple
 from pathlib import Path
 
@@ -229,6 +230,10 @@ class CliaraShell:
         self.running = True
         self.shell_path = self.config.get("shell")
         
+        # Error translator state — populated by execute_shell_command()
+        self.last_stderr: str = ""
+        self.last_exit_code: int = 0
+        
         # Initialize LLM if API key is available
         self._initialize_llm()
         
@@ -269,6 +274,7 @@ class CliaraShell:
         print_dim("  • Use 'explain <cmd>' to understand any command")
         print_dim("  • Type 'macro help' for macro commands")
         print_dim("  • Cross-platform commands are auto-translated")
+        print_dim("  • Errors are auto-explained with suggested fixes")
         print_dim("  • Type 'help' for all commands")
         print_dim("  • Type 'exit' to quit")
         print()
@@ -368,7 +374,13 @@ class CliaraShell:
         # Default: pass through to underlying shell
         success = self.execute_shell_command(user_input)
         if not success:
+            # First: if the executable doesn't exist, try cross-platform
+            # translation (it returns early when the command *is* found).
             self._check_cross_platform(user_input)
+
+            # Second: if the command exists but failed, offer an
+            # AI-powered explanation of the stderr.
+            self._maybe_translate_error(user_input)
     
     def handle_nl_query(self, query: str):
         """
@@ -458,6 +470,7 @@ class CliaraShell:
             
             if not success:
                 print_error(f"[X] Command {i} failed")
+                self._maybe_translate_error(cmd)
                 break
         else:
             print_header("="*60)
@@ -872,6 +885,7 @@ class CliaraShell:
             
             if not success:
                 print_error(f"[X] Command {i} failed")
+                self._maybe_translate_error(cmd)
                 break
         else:
             print_header("="*60)
@@ -985,47 +999,188 @@ class CliaraShell:
             # CMD or Unix — just pass through to the regular shell
             return self.execute_shell_command(command, capture=False)
 
+    # ------------------------------------------------------------------
+    # Error Translator — plain-English stderr explanations + fixes
+    # ------------------------------------------------------------------
+    def _maybe_translate_error(self, command: str):
+        """
+        After a failed command, decide whether to invoke the Error
+        Translator and, if so, display the result.
+
+        Skipped when:
+        - The feature is disabled in config
+        - There is no captured stderr
+        - The command's base executable doesn't exist (cross-platform
+          translation handles that case instead)
+        """
+        if not self.config.get("error_translation", True):
+            return
+
+        stderr = self.last_stderr.strip()
+        if not stderr:
+            return
+
+        # If the executable itself is missing, _check_cross_platform will
+        # handle it — don't double-up with an error translation.
+        base_cmd = get_base_command(command)
+        if base_cmd and not command_exists(base_cmd):
+            return
+
+        self._handle_error_translation(command, stderr)
+
+    def _handle_error_translation(self, command: str, stderr: str):
+        """
+        Send stderr to the NL handler for analysis and display the
+        plain-English result.  If a fix is suggested, offer to run it.
+        """
+        print()  # visual separator after the raw error output
+
+        # Build context identical to NL queries
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+
+        result = self.nl_handler.translate_error(
+            command,
+            self.last_exit_code,
+            stderr,
+            context,
+        )
+
+        explanation = result.get("explanation", "")
+        fix_commands = result.get("fix_commands", [])
+        fix_explanation = result.get("fix_explanation", "")
+
+        # ── Display explanation ──
+        print_info(f"[Cliara] {explanation}")
+
+        if fix_commands:
+            # Show the suggested fix
+            fix_display = " && ".join(fix_commands)
+            print_info(f"         Fix: {fix_display}")
+
+            if fix_explanation:
+                print_dim(f"         ({fix_explanation})")
+
+            # Offer to run
+            try:
+                response = input("         Run fix? (y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+
+            if response in ("y", "yes"):
+                # Safety check on the fix commands
+                level, dangerous = self.safety.check_commands(fix_commands)
+                if level != DangerLevel.SAFE:
+                    print(self.safety.get_warning_message(
+                        [cmd for cmd, _ in dangerous], level
+                    ))
+                    prompt = self.safety.get_confirmation_prompt(level)
+                    confirm = input(prompt).strip()
+                    if not self.safety.validate_confirmation(confirm, level):
+                        print_warning("[Cancelled]")
+                        return
+
+                print()
+                for i, fix_cmd in enumerate(fix_commands, 1):
+                    if len(fix_commands) > 1:
+                        print_info(f"[Fix {i}/{len(fix_commands)}] {fix_cmd}")
+                    success = self.execute_shell_command(fix_cmd, capture=False)
+                    if not success:
+                        print_error(f"[Cliara] Fix command failed: {fix_cmd}")
+                        break
+                else:
+                    print_success("[Cliara] Fix applied successfully!")
+        print()
+
     def execute_shell_command(self, command: str, capture: bool = False) -> bool:
         """
         Execute a command in the underlying shell.
-        
+
+        Stderr is always captured (in addition to being displayed in
+        real-time) so the Error Translator can analyse it when the
+        command fails.
+
         Args:
             command: Shell command to execute
-            capture: Whether to capture output (vs. stream to console)
-        
+            capture: Whether to capture stdout as well (vs. stream to console)
+
         Returns:
             True if command succeeded (exit code 0)
         """
+        # Reset per-command error state
+        self.last_stderr = ""
+        self.last_exit_code = 0
+
         try:
             # Add to history
             self.history.add(command)
             self.history.set_last_execution([command])
-            
-            # Execute with shell
+
             if capture:
+                # ── Capture mode: both stdout and stderr captured ──
                 result = subprocess.run(
                     command,
                     shell=True,
                     capture_output=True,
                     text=True,
-                    timeout=300
+                    timeout=300,
                 )
-                print(result.stdout, end='')
+                print(result.stdout, end="")
                 if result.stderr:
-                    print(result.stderr, end='', file=sys.stderr)
+                    print(result.stderr, end="", file=sys.stderr)
+                self.last_stderr = result.stderr or ""
+                self.last_exit_code = result.returncode
                 return result.returncode == 0
             else:
-                # Stream output directly
-                result = subprocess.run(
+                # ── Streaming mode: stdout inherited, stderr piped ──
+                # We pipe stderr through a background thread so it is
+                # still displayed in real-time *and* buffered for the
+                # Error Translator.
+                proc = subprocess.Popen(
                     command,
                     shell=True,
-                    timeout=300
+                    stderr=subprocess.PIPE,
+                    encoding="utf-8",
+                    errors="replace",
                 )
-                return result.returncode == 0
-        
-        except subprocess.TimeoutExpired:
-            print_error("[Error] Command timed out (5 minutes)")
-            return False
+
+                stderr_lines: List[str] = []
+
+                def _drain_stderr():
+                    """Read stderr line-by-line, display and buffer."""
+                    try:
+                        assert proc.stderr is not None
+                        for line in proc.stderr:
+                            stderr_lines.append(line)
+                            sys.stderr.write(line)
+                            sys.stderr.flush()
+                    except Exception:
+                        pass  # Don't crash the shell on read errors
+
+                reader = threading.Thread(target=_drain_stderr, daemon=True)
+                reader.start()
+
+                try:
+                    proc.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    reader.join(timeout=5)
+                    print_error("[Error] Command timed out (5 minutes)")
+                    self.last_exit_code = -1
+                    return False
+
+                # Wait for the reader thread to finish flushing
+                reader.join(timeout=5)
+
+                self.last_stderr = "".join(stderr_lines)
+                self.last_exit_code = proc.returncode
+                return proc.returncode == 0
+
         except Exception as e:
             print_error(f"[Error] {e}")
             return False
@@ -1104,6 +1259,10 @@ class CliaraShell:
         print("  macro search <word> - Search macros")
         print("  macro help          - Show macro commands")
         print("  <macro-name>        - Run a macro\n")
+        print("Error Translator:")
+        print("  When a command fails, Cliara automatically explains the")
+        print("  error in plain English and suggests a fix you can run.")
+        print("  Example: npm install → peer-dep conflict → offers --legacy-peer-deps\n")
         print("Cross-Platform Translation:")
         print("  If a command fails because it doesn't exist on your OS,")
         print("  Cliara will suggest the equivalent command automatically.")

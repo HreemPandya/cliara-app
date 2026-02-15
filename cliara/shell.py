@@ -392,18 +392,19 @@ class CliaraShell:
         else:
             print_dim("  LLM: Not configured (set OPENAI_API_KEY in .env)")
         print_header("="*60)
+        nl = self.config.get('nl_prefix', '?')
         print("\nQuick tips:")
-        print_dim("  • Normal commands work as usual")
         if self.nl_handler.llm_enabled:
-            print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language")
+            print_dim(f"  • {nl} <query>             Ask in plain English  (e.g. {nl} list large files)")
         else:
-            print_dim(f"  • Use '{self.config.get('nl_prefix')}' for natural language (requires API key)")
-        print_dim("  • Use 'explain <cmd>' to understand any command")
-        print_dim("  • Type 'macro help' for macro commands")
-        print_dim("  • Cross-platform commands are auto-translated")
-        print_dim("  • Type '? fix' after any error to diagnose & repair")
-        print_dim("  • Type 'help' for all commands")
-        print_dim("  • Type 'exit' to quit")
+            print_dim(f"  • {nl} <query>             Ask in plain English  (requires API key)")
+        print_dim(f"  • {nl} fix                 Diagnose & fix the last failed command")
+        print_dim(f"  • explain <cmd>           Understand any command  (e.g. explain git rebase)")
+        print_dim(f"  • macro add <name>        Create a reusable macro")
+        print_dim(f"  • macro add <name> --nl   Create a macro from plain English")
+        print_dim(f"  • <macro-name>            Run a saved macro")
+        print_dim(f"  • help                    Show all commands")
+        print_dim(f"  • exit                    Quit Cliara")
         print()
     
     # ------------------------------------------------------------------
@@ -484,8 +485,8 @@ class CliaraShell:
                 self.handle_input(user_input)
 
             except KeyboardInterrupt:
-                print("\n(Use 'exit' to quit)")
-                continue
+                print("\nGoodbye!")
+                break
             except EOFError:
                 print("\nGoodbye!")
                 break

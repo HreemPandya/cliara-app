@@ -461,7 +461,7 @@ class CliaraShell:
 
         while self.running:
             try:
-                cwd = Path.cwd().name
+                cwd = str(Path.cwd())
 
                 if session is not None:
                     # Coloured, syntax-highlighted prompt

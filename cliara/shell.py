@@ -8,6 +8,7 @@ import sys
 import os
 import platform
 import threading
+import time
 from typing import Optional, List, Tuple
 from pathlib import Path
 
@@ -76,6 +77,108 @@ def print_header(msg: str):
 def print_dim(msg: str):
     """Print a dimmed/muted message."""
     print(_c("2", msg))
+
+
+# ---------------------------------------------------------------------------
+# Typo-tolerant "fix" detection
+# ---------------------------------------------------------------------------
+
+def _edit_distance(s: str, t: str) -> int:
+    """Levenshtein edit distance between two short strings."""
+    if len(s) < len(t):
+        return _edit_distance(t, s)
+    if not t:
+        return len(s)
+    prev = list(range(len(t) + 1))
+    for sc in s:
+        curr = [prev[0] + 1]
+        for j, tc in enumerate(t):
+            curr.append(min(curr[j] + 1, prev[j + 1] + 1, prev[j] + (0 if sc == tc else 1)))
+        prev = curr
+    return prev[-1]
+
+
+def _looks_like_fix(query: str) -> bool:
+    """
+    Return True if *query* is 'fix' or an obvious typo of it.
+
+    Catches: fox, fxi, fiz, fux, fi, fixe, etc. — without ever prompting
+    the user.  Only considers single short words so normal NL queries
+    like 'fix the deploy script' are NOT caught.
+    """
+    word = query.strip().lower()
+    if word == "fix":
+        return True
+    # Multi-word → real NL query, not a typo
+    if " " in word or len(word) > 5 or len(word) < 2:
+        return False
+    # Single substitution / insertion / deletion
+    if _edit_distance(word, "fix") <= 1:
+        return True
+    # Adjacent-key transposition like "fxi" or "ifx"
+    if sorted(word) == sorted("fix"):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Startup progress bar
+# ---------------------------------------------------------------------------
+
+class _StartupProgress:
+    """
+    Pip/npm-style progress bar for startup initialization.
+
+    Renders a single updating line like:
+        Initializing Cliara...  [########·············]  Loading macros
+    """
+
+    BAR_WIDTH = 30  # characters inside the brackets
+
+    def __init__(self, total_steps: int):
+        self.total = total_steps
+        self.current = 0
+        self._label = ""
+        self._finished = False
+        # Check mark / cross — keep it simple for all terminals
+        self._check = _c("32", "OK") if _COLOR else "OK"
+
+    # -- internal helpers ---------------------------------------------------
+    def _render(self):
+        """Redraw the progress line in-place."""
+        frac = self.current / self.total if self.total else 1
+        filled = int(frac * self.BAR_WIDTH)
+        empty = self.BAR_WIDTH - filled
+
+        bar_filled = _c("36", "#" * filled) if _COLOR else "#" * filled
+        bar_empty = _c("2", "." * empty) if _COLOR else "." * empty
+        pct = f"{int(frac * 100):>3}%"
+
+        line = f"\r  [{bar_filled}{bar_empty}] {pct}  {self._label}"
+        # Pad with spaces to overwrite any leftover chars from a longer label
+        sys.stdout.write(f"{line:<80}")
+        sys.stdout.flush()
+
+    # -- public API ---------------------------------------------------------
+    def step(self, label: str):
+        """Advance progress by one step and display *label*."""
+        self.current = min(self.current + 1, self.total)
+        self._label = label
+        self._render()
+        # Tiny pause so the user can actually see the bar move — without
+        # this, fast steps would flash by invisibly.
+        time.sleep(0.08)
+
+    def finish(self):
+        """Complete the bar and move to the next line."""
+        if self._finished:
+            return
+        self._finished = True
+        self.current = self.total
+        self._label = _c("32", "Ready!") if _COLOR else "Ready!"
+        self._render()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 class CommandHistory:
@@ -210,7 +313,14 @@ class CliaraShell:
         Args:
             config: Configuration object (creates default if None)
         """
+        # --- Startup progress bar ---
+        progress = _StartupProgress(total_steps=6)
+
+        print()  # blank line before the bar
+        progress.step("Loading config...")
         self.config = config or Config()
+
+        progress.step("Setting up macros...")
         # Pass config dict to MacroManager for storage backend selection
         config_dict = {
             "storage_backend": self.config.get("storage_backend", "json"),
@@ -220,37 +330,54 @@ class CliaraShell:
             "connection_string": self.config.get("connection_string"),
         }
         self.macros = MacroManager(config=config_dict)
+
+        progress.step("Loading safety checker...")
         self.safety = SafetyChecker()
         self.nl_handler = NLHandler(self.safety)
+
+        progress.step("Loading history...")
         history_file = self.config.config_dir / "history.txt"
         self.history = CommandHistory(
             max_size=self.config.get("history_size", 1000),
             history_file=history_file,
         )
+
         self.running = True
         self.shell_path = self.config.get("shell")
         
         # Error translator state — populated by execute_shell_command()
         self.last_stderr: str = ""
         self.last_exit_code: int = 0
+        self.last_command: str = ""  # Last shell command that was executed
         
+        progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
-        self._initialize_llm()
+        self._initialize_llm(quiet=True)
+
+        progress.step("Detecting environment...")
+        # Finish the progress bar
+        progress.finish()
+        
+        # Show LLM status after the progress bar (single clean line)
+        if self.nl_handler.llm_enabled:
+            print_success(f"  LLM: {self.nl_handler.provider.upper()} connected")
         
         # First-run setup
         if self.config.is_first_run():
             self.config.setup_first_run()
     
-    def _initialize_llm(self):
+    def _initialize_llm(self, quiet: bool = False):
         """Initialize LLM if API key is configured."""
         provider = self.config.get_llm_provider()
         api_key = self.config.get_llm_api_key()
         
         if provider and api_key:
             if self.nl_handler.initialize_llm(provider, api_key):
-                print_success(f"[OK] LLM initialized ({provider})")
+                if not quiet:
+                    print_success(f"[OK] LLM initialized ({provider})")
             else:
-                print_warning(f"[Warning] Failed to initialize LLM ({provider})")
+                if not quiet:
+                    print_warning(f"[Warning] Failed to initialize LLM ({provider})")
         else:
             # LLM not configured, will use stub responses
             pass
@@ -274,7 +401,7 @@ class CliaraShell:
         print_dim("  • Use 'explain <cmd>' to understand any command")
         print_dim("  • Type 'macro help' for macro commands")
         print_dim("  • Cross-platform commands are auto-translated")
-        print_dim("  • Errors are auto-explained with suggested fixes")
+        print_dim("  • Type '? fix' after any error to diagnose & repair")
         print_dim("  • Type 'help' for all commands")
         print_dim("  • Type 'exit' to quit")
         print()
@@ -352,7 +479,12 @@ class CliaraShell:
         if self.macros.exists(user_input):
             self.run_macro(user_input)
             return
-        
+
+        # Bare "fix" (without ?) — shortcut when there's a recent failure
+        if _looks_like_fix(user_input) and self.last_exit_code != 0 and self.last_command:
+            self.handle_fix()
+            return
+
         # Try fuzzy match for macros
         fuzzy_match = self.macros.find_fuzzy(user_input)
         if fuzzy_match:
@@ -374,13 +506,12 @@ class CliaraShell:
         # Default: pass through to underlying shell
         success = self.execute_shell_command(user_input)
         if not success:
-            # First: if the executable doesn't exist, try cross-platform
+            # If the executable doesn't exist, try cross-platform
             # translation (it returns early when the command *is* found).
             self._check_cross_platform(user_input)
 
-            # Second: if the command exists but failed, offer an
-            # AI-powered explanation of the stderr.
-            self._maybe_translate_error(user_input)
+            # Nudge the user toward '? fix' instead of auto-diagnosing
+            self._nudge_fix()
     
     def handle_nl_query(self, query: str):
         """
@@ -394,6 +525,12 @@ class CliaraShell:
         """
         if not query:
             print_error("[Error] Please provide a query after '?'")
+            return
+
+        # ── "? fix" — context-aware error repair (typo-tolerant) ──
+        # Catches: ? fix, ? fox, ? fxi, ? fiz, ? fixe, etc.
+        if _looks_like_fix(query):
+            self.handle_fix()
             return
         
         # Check for --save-as <name> flag
@@ -470,7 +607,7 @@ class CliaraShell:
             
             if not success:
                 print_error(f"[X] Command {i} failed")
-                self._maybe_translate_error(cmd)
+                self._nudge_fix()
                 break
         else:
             print_header("="*60)
@@ -480,6 +617,47 @@ class CliaraShell:
         # Save to history for "save last"
         self.history.set_last_execution(commands)
     
+    def handle_fix(self):
+        """
+        Context-aware error repair: '? fix'
+
+        Uses the last failed command's stderr, exit code, and the command
+        itself to ask the LLM (or stub patterns) how to fix the error.
+        No copy-pasting needed — Cliara already has all the context.
+        """
+        # Guard: is there anything to fix?
+        if not self.last_command:
+            print_error("[Cliara] Nothing to fix — no commands have been run yet.")
+            return
+
+        if self.last_exit_code == 0:
+            print_info(
+                f"[Cliara] Last command succeeded (exit 0): {self.last_command}"
+            )
+            print_dim("         Nothing to fix!")
+            return
+
+        stderr = self.last_stderr.strip()
+        if not stderr:
+            print_warning(
+                f"[Cliara] Last command failed (exit {self.last_exit_code}): "
+                f"{self.last_command}"
+            )
+            print_dim("         No stderr captured — nothing to analyse.")
+            return
+
+        # We have a failed command with stderr — hand off to the error
+        # translation pipeline (which already handles LLM + stub fallback,
+        # displays the explanation, and offers to run the fix).
+        print_info(
+            f"\n[Cliara] Diagnosing last failure..."
+        )
+        print_dim(f"         Command:   {self.last_command}")
+        print_dim(f"         Exit code: {self.last_exit_code}")
+        print()
+
+        self._handle_error_translation(self.last_command, stderr)
+
     def handle_macro_command(self, args: str):
         """
         Handle macro subcommands.
@@ -885,7 +1063,7 @@ class CliaraShell:
             
             if not success:
                 print_error(f"[X] Command {i} failed")
-                self._maybe_translate_error(cmd)
+                self._nudge_fix()
                 break
         else:
             print_header("="*60)
@@ -1002,6 +1180,24 @@ class CliaraShell:
     # ------------------------------------------------------------------
     # Error Translator — plain-English stderr explanations + fixes
     # ------------------------------------------------------------------
+    def _nudge_fix(self):
+        """
+        After a failed command, print a short one-line hint pointing the
+        user to '? fix' instead of running the full diagnosis automatically.
+        """
+        if not self.config.get("error_translation", True):
+            return
+        stderr = self.last_stderr.strip()
+        if not stderr:
+            return
+        # Don't nudge if the executable is missing — cross-platform
+        # translation already handles that case.
+        base_cmd = get_base_command(self.last_command)
+        if base_cmd and not command_exists(base_cmd):
+            return
+        nl_prefix = self.config.get("nl_prefix", "?")
+        print_dim(f"\n  Tip: type '{nl_prefix} fix' to diagnose this error\n")
+
     def _maybe_translate_error(self, command: str):
         """
         After a failed command, decide whether to invoke the Error
@@ -1114,6 +1310,7 @@ class CliaraShell:
         # Reset per-command error state
         self.last_stderr = ""
         self.last_exit_code = 0
+        self.last_command = command
 
         try:
             # Add to history
@@ -1259,10 +1456,11 @@ class CliaraShell:
         print("  macro search <word> - Search macros")
         print("  macro help          - Show macro commands")
         print("  <macro-name>        - Run a macro\n")
-        print("Error Translator:")
-        print("  When a command fails, Cliara automatically explains the")
-        print("  error in plain English and suggests a fix you can run.")
-        print("  Example: npm install → peer-dep conflict → offers --legacy-peer-deps\n")
+        print("Quick Fix:")
+        print(f"  {self.config.get('nl_prefix')} fix              - Diagnose the last failed command")
+        print("  No need to describe the error — Cliara already knows")
+        print("  what failed, the exit code, and the stderr output.")
+        print("  Example: pip install numpy fails → type '? fix' → get the fix\n")
         print("Cross-Platform Translation:")
         print("  If a command fails because it doesn't exist on your OS,")
         print("  Cliara will suggest the equivalent command automatically.")

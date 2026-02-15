@@ -406,29 +406,83 @@ class CliaraShell:
         print_dim("  • Type 'exit' to quit")
         print()
     
+    # ------------------------------------------------------------------
+    # Highlighted prompt (prompt_toolkit + Pygments)
+    # ------------------------------------------------------------------
+    def _create_prompt_session(self):
+        """
+        Build a prompt_toolkit PromptSession with syntax highlighting.
+
+        Returns the session, or *None* if prompt_toolkit / pygments are
+        unavailable (falls back to plain ``input()``).
+        """
+        try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.history import InMemoryHistory
+            from prompt_toolkit.lexers import PygmentsLexer
+            from prompt_toolkit.styles import merge_styles, Style as PTStyle
+            from prompt_toolkit.styles.pygments import style_from_pygments_cls
+            from cliara.highlighting import ShellLexer, CliaraStyle, PROMPT_STYLE
+
+            # Seed prompt history from existing command history so
+            # arrow-up recalls previous sessions' commands.
+            pt_history = InMemoryHistory()
+            for cmd in self.history.history:
+                pt_history.store_string(cmd)
+
+            style = merge_styles([
+                style_from_pygments_cls(CliaraStyle),
+                PTStyle.from_dict(PROMPT_STYLE),
+            ])
+
+            return PromptSession(
+                lexer=PygmentsLexer(ShellLexer),
+                style=style,
+                history=pt_history,
+            )
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Main REPL
+    # ------------------------------------------------------------------
     def run(self):
         """Main shell loop."""
         self.print_banner()
-        
-        # Enable arrow-key history recall
-        self.history.setup_readline()
-        
+
+        # Try to set up the highlighted prompt; fall back to plain input
+        session = self._create_prompt_session()
+        if session is None:
+            # prompt_toolkit unavailable — use readline instead
+            self.history.setup_readline()
+
         # Use safe prompt character for Windows
-        prompt_arrow = ">" if platform.system() == "Windows" else "❯"
-        
+        prompt_arrow = ">" if platform.system() == "Windows" else ">"
+
         while self.running:
             try:
-                # Get current directory for prompt
                 cwd = Path.cwd().name
-                prompt = f"cliara:{cwd} {prompt_arrow} "
-                
-                user_input = input(prompt).strip()
-                
+
+                if session is not None:
+                    # Coloured, syntax-highlighted prompt
+                    message = [
+                        ("class:prompt-name", "cliara"),
+                        ("class:prompt-sep", ":"),
+                        ("class:prompt-path", cwd),
+                        ("", " "),
+                        ("class:prompt-arrow", f"{prompt_arrow} "),
+                    ]
+                    user_input = session.prompt(message).strip()
+                else:
+                    # Plain fallback
+                    prompt = f"cliara:{cwd} {prompt_arrow} "
+                    user_input = input(prompt).strip()
+
                 if not user_input:
                     continue
-                
+
                 self.handle_input(user_input)
-            
+
             except KeyboardInterrupt:
                 print("\n(Use 'exit' to quit)")
                 continue

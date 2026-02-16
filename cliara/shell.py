@@ -1369,13 +1369,91 @@ class CliaraShell:
                     print_success("[Cliara] Fix applied successfully!")
         print()
 
+    # ------------------------------------------------------------------
+    # Long-running command notification
+    # ------------------------------------------------------------------
+    def _notify_completion(self, command: str, elapsed: float, success: bool):
+        """
+        Send a desktop notification when a command exceeds the configured
+        threshold.  Uses the terminal bell (\\a) as the primary mechanism
+        — zero dependencies, works everywhere.  On Windows 10+ we also
+        attempt a toast notification via a PowerShell one-liner.
+        """
+        threshold = self.config.get("notify_after_seconds", 30)
+        if threshold <= 0 or elapsed < threshold:
+            return
+
+        status = "completed" if success else "failed"
+        elapsed_str = f"{elapsed:.0f}s"
+
+        # Shorten command for display
+        short_cmd = command if len(command) <= 40 else command[:37] + "..."
+
+        # Always print a summary line
+        if success:
+            print_success(f"\n[Cliara] {short_cmd} {status} ({elapsed_str})")
+        else:
+            print_error(f"\n[Cliara] {short_cmd} {status} ({elapsed_str})")
+
+        # Terminal bell — works on virtually every terminal
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+
+        # Windows toast notification (best-effort, silent failure)
+        if platform.system() == "Windows":
+            try:
+                title = "Cliara"
+                body = f"{short_cmd} {status} ({elapsed_str})"
+                # PowerShell one-liner using BurntToast or built-in
+                ps_cmd = (
+                    f'[System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | Out-Null; '
+                    f'$n = New-Object System.Windows.Forms.NotifyIcon; '
+                    f'$n.Icon = [System.Drawing.SystemIcons]::Information; '
+                    f'$n.Visible = $true; '
+                    f'$n.ShowBalloonTip(5000, "{title}", "{body}", '
+                    f'[System.Windows.Forms.ToolTipIcon]::Info); '
+                    f'Start-Sleep -Seconds 6; $n.Dispose()'
+                )
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+            except Exception:
+                pass  # Toast is a nice-to-have, not critical
+        else:
+            # macOS / Linux: try notify-send or osascript
+            try:
+                if platform.system() == "Darwin":
+                    subprocess.Popen(
+                        ["osascript", "-e",
+                         f'display notification "{short_cmd} {status} ({elapsed_str})" '
+                         f'with title "Cliara"'],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    subprocess.Popen(
+                        ["notify-send", "Cliara",
+                         f"{short_cmd} {status} ({elapsed_str})"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+            except Exception:
+                pass
+
+        print_dim("  [Desktop notification sent]")
+
     def execute_shell_command(self, command: str, capture: bool = False) -> bool:
         """
         Execute a command in the underlying shell.
 
         Stderr is always captured (in addition to being displayed in
         real-time) so the Error Translator can analyse it when the
-        command fails.
+        command fails.  If the command takes longer than the configured
+        ``notify_after_seconds`` threshold, a desktop notification is
+        sent when it finishes.
 
         Args:
             command: Shell command to execute
@@ -1388,6 +1466,8 @@ class CliaraShell:
         self.last_stderr = ""
         self.last_exit_code = 0
         self.last_command = command
+
+        start_time = time.time()
 
         try:
             # Add to history
@@ -1408,7 +1488,9 @@ class CliaraShell:
                     print(result.stderr, end="", file=sys.stderr)
                 self.last_stderr = result.stderr or ""
                 self.last_exit_code = result.returncode
-                return result.returncode == 0
+                success = result.returncode == 0
+                self._notify_completion(command, time.time() - start_time, success)
+                return success
             else:
                 # ── Streaming mode: stdout inherited, stderr piped ──
                 # We pipe stderr through a background thread so it is
@@ -1446,6 +1528,7 @@ class CliaraShell:
                     reader.join(timeout=5)
                     print_error("[Error] Command timed out (5 minutes)")
                     self.last_exit_code = -1
+                    self._notify_completion(command, time.time() - start_time, False)
                     return False
 
                 # Wait for the reader thread to finish flushing
@@ -1453,7 +1536,9 @@ class CliaraShell:
 
                 self.last_stderr = "".join(stderr_lines)
                 self.last_exit_code = proc.returncode
-                return proc.returncode == 0
+                success = proc.returncode == 0
+                self._notify_completion(command, time.time() - start_time, success)
+                return success
 
         except Exception as e:
             print_error(f"[Error] {e}")

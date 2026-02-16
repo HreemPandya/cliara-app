@@ -364,6 +364,14 @@ class CliaraShell:
         self.last_stderr: str = ""
         self.last_exit_code: int = 0
         self.last_command: str = ""  # Last shell command that was executed
+
+        # Prompt session reference — set in run().
+        self._prompt_session = None
+
+        # Pending fix command — set by _auto_suggest_fix(), consumed by
+        # the Tab key binding in prompt_toolkit.  Pressing Tab on an empty
+        # prompt fills in this command; any other input clears it.
+        self._pending_fix: Optional[str] = None
         
         progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
@@ -414,6 +422,7 @@ class CliaraShell:
         else:
             print_dim(f"  • {nl} <query>             Ask in plain English  (requires API key)")
         print_dim(f"  • {nl} fix                 Diagnose & fix the last failed command")
+        print_dim(f"  • Auto-fix hints          Shown on failure — press Tab to accept")
         print_dim(f"  • push                    Smart git push — auto-commit message & branch")
         print_dim(f"  • explain <cmd>           Understand any command  (e.g. explain git rebase)")
         print_dim(f"  • macro add <name>        Create a reusable macro")
@@ -533,6 +542,17 @@ class CliaraShell:
                 except Exception:
                     pass
 
+            @kb.add("tab", eager=True)
+            def _accept_fix(event):
+                """Tab on empty prompt → fill in the pending fix suggestion."""
+                buf = event.current_buffer
+                if buf.text == "" and self._pending_fix:
+                    buf.insert_text(self._pending_fix)
+                    self._pending_fix = None
+                else:
+                    # Default Tab behaviour (completion)
+                    buf.complete_next()
+
             # Seed prompt history from existing command history so
             # arrow-up recalls previous sessions' commands.
             pt_history = InMemoryHistory()
@@ -562,6 +582,7 @@ class CliaraShell:
 
         # Try to set up the highlighted prompt; fall back to plain input
         session = self._create_prompt_session()
+        self._prompt_session = session  # store for _auto_suggest_fix
         if session is None:
             # prompt_toolkit unavailable — use readline instead
             self.history.setup_readline()
@@ -612,6 +633,9 @@ class CliaraShell:
         Args:
             user_input: Raw user input
         """
+        # Any new input clears a pending fix suggestion
+        self._pending_fix = None
+
         # Check for exit commands
         if user_input.lower() in ['exit', 'quit', 'q']:
             print("Goodbye!")
@@ -684,8 +708,8 @@ class CliaraShell:
             # translation (it returns early when the command *is* found).
             self._check_cross_platform(user_input)
 
-            # Nudge the user toward '? fix' instead of auto-diagnosing
-            self._nudge_fix()
+            # Auto-suggest a fix right below the error
+            self._auto_suggest_fix()
     
     def handle_nl_query(self, query: str):
         """
@@ -784,7 +808,7 @@ class CliaraShell:
             
             if not success:
                 print_error(f"[X] Command {i} failed")
-                self._nudge_fix()
+                self._auto_suggest_fix()
                 break
         else:
             print_header("="*60)
@@ -1253,7 +1277,7 @@ class CliaraShell:
             
             if not success:
                 print_error(f"[X] Command {i} failed")
-                self._nudge_fix()
+                self._auto_suggest_fix()
                 break
         else:
             print_header("="*60)
@@ -1402,23 +1426,54 @@ class CliaraShell:
     # ------------------------------------------------------------------
     # Error Translator — plain-English stderr explanations + fixes
     # ------------------------------------------------------------------
-    def _nudge_fix(self):
+    def _auto_suggest_fix(self):
         """
-        After a failed command, print a short one-line hint pointing the
-        user to '? fix' instead of running the full diagnosis automatically.
+        After a failed command, automatically run the error translator and
+        show a non-intrusive one-liner hint.  If a fix command is available,
+        store it so the user can press Tab on an empty prompt to fill it in.
+
+        Example output:
+            hint: try 'pip install requests' (Tab to use)
         """
         if not self.config.get("error_translation", True):
             return
         stderr = self.last_stderr.strip()
         if not stderr:
             return
-        # Don't nudge if the executable is missing — cross-platform
+        # Don't suggest if the executable is missing — cross-platform
         # translation already handles that case.
         base_cmd = get_base_command(self.last_command)
         if base_cmd and not command_exists(base_cmd):
             return
-        nl_prefix = self.config.get("nl_prefix", "?")
-        print_dim(f"\n  Tip: type '{nl_prefix} fix' to diagnose this error\n")
+
+        # Build context for the error translator
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+
+        result = self.nl_handler.translate_error(
+            self.last_command,
+            self.last_exit_code,
+            stderr,
+            context,
+        )
+
+        explanation = result.get("explanation", "")
+        fix_commands = result.get("fix_commands", [])
+
+        if fix_commands:
+            fix_display = " && ".join(fix_commands)
+            self._pending_fix = fix_display
+            print_dim(f"\n  hint: try '{fix_display}' (Tab to use)")
+        elif explanation:
+            # No concrete fix, but we have a useful explanation
+            # Keep it short — truncate to one line
+            short = explanation.split(".")[0].strip()
+            if short:
+                print_dim(f"\n  hint: {short}")
+        print()  # trailing blank line for readability
 
     def _maybe_translate_error(self, command: str):
         """
@@ -1978,9 +2033,10 @@ class CliaraShell:
 
         print_info("  Quick Fix")
         print_dim("  ─────────────────────────────────────")
-        print(f"  {nl} fix                    Diagnose the last failed command")
-        print("  Cliara already knows what failed, the exit code, and stderr.")
-        print_dim(f"  Example: pip install fails → type '{nl} fix' → get the fix\n")
+        print("  When a command fails, Cliara automatically shows a fix hint:")
+        print_dim("    hint: try 'python3 script.py' (Tab to use)")
+        print("  Press Tab on an empty prompt to fill in the fix, then Enter.")
+        print(f"  {nl} fix                    Full interactive diagnosis\n")
 
         print_info("  Smart Push")
         print_dim("  ─────────────────────────────────────")

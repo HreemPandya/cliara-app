@@ -146,7 +146,7 @@ class _StartupProgress:
 
     # -- internal helpers ---------------------------------------------------
     def _render(self):
-        """Redraw the progress line in-place."""
+        """Redraw the progress line in-place, respecting terminal width."""
         frac = self.current / self.total if self.total else 1
         filled = int(frac * self.BAR_WIDTH)
         empty = self.BAR_WIDTH - filled
@@ -155,9 +155,22 @@ class _StartupProgress:
         bar_empty = _c("2", "." * empty) if _COLOR else "." * empty
         pct = f"{int(frac * 100):>3}%"
 
-        line = f"\r  [{bar_filled}{bar_empty}] {pct}  {self._label}"
-        # Pad with spaces to overwrite any leftover chars from a longer label
-        sys.stdout.write(f"{line:<80}")
+        # Fixed-width prefix:  "  [" + 30-char bar + "] NNN%  " = 41 visible chars
+        prefix = f"  [{bar_filled}{bar_empty}] {pct}  "
+        prefix_visible_len = 2 + 1 + self.BAR_WIDTH + 2 + 4 + 2  # 41
+
+        # Truncate the label so the full line never exceeds terminal width
+        try:
+            cols = os.get_terminal_size().columns
+        except OSError:
+            cols = 80
+        max_label = max(cols - prefix_visible_len - 1, 0)  # -1 safety margin
+        label = self._label[:max_label]
+
+        line = f"{prefix}{label}"
+        # \r returns to column 0; \033[K clears from cursor to end of line
+        clear = "\033[K" if _COLOR else " " * max(cols - prefix_visible_len - len(label), 0)
+        sys.stdout.write(f"\r{line}{clear}")
         sys.stdout.flush()
 
     # -- public API ---------------------------------------------------------

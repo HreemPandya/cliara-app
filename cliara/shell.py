@@ -9,7 +9,8 @@ import os
 import platform
 import threading
 import time
-from typing import Optional, List, Tuple
+from contextlib import contextmanager
+from typing import Optional, List, Tuple, Union
 from pathlib import Path
 
 from cliara.config import Config
@@ -193,6 +194,149 @@ class _StartupProgress:
         self._render()
         sys.stdout.write("\n")
         sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------
+# Live spinner / elapsed-time timer for long-running commands
+# ---------------------------------------------------------------------------
+
+class _NullTimer:
+    """No-op timer used when the spinner feature is disabled."""
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    @contextmanager
+    def output_lock(self):
+        yield
+
+
+class _LiveTimer:
+    """
+    Background spinner + elapsed-time indicator for long-running commands.
+
+    After *delay* seconds of silence, starts showing:
+      - The terminal title bar with a spinner + elapsed time (always)
+      - An inline dim spinner on stderr (only when *inline=True*)
+
+    In **capture mode** (``inline=True``) nothing else prints to the
+    terminal, so the inline spinner is safe.  In **streaming mode**
+    (``inline=False``) the child's stdout is inherited and shares the
+    terminal cursor, so only the title bar is updated to avoid garbled
+    output.
+    """
+
+    FRAMES = ("|", "/", "-", "\\")
+
+    def __init__(self, command: str, delay: float = 3.0, inline: bool = True):
+        short = command if len(command) <= 30 else command[:27] + "..."
+        self._short_cmd = short
+        self._delay = delay
+        self._inline = inline
+        self._start_time = time.time()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._spinner_visible = False
+        self._title_changed = False
+
+    # ── public API ─────────────────────────────────────────────────
+
+    def start(self):
+        """Launch the background timer thread."""
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop the timer and clean up terminal artefacts."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        with self._lock:
+            self._clear_spinner()
+            self._restore_title()
+
+    @contextmanager
+    def output_lock(self):
+        """
+        Context manager for external writers (e.g. the stderr drain thread).
+
+        Clears the spinner line, yields so the caller can write freely,
+        then releases.  The spinner redraws itself on its next tick.
+        """
+        with self._lock:
+            self._clear_spinner()
+            yield
+
+    # ── internals ──────────────────────────────────────────────────
+
+    def _clear_spinner(self):
+        """Erase the spinner line if it is currently visible."""
+        if self._spinner_visible:
+            if _COLOR:
+                sys.stderr.write("\r\033[K")
+            else:
+                sys.stderr.write("\r" + " " * 40 + "\r")
+            sys.stderr.flush()
+            self._spinner_visible = False
+
+    def _restore_title(self):
+        """Reset the terminal title to 'Cliara'."""
+        if self._title_changed and _COLOR:
+            sys.stderr.write("\033]0;Cliara\007")
+            sys.stderr.flush()
+            self._title_changed = False
+
+    def _run(self):
+        """Timer loop: wait for the delay, then tick every 0.5 s."""
+        # If the command finishes before the delay, exit silently
+        if self._stop_event.wait(timeout=self._delay):
+            return
+
+        idx = 0
+        while not self._stop_event.is_set():
+            elapsed = time.time() - self._start_time
+            elapsed_str = self._fmt(elapsed)
+            frame = self.FRAMES[idx % len(self.FRAMES)]
+
+            with self._lock:
+                # Terminal title (written to stderr to avoid interleaving
+                # with child stdout which is inherited)
+                if _COLOR:
+                    sys.stderr.write(
+                        f"\033]0;{frame} {self._short_cmd}  {elapsed_str}\007"
+                    )
+                    self._title_changed = True
+
+                # Inline spinner — only in capture mode where nothing
+                # else is printing to the terminal.
+                if self._inline:
+                    line = f"  {frame} running... {elapsed_str}"
+                    if _COLOR:
+                        sys.stderr.write(f"\r\033[K\033[2m{line}\033[0m")
+                    else:
+                        sys.stderr.write(f"\r{line}        ")
+                    self._spinner_visible = True
+
+                sys.stderr.flush()
+
+            idx += 1
+            self._stop_event.wait(timeout=0.5)
+
+    @staticmethod
+    def _fmt(seconds: float) -> str:
+        """Format seconds as a compact elapsed-time string."""
+        s = int(seconds)
+        if s < 60:
+            return f"{s}s"
+        m, s = divmod(s, 60)
+        if m < 60:
+            return f"{m}m{s:02d}s"
+        h, m = divmod(m, 60)
+        return f"{h}h{m:02d}m"
 
 
 class CommandHistory:
@@ -1651,9 +1795,9 @@ class CliaraShell:
 
         Stderr is always captured (in addition to being displayed in
         real-time) so the Error Translator can analyse it when the
-        command fails.  If the command takes longer than the configured
-        ``notify_after_seconds`` threshold, a desktop notification is
-        sent when it finishes.
+        command fails.  A live spinner with elapsed time is shown for
+        long-running commands, and a desktop notification fires when a
+        command exceeds ``notify_after_seconds``.
 
         Args:
             command: Shell command to execute
@@ -1669,6 +1813,12 @@ class CliaraShell:
 
         start_time = time.time()
 
+        # Build a timer (or a no-op stub when spinners are disabled).
+        # In capture mode nothing prints, so the inline spinner is safe.
+        # In streaming mode the child's stdout is inherited, so we only
+        # update the terminal title bar to avoid garbled output.
+        spinner_delay = self.config.get("spinner_delay_seconds", 3)
+
         try:
             # Add to history
             self.history.add(command)
@@ -1676,13 +1826,24 @@ class CliaraShell:
 
             if capture:
                 # ── Capture mode: both stdout and stderr captured ──
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
+                if spinner_delay > 0:
+                    timer: Union[_LiveTimer, _NullTimer] = _LiveTimer(
+                        command, delay=spinner_delay, inline=True,
+                    )
+                else:
+                    timer = _NullTimer()
+                timer.start()
+                try:
+                    result = subprocess.run(
+                        command,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+                finally:
+                    timer.stop()
+
                 print(result.stdout, end="")
                 if result.stderr:
                     print(result.stderr, end="", file=sys.stderr)
@@ -1692,13 +1853,23 @@ class CliaraShell:
                 self._notify_completion(command, time.time() - start_time, success)
                 return success
             else:
-                # ── Streaming mode: stdout inherited, stderr piped ──
-                # We pipe stderr through a background thread so it is
-                # still displayed in real-time *and* buffered for the
-                # Error Translator.
+                # ── Streaming mode: stdout AND stderr piped ──
+                # Both streams are relayed to the terminal by background
+                # threads that coordinate with the inline spinner via
+                # output_lock().  Piping stdout (instead of inheriting
+                # it) means the spinner and command output never fight
+                # over the same cursor.
+                if spinner_delay > 0:
+                    timer = _LiveTimer(
+                        command, delay=spinner_delay, inline=True,
+                    )
+                else:
+                    timer = _NullTimer()
+
                 proc = subprocess.Popen(
                     command,
                     shell=True,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     encoding="utf-8",
                     errors="replace",
@@ -1706,33 +1877,57 @@ class CliaraShell:
 
                 stderr_lines: List[str] = []
 
+                def _drain_stdout():
+                    """Read stdout line-by-line, display via timer lock."""
+                    try:
+                        assert proc.stdout is not None
+                        for line in proc.stdout:
+                            with timer.output_lock():
+                                sys.stdout.write(line)
+                                sys.stdout.flush()
+                    except Exception:
+                        pass
+
                 def _drain_stderr():
                     """Read stderr line-by-line, display and buffer."""
                     try:
                         assert proc.stderr is not None
                         for line in proc.stderr:
                             stderr_lines.append(line)
-                            sys.stderr.write(line)
-                            sys.stderr.flush()
+                            with timer.output_lock():
+                                sys.stderr.write(line)
+                                sys.stderr.flush()
                     except Exception:
-                        pass  # Don't crash the shell on read errors
+                        pass
 
-                reader = threading.Thread(target=_drain_stderr, daemon=True)
-                reader.start()
+                stdout_reader = threading.Thread(
+                    target=_drain_stdout, daemon=True,
+                )
+                stderr_reader = threading.Thread(
+                    target=_drain_stderr, daemon=True,
+                )
+                stdout_reader.start()
+                stderr_reader.start()
+                timer.start()
 
+                timed_out = False
                 try:
                     proc.wait(timeout=300)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-                    reader.join(timeout=5)
+                    timed_out = True
+
+                # Stop timer first (clears spinner), then join readers
+                timer.stop()
+                stdout_reader.join(timeout=5)
+                stderr_reader.join(timeout=5)
+
+                if timed_out:
                     print_error("[Error] Command timed out (5 minutes)")
                     self.last_exit_code = -1
                     self._notify_completion(command, time.time() - start_time, False)
                     return False
-
-                # Wait for the reader thread to finish flushing
-                reader.join(timeout=5)
 
                 self.last_stderr = "".join(stderr_lines)
                 self.last_exit_code = proc.returncode
@@ -1741,6 +1936,7 @@ class CliaraShell:
                 return success
 
         except Exception as e:
+            timer.stop()
             print_error(f"[Error] {e}")
             return False
     

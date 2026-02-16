@@ -413,6 +413,84 @@ class CliaraShell:
     # ------------------------------------------------------------------
     # Highlighted prompt (prompt_toolkit + Pygments)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _read_system_clipboard() -> str:
+        """
+        Read text from the OS clipboard without extra dependencies.
+
+        Windows: ctypes with safe pointer handling
+        macOS:   pbpaste
+        Linux:   xclip / xsel
+        """
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+                import ctypes.wintypes as wt
+
+                CF_UNICODETEXT = 13
+
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+                user32.OpenClipboard.argtypes = [wt.HWND]
+                user32.OpenClipboard.restype = wt.BOOL
+                user32.GetClipboardData.argtypes = [wt.UINT]
+                user32.GetClipboardData.restype = wt.HANDLE
+                user32.CloseClipboard.argtypes = []
+                user32.CloseClipboard.restype = wt.BOOL
+
+                kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
+                kernel32.GlobalLock.restype = ctypes.c_void_p
+                kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+                kernel32.GlobalUnlock.restype = wt.BOOL
+                kernel32.GlobalSize.argtypes = [wt.HGLOBAL]
+                kernel32.GlobalSize.restype = ctypes.c_size_t
+
+                if not user32.OpenClipboard(None):
+                    return ""
+                try:
+                    handle = user32.GetClipboardData(CF_UNICODETEXT)
+                    if not handle:
+                        return ""
+                    size = kernel32.GlobalSize(handle)
+                    if size == 0:
+                        return ""
+                    ptr = kernel32.GlobalLock(handle)
+                    if not ptr:
+                        return ""
+                    try:
+                        max_chars = size // 2
+                        text = ctypes.wstring_at(ptr, max_chars)
+                        return text.rstrip("\x00")
+                    finally:
+                        kernel32.GlobalUnlock(handle)
+                finally:
+                    user32.CloseClipboard()
+            except Exception:
+                return ""
+        elif platform.system() == "Darwin":
+            try:
+                r = subprocess.run(
+                    ["pbpaste"], capture_output=True, text=True, timeout=2,
+                )
+                return r.stdout if r.returncode == 0 else ""
+            except Exception:
+                return ""
+        else:
+            for tool in (
+                ["xclip", "-selection", "clipboard", "-o"],
+                ["xsel", "--clipboard", "--output"],
+            ):
+                try:
+                    r = subprocess.run(
+                        tool, capture_output=True, text=True, timeout=2,
+                    )
+                    if r.returncode == 0:
+                        return r.stdout
+                except Exception:
+                    continue
+            return ""
+
     def _create_prompt_session(self):
         """
         Build a prompt_toolkit PromptSession with syntax highlighting.
@@ -423,10 +501,24 @@ class CliaraShell:
         try:
             from prompt_toolkit import PromptSession
             from prompt_toolkit.history import InMemoryHistory
+            from prompt_toolkit.key_binding import KeyBindings
             from prompt_toolkit.lexers import PygmentsLexer
             from prompt_toolkit.styles import merge_styles, Style as PTStyle
             from prompt_toolkit.styles.pygments import style_from_pygments_cls
             from cliara.highlighting import ShellLexer, CliaraStyle, PROMPT_STYLE
+
+            # ── Custom key bindings ──
+            kb = KeyBindings()
+
+            @kb.add("c-v", eager=True)
+            def _paste(event):
+                """Paste from the system clipboard (Ctrl+V)."""
+                try:
+                    text = self._read_system_clipboard()
+                    if text:
+                        event.current_buffer.insert_text(text)
+                except Exception:
+                    pass
 
             # Seed prompt history from existing command history so
             # arrow-up recalls previous sessions' commands.
@@ -443,6 +535,7 @@ class CliaraShell:
                 lexer=PygmentsLexer(ShellLexer),
                 style=style,
                 history=pt_history,
+                key_bindings=kb,
             )
         except Exception:
             return None

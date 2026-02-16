@@ -399,6 +399,7 @@ class CliaraShell:
         else:
             print_dim(f"  • {nl} <query>             Ask in plain English  (requires API key)")
         print_dim(f"  • {nl} fix                 Diagnose & fix the last failed command")
+        print_dim(f"  • push                    Smart git push — auto-commit message & branch")
         print_dim(f"  • explain <cmd>           Understand any command  (e.g. explain git rebase)")
         print_dim(f"  • macro add <name>        Create a reusable macro")
         print_dim(f"  • macro add <name> --nl   Create a macro from plain English")
@@ -519,6 +520,11 @@ class CliaraShell:
             self.handle_explain(user_input[8:].strip())
             return
 
+        # Smart push — auto-commit-message + branch detection
+        if user_input.lower() == 'push':
+            self.handle_push()
+            return
+
         # Check for NL prefix (Phase 2 - stubbed for now)
         nl_prefix = self.config.get('nl_prefix', '?')
         if user_input.startswith(nl_prefix):
@@ -628,6 +634,9 @@ class CliaraShell:
         if save_as_name:
             confirm = input(f"\nSave as macro '{save_as_name}'? (y/n): ").strip().lower()
             if confirm not in ['y', 'yes']:
+                print_warning("[Cancelled]")
+                return
+            if not self._check_macro_name_conflict(save_as_name):
                 print_warning("[Cancelled]")
                 return
             description = input("Description (optional): ").strip() or query
@@ -794,6 +803,9 @@ class CliaraShell:
                 print_warning("[Cancelled]")
                 return
         
+        if not self._check_macro_name_conflict(name):
+            print_warning("[Cancelled]")
+            return
         self.macros.add(name, commands, description)
         print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s)")
     
@@ -868,6 +880,9 @@ class CliaraShell:
                 print_warning("[Cancelled]")
                 return
         
+        if not self._check_macro_name_conflict(name):
+            print_warning("[Cancelled]")
+            return
         description = input("Description (optional): ").strip() or nl_description
         
         self.macros.add(name, commands, description)
@@ -1024,6 +1039,10 @@ class CliaraShell:
             print_error(f"[Error] Macro '{new_name}' already exists")
             return
 
+        if not self._check_macro_name_conflict(new_name):
+            print_warning("[Cancelled]")
+            return
+
         # Re-create under new name, then delete old
         self.macros.add(new_name, macro.commands, macro.description, tags=macro.tags)
         self.macros.delete(old_name)
@@ -1055,6 +1074,9 @@ class CliaraShell:
             print_warning("[Cancelled]")
             return
         
+        if not self._check_macro_name_conflict(name):
+            print_warning("[Cancelled]")
+            return
         description = input("Description (optional): ").strip()
         self.macros.add(name, last_commands, description)
         print_success(f"[OK] Macro '{name}' saved!")
@@ -1437,6 +1459,210 @@ class CliaraShell:
             print_error(f"[Error] {e}")
             return False
     
+    # ------------------------------------------------------------------
+    # Smart Push — auto-commit-message + branch detection
+    # ------------------------------------------------------------------
+    def handle_push(self):
+        """
+        Built-in smart push: detect branch, stage changes, generate a
+        conventional commit message via LLM, commit, and push.
+        """
+        # ── 1. Are we in a git repo? ──
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print_error("[Cliara] Not inside a git repository.")
+            return
+
+        # ── 2. Current branch ──
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True,
+        )
+        branch = result.stdout.strip()
+        if not branch:
+            print_error("[Cliara] Detached HEAD state — checkout a branch first.")
+            return
+
+        # ── 3. Anything to commit? ──
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        status_output = result.stdout.strip()
+
+        if not status_output:
+            # Nothing to commit — maybe there are unpushed commits?
+            result = subprocess.run(
+                ["git", "log", f"origin/{branch}..HEAD", "--oneline"],
+                capture_output=True, text=True,
+            )
+            unpushed = result.stdout.strip()
+            if unpushed:
+                count = len(unpushed.splitlines())
+                print_info(
+                    f"\n[Cliara] {count} unpushed commit(s) on '{branch}':\n"
+                )
+                print(unpushed)
+                try:
+                    confirm = input(
+                        f"\nPush to '{branch}'? (y/n): "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return
+                if confirm in ("y", "yes"):
+                    print()
+                    self.execute_shell_command(f"git push origin {branch}")
+                else:
+                    print_warning("[Cancelled]")
+            else:
+                print_info(
+                    f"[Cliara] Everything up to date on '{branch}'. "
+                    "Nothing to commit or push."
+                )
+            return
+
+        # ── 4. Show what changed ──
+        print_info(f"\n[Cliara] Changes detected on '{branch}':\n")
+        # Coloured status from git
+        subprocess.run(["git", "-c", "color.status=always", "status", "--short"])
+
+        # ── 5. Stage everything ──
+        print_dim("\nStaging all changes...")
+        subprocess.run(["git", "add", "-A"], capture_output=True)
+
+        # ── 6. Gather diff for message generation ──
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--stat"],
+            capture_output=True, text=True,
+        )
+        diff_stat = result.stdout.strip()
+
+        result = subprocess.run(
+            ["git", "diff", "--cached"],
+            capture_output=True, text=True,
+        )
+        diff_content = result.stdout.strip()
+
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            capture_output=True, text=True,
+        )
+        files = [f for f in result.stdout.strip().splitlines() if f]
+
+        # ── 7. Generate commit message ──
+        print_dim("Generating commit message...\n")
+
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+            "branch": branch,
+        }
+        commit_msg = self.nl_handler.generate_commit_message(
+            diff_stat, diff_content, files, context
+        )
+
+        # ── 8. Show message and confirm ──
+        print_info("[Cliara] Commit message:")
+        print(f"\n  {commit_msg}\n")
+        print_dim(f"  Branch: {branch}")
+        print_dim(f"  Files:  {len(files)} changed")
+        print()
+
+        try:
+            response = input(
+                "Accept? (y)es / (e)dit / (n)o: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            self._unstage_all()
+            return
+
+        if response in ("e", "edit"):
+            custom = input("Enter commit message: ").strip()
+            if not custom:
+                print_warning("[Cancelled]")
+                self._unstage_all()
+                return
+            commit_msg = custom
+        elif response not in ("y", "yes"):
+            print_warning("[Cancelled]")
+            self._unstage_all()
+            return
+
+        # ── 9. Commit (use subprocess list form to safely handle quotes) ──
+        print()
+        proc = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+        )
+        if proc.returncode != 0:
+            print_error("[Cliara] Commit failed.")
+            return
+
+        # ── 10. Push ──
+        # Check if the remote branch already exists
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            success = self.execute_shell_command(f"git push origin {branch}")
+        else:
+            print_dim(f"Branch '{branch}' is new on remote — setting up tracking...")
+            success = self.execute_shell_command(
+                f"git push -u origin {branch}"
+            )
+
+        if success:
+            print_success(f"\n[Cliara] Successfully pushed to '{branch}'!")
+
+    def _unstage_all(self):
+        """Reset the staging area (undo git add -A)."""
+        subprocess.run(["git", "reset"], capture_output=True)
+
+    # ------------------------------------------------------------------
+    # Macro conflict detection
+    # ------------------------------------------------------------------
+
+    # Built-in names that a macro would shadow
+    _BUILTIN_NAMES = frozenset({
+        "exit", "quit", "q", "help", "explain", "push",
+        "macro", "cd", "clear", "cls", "fix",
+    })
+
+    def _check_macro_name_conflict(self, name: str) -> bool:
+        """
+        Warn if a macro name would shadow a system command or Cliara
+        built-in.  Returns True if it's OK to proceed, False if the
+        user declined.
+        """
+        reason = None
+
+        if name.lower() in self._BUILTIN_NAMES:
+            reason = f"'{name}' is a Cliara built-in command"
+        elif command_exists(name):
+            reason = f"'{name}' is a system command on this machine"
+
+        if reason is None:
+            return True  # no conflict
+
+        print_warning(f"\n[Warning] {reason}.")
+        print_dim(
+            "  Creating a macro with this name will shadow it — "
+            "the original command\n  won't be reachable by name."
+        )
+        try:
+            confirm = input("  Create macro anyway? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+        return confirm in ("y", "yes")
+
     def handle_explain(self, command: str):
         """
         Explain a shell command in plain English using the LLM.
@@ -1516,6 +1742,12 @@ class CliaraShell:
         print("  No need to describe the error — Cliara already knows")
         print("  what failed, the exit code, and the stderr output.")
         print("  Example: pip install numpy fails → type '? fix' → get the fix\n")
+        print("Smart Push:")
+        print("  push                - Stage, auto-commit, and push in one step")
+        print("  Detects your current branch automatically.")
+        print("  Generates a conventional commit message (feat:, fix:, docs:, ...)")
+        print("  from the diff — no need to write one yourself.")
+        print("  You can accept, edit, or cancel before anything is pushed.\n")
         print("Cross-Platform Translation:")
         print("  If a command fails because it doesn't exist on your OS,")
         print("  Cliara will suggest the equivalent command automatically.")

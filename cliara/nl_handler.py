@@ -346,6 +346,167 @@ Command: {command}"""
         )
 
     # ------------------------------------------------------------------
+    # Commit-message generation (smart push)
+    # ------------------------------------------------------------------
+
+    def generate_commit_message(
+        self,
+        diff_stat: str,
+        diff_content: str,
+        files: List[str],
+        context: Optional[dict] = None,
+    ) -> str:
+        """
+        Generate a conventional commit message from a git diff.
+
+        Args:
+            diff_stat:    Output of ``git diff --cached --stat``
+            diff_content: Output of ``git diff --cached`` (may be truncated)
+            files:        List of changed file paths
+            context:      Optional dict with branch, cwd, os, etc.
+
+        Returns:
+            A single-line conventional commit message.
+        """
+        if not self.llm_enabled:
+            return self._stub_commit_message(files, context)
+
+        try:
+            ctx = self._build_context(context)
+            branch = (context or {}).get("branch", "main")
+
+            # Truncate diff to ~3 000 chars to stay within token limits
+            diff_truncated = diff_content[:3000]
+            if len(diff_content) > 3000:
+                diff_truncated += "\n\n... (diff truncated) ..."
+
+            file_list = "\n".join(f"  - {f}" for f in files)
+
+            prompt = f"""Analyse the following git diff and generate ONE conventional commit message.
+
+Branch: {branch}
+
+Files changed:
+{file_list}
+
+Diff summary:
+{diff_stat}
+
+Diff (may be truncated):
+{diff_truncated}
+
+Rules:
+- Use conventional commit format:  type: description
+- Allowed types: feat, fix, docs, style, refactor, test, chore, build, ci, perf
+- Keep the description under 72 characters total (including the type prefix)
+- Use imperative mood ("add" not "added", "fix" not "fixed")
+- Be specific about what actually changed
+- If there are multiple kinds of changes, pick the most significant type
+- Return ONLY the commit message — one line, no quotes, no explanation"""
+
+            response = self._call_llm_commit(prompt)
+            # Strip any surrounding quotes the model might add
+            msg = response.strip().strip("\"'")
+            return msg
+
+        except Exception as e:
+            # Fall back to stub on any failure
+            return self._stub_commit_message(files, context)
+
+    def _call_llm_commit(self, prompt: str) -> str:
+        """Call the LLM for commit-message generation."""
+        if self.provider == "openai":
+            try:
+                response = self.llm_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You generate concise, conventional git commit messages. "
+                                "Return ONLY the commit message — one line, no quotes, "
+                                "no explanation.  Use the format  type: description  where "
+                                "type is one of: feat, fix, docs, style, refactor, test, "
+                                "chore, build, ci, perf."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=100,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                raise Exception(f"OpenAI API error: {e}")
+        else:
+            raise Exception(f"Unsupported provider: {self.provider}")
+
+    def _stub_commit_message(
+        self, files: List[str], context: Optional[dict] = None
+    ) -> str:
+        """
+        Best-effort commit message when the LLM is unavailable.
+
+        Inspects file extensions and names to pick a conventional type.
+        """
+        import os.path
+
+        if not files:
+            return "chore: update project files"
+
+        branch = (context or {}).get("branch", "")
+
+        # Categorise files
+        docs = []
+        tests = []
+        configs = []
+        source = []
+
+        doc_exts = {".md", ".rst", ".txt", ".adoc"}
+        config_names = {
+            "pyproject.toml", "setup.cfg", "setup.py", "package.json",
+            "tsconfig.json", ".eslintrc", ".prettierrc", "Makefile",
+            "Dockerfile", "docker-compose.yml", ".github",
+            ".gitignore", "requirements.txt", "Cargo.toml",
+        }
+
+        for f in files:
+            base = os.path.basename(f)
+            ext = os.path.splitext(f)[1].lower()
+
+            if "test" in f.lower() or f.lower().startswith("tests/"):
+                tests.append(f)
+            elif ext in doc_exts:
+                docs.append(f)
+            elif base in config_names or f.startswith("."):
+                configs.append(f)
+            else:
+                source.append(f)
+
+        # Pick the dominant category
+        if docs and not source and not tests:
+            names = ", ".join(os.path.basename(f) for f in docs[:3])
+            return f"docs: update {names}"
+        if tests and not source and not docs:
+            return "test: update tests"
+        if configs and not source and not docs and not tests:
+            return "chore: update configuration"
+
+        # Branch name hint
+        if "fix" in branch.lower() or "bug" in branch.lower():
+            prefix = "fix"
+        elif "feat" in branch.lower() or "feature" in branch.lower():
+            prefix = "feat"
+        else:
+            prefix = "chore"
+
+        if len(files) == 1:
+            name = os.path.basename(files[0])
+            return f"{prefix}: update {name}"
+
+        return f"{prefix}: update {len(files)} files"
+
+    # ------------------------------------------------------------------
     # Error Translation (intercept stderr → plain-English explanation)
     # ------------------------------------------------------------------
 

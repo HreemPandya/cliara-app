@@ -36,6 +36,7 @@ class Config:
         "safety_checks": True,
         "auto_confirm_safe": False,
         "error_translation": True,  # Analyse stderr on failure and show plain-English fix
+        "diff_preview": True,  # Show what destructive commands will affect before running
         "notify_after_seconds": 30,  # Desktop notification when a command takes longer than this
         "prompt_style": "cliara",
         "llm_provider": None,  # "openai" or "anthropic" (Phase 2)

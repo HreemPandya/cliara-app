@@ -16,6 +16,7 @@ from cliara.config import Config
 from cliara.macros import MacroManager
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.nl_handler import NLHandler
+from cliara.diff_preview import DiffPreview
 from cliara.cross_platform import (
     get_base_command,
     command_exists,
@@ -333,6 +334,7 @@ class CliaraShell:
 
         progress.step("Loading safety checker...")
         self.safety = SafetyChecker()
+        self.diff_preview = DiffPreview()
         self.nl_handler = NLHandler(self.safety)
 
         progress.step("Loading history...")
@@ -563,6 +565,11 @@ class CliaraShell:
         if user_input.lower() in ('clear', 'cls'):
             os.system('cls' if platform.system() == 'Windows' else 'clear')
             return
+
+        # Diff preview: show exactly what destructive commands will affect
+        if self.config.get("diff_preview", True) and self.diff_preview.should_preview(user_input):
+            if not self._confirm_with_preview(user_input):
+                return
 
         # Default: pass through to underlying shell
         success = self.execute_shell_command(user_input)
@@ -1181,6 +1188,38 @@ class CliaraShell:
             print_error(f"[Error] cd: permission denied: {args}")
         except Exception as e:
             print_error(f"[Error] cd: {e}")
+
+    # ------------------------------------------------------------------
+    # Diff preview — show impact before destructive commands
+    # ------------------------------------------------------------------
+    def _confirm_with_preview(self, command: str) -> bool:
+        """
+        Show a diff preview for a destructive command and ask for
+        confirmation.
+
+        Returns *True* if the user wants to proceed, *False* to cancel.
+        """
+        preview = self.diff_preview.generate_preview(command)
+
+        if preview is None:
+            # Could not generate a preview (no matching files, etc.)
+            # — let the command through without blocking.
+            return True
+
+        print()
+        print_warning(preview)
+
+        try:
+            response = input("\n  Proceed? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+        if response in ("y", "yes"):
+            return True
+
+        print_warning("  [Cancelled]")
+        return False
 
     # ------------------------------------------------------------------
     # Cross-platform command translation
@@ -1842,6 +1881,12 @@ class CliaraShell:
         print("  push                       Stage, auto-commit, and push")
         print("  Detects branch, generates a conventional commit message")
         print("  (feat:, fix:, docs:, …) from the diff. Accept, edit, or cancel.\n")
+
+        print_info("  Diff Preview")
+        print_dim("  ─────────────────────────────────────")
+        print("  Destructive commands (rm, git checkout, git clean,")
+        print("  git reset) show exactly what will be affected first.")
+        print_dim("  Example: rm *.log → shows each file and total size\n")
 
         print_info("  Cross-Platform Translation")
         print_dim("  ─────────────────────────────────────")

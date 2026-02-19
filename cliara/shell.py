@@ -20,6 +20,12 @@ from cliara.nl_handler import NLHandler
 from cliara.diff_preview import DiffPreview
 from cliara.deploy_detector import detect_all as detect_deploy_targets, DeployPlan
 from cliara.deploy_store import DeployStore
+from cliara.session_store import (
+    SessionStore,
+    TaskSession,
+    _get_project_root,
+    _get_branch,
+)
 from cliara.cross_platform import (
     get_base_command,
     command_exists,
@@ -509,6 +515,11 @@ class CliaraShell:
         # Deploy store — persisted per-project deploy configs
         self.deploy_store = DeployStore()
 
+        # Task sessions — named, resumable workflow context
+        sessions_path = self.config.config_dir / "sessions.json"
+        self.session_store = SessionStore(store_path=sessions_path)
+        self.current_session: Optional[TaskSession] = None
+
         # Error translator state — populated by execute_shell_command()
         self.last_stderr: str = ""
         self.last_exit_code: int = 0
@@ -571,7 +582,9 @@ class CliaraShell:
         else:
             print_dim(f"  • {nl} <query>             Ask in plain English  (requires API key)")
         print_dim(f"  • {nl} fix                 Diagnose & fix the last failed command")
-        print_dim(f"  • Auto-fix hints          Shown on failure — press Tab to accept")
+        print_dim(f"  • session start <name>   Start a task session")
+        print_dim(f"  • session end [note]     End session — session help for more")
+        print_dim(f"  • session help           More session commands (notes, list, show)")
         print_dim(f"  • push                    Smart git push — auto-commit message & branch")
         print_dim(f"  • explain <cmd>           Understand any command  (e.g. explain git rebase)")
         print_dim(f"  • macro add <name>        Create a reusable macro")
@@ -748,14 +761,22 @@ class CliaraShell:
                     message = [
                         ("class:prompt-name", "cliara"),
                         ("class:prompt-sep", ":"),
+                    ]
+                    if self.current_session:
+                        message.append(("class:prompt-path", f"[{self.current_session.name}]"))
+                        message.append(("class:prompt-sep", ":"))
+                    message.extend([
                         ("class:prompt-path", cwd),
                         ("", " "),
                         ("class:prompt-arrow", f"{prompt_arrow} "),
-                    ]
+                    ])
                     user_input = session.prompt(message).strip()
                 else:
                     # Plain fallback
-                    prompt = f"cliara:{cwd} {prompt_arrow} "
+                    if self.current_session:
+                        prompt = f"cliara [{self.current_session.name}]:{cwd} {prompt_arrow} "
+                    else:
+                        prompt = f"cliara:{cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:
@@ -804,6 +825,12 @@ class CliaraShell:
         # Smart push — auto-commit-message + branch detection
         if user_input.lower() == 'push':
             self.handle_push()
+            return
+
+        # Task sessions — start, resume, end, list, show, note
+        if user_input.lower() == 'session' or user_input.lower().startswith('session '):
+            subcommand = user_input[7:].strip() if len(user_input) > 7 else ""
+            self.handle_session(subcommand)
             return
 
         # Smart deploy — detect project type and deploy in one word
@@ -1829,6 +1856,7 @@ class CliaraShell:
         # In streaming mode the child's stdout is inherited, so we only
         # update the terminal title bar to avoid garbled output.
         spinner_delay = self.config.get("spinner_delay_seconds", 3)
+        timer = None
 
         try:
             # Add to history
@@ -1862,6 +1890,7 @@ class CliaraShell:
                 self.last_exit_code = result.returncode
                 success = result.returncode == 0
                 self._notify_completion(command, time.time() - start_time, success)
+                self._session_record_command(command, success)
                 return success
             else:
                 # ── Streaming mode: stdout AND stderr piped ──
@@ -1938,19 +1967,47 @@ class CliaraShell:
                     print_error("[Error] Command timed out (5 minutes)")
                     self.last_exit_code = -1
                     self._notify_completion(command, time.time() - start_time, False)
+                    self._session_record_command(command, False)
                     return False
 
                 self.last_stderr = "".join(stderr_lines)
                 self.last_exit_code = proc.returncode
                 success = proc.returncode == 0
                 self._notify_completion(command, time.time() - start_time, success)
+                self._session_record_command(command, success)
                 return success
 
         except Exception as e:
-            timer.stop()
+            try:
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
             print_error(f"[Error] {e}")
+            self.last_exit_code = -1
+            self._session_record_command(command, False)
             return False
-    
+
+    def _session_record_command(self, command: str, success: bool):
+        """If a task session is active, record this command to it."""
+        if not self.current_session:
+            return
+        cwd = str(Path.cwd())
+        root = _get_project_root(Path(cwd))
+        branch = _get_branch(Path(cwd))
+        self.session_store.add_command(
+            self.current_session.id,
+            command=command,
+            cwd=cwd,
+            exit_code=0 if success else (self.last_exit_code if self.last_exit_code != 0 else 1),
+            branch=branch,
+            project_root=root,
+        )
+        # Refresh in-memory session so prompt and list stay in sync
+        updated = self.session_store.get_by_id(self.current_session.id)
+        if updated:
+            self.current_session = updated
+
     # ------------------------------------------------------------------
     # Smart Push — auto-commit-message + branch detection
     # ------------------------------------------------------------------
@@ -2115,6 +2172,256 @@ class CliaraShell:
     def _unstage_all(self):
         """Reset the staging area (undo git add -A)."""
         subprocess.run(["git", "reset"], capture_output=True)
+
+    # ------------------------------------------------------------------
+    # Task sessions — named, resumable workflow context
+    # ------------------------------------------------------------------
+
+    def handle_session(self, subcommand: str = ""):
+        """
+        Task session subcommands: start, resume, end, list, show, note, help.
+        """
+        parts = subcommand.split(maxsplit=1)
+        sub = (parts[0].lower() if parts else "").strip()
+        rest = (parts[1] if len(parts) > 1 else "").strip()
+
+        if sub == "start":
+            self._session_start(rest)
+            return
+        if sub == "resume":
+            self._session_resume(rest)
+            return
+        if sub == "end":
+            self._session_end(rest)
+            return
+        if sub == "list":
+            self._session_list()
+            return
+        if sub == "show":
+            self._session_show(rest)
+            return
+        if sub == "note":
+            self._session_note(rest)
+            return
+        if sub in ("help", ""):
+            self._session_help()
+            return
+        print_error(f"[Cliara] Unknown session subcommand: '{sub}'")
+        print_dim("  session start <name> [ -- <intent>]   Name can be multi-word")
+        print_dim("  session resume <name>          Resume a session and show summary")
+        print_dim("  session end [note]              End current session")
+        print_dim("  session list                    List sessions")
+        print_dim("  session show <name>             Show session summary (no resume)")
+        print_dim("  session note <text>             Add a note to current session")
+        print_dim("  session help                    Show this help")
+
+    def _session_start(self, args: str):
+        """Start a new named task session. If already in a session, end it first.
+        Session name can be multi-word. Use ' -- ' to add an optional intent.
+        E.g. 'session start fix login bug' or 'session start fix login bug -- get redirect working'.
+        """
+        if not args:
+            print_error("[Cliara] Usage: session start <name> [ -- <intent>]")
+            return
+        if " -- " in args:
+            name, intent = args.split(" -- ", 1)
+            name = name.strip()
+            intent = intent.strip()
+        else:
+            name = args.strip()
+            intent = ""
+        if not name:
+            print_error("[Cliara] Session name cannot be empty.")
+            return
+
+        cwd = Path.cwd()
+        project_root = _get_project_root(cwd)
+        branch = _get_branch(cwd)
+
+        if self.current_session:
+            print_info(f"[Cliara] Ending current session '{self.current_session.name}'.")
+            self.session_store.end_session(self.current_session.id)
+            self.current_session = None
+
+        existing = self.session_store.get_by_key(name, project_root)
+        if existing and not existing.is_ended:
+            print_warning(f"[Cliara] Session '{name}' already exists and is in progress.")
+            try:
+                r = input("Resume it instead? (y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if r in ("y", "yes"):
+                self._session_resume(name)
+            return
+        if existing and existing.is_ended:
+            # Allow starting again with same name — we create a new session (replace)
+            pass
+
+        session = self.session_store.create(
+            name=name,
+            intent=intent,
+            project_root=project_root,
+            branch=branch,
+        )
+        self.current_session = session
+        print_success(f"[Cliara] Session started: '{name}'")
+        if intent:
+            print_dim(f"  Intent: {intent}")
+
+    def _session_resume(self, name: str):
+        """Resume a session by name (current project). Show summary and suggested next step."""
+        if not name:
+            print_error("[Cliara] Usage: session resume <name>")
+            print_dim("  Use 'session list' to see session names.")
+            return
+        cwd = Path.cwd()
+        project_root = _get_project_root(cwd)
+        session = self.session_store.get_by_key(name, project_root)
+        if session is None:
+            print_error(f"[Cliara] No session named '{name}' in this project.")
+            print_dim("  Use 'session list' to see sessions (or start in the right directory).")
+            return
+        if self.current_session and self.current_session.id != session.id:
+            self.session_store.end_session(self.current_session.id)
+        self.current_session = session
+        if session.is_ended:
+            # Re-open for more work
+            session.ended_at = None
+            session.end_note = None
+            self.session_store.update(session)
+            self.current_session = self.session_store.get_by_id(session.id)
+        self._session_print_resume_summary(self.current_session)
+
+    def _session_print_resume_summary(self, s: TaskSession, resumed: bool = True):
+        """Print structured summary and suggested next step."""
+        if resumed:
+            print_info("\n[Cliara] Session resumed: " + s.name)
+        else:
+            print_info("\n[Cliara] Session: " + s.name)
+        print_header("-" * 50)
+        if s.intent:
+            print(f"  Intent:   {s.intent}")
+        try:
+            from datetime import datetime, timezone
+            updated = datetime.fromisoformat(s.updated.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            delta = now - updated
+            if delta.days > 0:
+                ago = f"{delta.days}d ago"
+            elif delta.seconds >= 3600:
+                ago = f"{delta.seconds // 3600}h ago"
+            else:
+                ago = f"{max(1, delta.seconds // 60)}m ago"
+            print_dim(f"  Last active: {ago}")
+        except Exception:
+            print_dim(f"  Last active: {s.updated}")
+        if s.cwds:
+            print_dim("  Where you worked:")
+            for d in s.cwds[-5:]:
+                print_dim(f"    {d}")
+        if s.branch:
+            print_dim(f"  Branch: {s.branch}")
+        if s.commands:
+            print_dim("  Last commands:")
+            for c in s.commands[-8:]:
+                status = "✓" if c.exit_code == 0 else "✗"
+                short = c.command[:60] + "..." if len(c.command) > 60 else c.command
+                print(f"    {status} {short}")
+        if s.notes:
+            print_dim("  Notes:")
+            for n in s.notes[-5:]:
+                print_dim(f"    {n.text[:70]}{'...' if len(n.text) > 70 else ''}")
+        if s.end_note:
+            print_dim(f"  End note: {s.end_note[:70]}{'...' if len(s.end_note) > 70 else ''}")
+
+        next_step = self._session_suggest_next_step(s)
+        if next_step:
+            print()
+            print_info("  Suggested next: " + next_step)
+        print_header("-" * 50 + "\n")
+
+    def _session_suggest_next_step(self, s: TaskSession) -> Optional[str]:
+        """Heuristic: suggest what to do next based on last command and notes."""
+        if not s.commands:
+            if s.cwds:
+                return f"Continue from last directory: cd {s.cwds[-1]}"
+            return "Start running commands — they'll be recorded in this session."
+        last = s.commands[-1]
+        if last.exit_code != 0:
+            return "Last command failed (exit %d). Re-run or debug, then continue." % last.exit_code
+        return "Last command succeeded. Continue from here or add a note: session note <text>."
+
+    def _session_end(self, end_note: str):
+        """End the current session with optional note."""
+        if not self.current_session:
+            print_info("[Cliara] No active session to end.")
+            return
+        name = self.current_session.name
+        self.session_store.end_session(self.current_session.id, end_note=end_note or None)
+        self.current_session = None
+        print_success(f"[Cliara] Session '{name}' ended.")
+        if end_note:
+            print_dim(f"  Note: {end_note[:80]}{'...' if len(end_note) > 80 else ''}")
+
+    def _session_list(self):
+        """List all sessions, or for current project only."""
+        cwd = Path.cwd()
+        project_root = _get_project_root(cwd)
+        sessions = self.session_store.list_by_project(project_root)
+        if not sessions:
+            print_info("[Cliara] No task sessions yet.")
+            print_dim("  session start <name> [intent]   to start one")
+            return
+        print_info(f"\n[Cliara] Task sessions ({len(sessions)}):\n")
+        for s in sessions:
+            status = "ended" if s.is_ended else "active"
+            intent_preview = (s.intent[:40] + "...") if len(s.intent or "") > 40 else (s.intent or "")
+            print(f"  {s.name}")
+            print_dim(f"    {status} — {s.updated} — {intent_preview}")
+        print()
+
+    def _session_show(self, name: str):
+        """Show full summary of a session without resuming."""
+        if not name:
+            print_error("[Cliara] Usage: session show <name>")
+            return
+        cwd = Path.cwd()
+        project_root = _get_project_root(cwd)
+        session = self.session_store.get_by_key(name, project_root)
+        if session is None:
+            print_error(f"[Cliara] No session named '{name}' in this project.")
+            return
+        self._session_print_resume_summary(session, resumed=False)
+        if session.id != getattr(self.current_session, "id", None):
+            print_dim("  (Not resumed — use 'session resume %s' to continue.)" % name)
+
+    def _session_note(self, text: str):
+        """Add a note to the current session."""
+        if not self.current_session:
+            print_error("[Cliara] No active session. Start one with 'session start <name>'.")
+            return
+        if not text:
+            print_error("[Cliara] Usage: session note <text>")
+            return
+        self.session_store.add_note(self.current_session.id, text)
+        updated = self.session_store.get_by_id(self.current_session.id)
+        if updated:
+            self.current_session = updated
+        print_success("[Cliara] Note added.")
+
+    def _session_help(self):
+        """Show session command help."""
+        print_info("\n[Cliara] Task sessions — persistent, resumable workflow context\n")
+        print("  session start <name> [ -- <intent>]   Name can be multi-word (e.g. fix login bug)")
+        print("  session resume <name>          Resume and see summary + suggested next step")
+        print("  session end [note]             End current session (optional closing note)")
+        print("  session list                   List sessions for this project")
+        print("  session show <name>             Show session summary without resuming")
+        print("  session note <text>            Add a note to the current session")
+        print("  session help                   Show this help")
+        print_dim("\n  Sessions are keyed by name + project (git root). Close the terminal")
+        print_dim("  and run 'session resume <name>' later to continue.\n")
 
     # ------------------------------------------------------------------
     # Smart Deploy — detect project type and deploy in one word
@@ -2639,7 +2946,7 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "explain", "push", "deploy",
+        "exit", "quit", "q", "help", "explain", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix",
     })
 
@@ -2767,6 +3074,14 @@ class CliaraShell:
         print("  push                       Stage, auto-commit, and push")
         print("  Detects branch, generates a conventional commit message")
         print("  (feat:, fix:, docs:, …) from the diff. Accept, edit, or cancel.\n")
+
+        print_info("  Task Sessions")
+        print_dim("  ─────────────────────────────────────")
+        print("  session start <name> [ -- <intent>]   Start a task (name can be multi-word)")
+        print("  session resume <name>            Resume and see summary + next step")
+        print("  session end [note]               End current session")
+        print("  session list / show / note        List, show, or add notes")
+        print_dim("  Sessions persist across terminal closes — resume anytime.\n")
 
         print_info("  Smart Deploy")
         print_dim("  ─────────────────────────────────────")

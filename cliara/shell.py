@@ -567,8 +567,9 @@ class CliaraShell:
     
     def print_banner(self):
         """Print welcome banner."""
+        from cliara import __version__
         print_header("\n" + "="*60)
-        print_info("  Cliara - AI-Powered Shell")
+        print_info(f"  Cliara {__version__} - AI-Powered Shell")
         print(f"  Shell: {self.shell_path}")
         if self.nl_handler.llm_enabled:
             print_success(f"  LLM: {self.nl_handler.provider.upper()} (Ready)")
@@ -591,6 +592,7 @@ class CliaraShell:
         print_dim(f"  • macro add <name> --nl   Create a macro from plain English")
         print_dim(f"  • <macro-name>            Run a saved macro")
         print_dim(f"  • help                    Show all commands")
+        print_dim(f"  • version                 Show Cliara version")
         print_dim(f"  • exit                    Quit Cliara")
         print()
     
@@ -816,7 +818,13 @@ class CliaraShell:
         if user_input.lower() in ['help', '?help']:
             self.show_help()
             return
-        
+
+        # Check for version
+        if user_input.lower() == 'version':
+            from cliara import __version__
+            print_info(f"Cliara {__version__}")
+            return
+
         # Check for explain command
         if user_input.lower().startswith('explain '):
             self.handle_explain(user_input[8:].strip())
@@ -2946,7 +2954,7 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "explain", "push", "session", "deploy",
+        "exit", "quit", "q", "help", "version", "explain", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix",
     })
 
@@ -3107,6 +3115,7 @@ class CliaraShell:
         print_info("  Other")
         print_dim("  ─────────────────────────────────────")
         print("  help                       Show this help")
+        print("  version                    Show Cliara version")
         print("  exit / Ctrl+C              Quit Cliara")
 
         print_header("\n" + "=" * 60 + "\n")

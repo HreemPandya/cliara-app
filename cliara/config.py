@@ -39,6 +39,7 @@ class Config:
         "diff_preview": True,  # Show what destructive commands will affect before running
         "notify_after_seconds": 30,  # Desktop notification when a command takes longer than this
         "spinner_delay_seconds": 3,  # Show inline spinner after this many seconds (0 to disable)
+        "clear_show_header": True,  # After clear/cls, show a minimal "Cliara ready" line
         "prompt_style": "cliara",
         "llm_provider": None,  # "openai" or "anthropic" (Phase 2)
         "llm_api_key": None,  # Encrypted in real impl (Phase 2)

@@ -884,6 +884,8 @@ class CliaraShell:
         # Intercept clear/cls so the host terminal is cleared properly
         if user_input.lower() in ('clear', 'cls'):
             os.system('cls' if platform.system() == 'Windows' else 'clear')
+            if self.config.get('clear_show_header', True):
+                print_dim("Cliara ready. Type 'help' for commands.")
             return
 
         # Diff preview: show exactly what destructive commands will affect

@@ -26,6 +26,11 @@ from cliara.session_store import (
     _get_project_root,
     _get_branch,
 )
+from cliara.execution_graph import (
+    build_execution_tree,
+    render_execution_tree,
+    export_tree_json,
+)
 from cliara.cross_platform import (
     get_base_command,
     command_exists,
@@ -519,6 +524,8 @@ class CliaraShell:
         sessions_path = self.config.config_dir / "sessions.json"
         self.session_store = SessionStore(store_path=sessions_path)
         self.current_session: Optional[TaskSession] = None
+        # When set, the next recorded command is linked as child of this id (e.g. fix after failure)
+        self._next_command_parent_id: Optional[str] = None
 
         # Error translator state — populated by execute_shell_command()
         self.last_stderr: str = ""
@@ -1749,6 +1756,10 @@ class CliaraShell:
                         print_warning("[Cancelled]")
                         return
 
+                # Link fix commands to the failed command in the execution graph
+                if self.current_session and self.current_session.commands:
+                    self._next_command_parent_id = self.current_session.commands[-1].id
+
                 print()
                 for i, fix_cmd in enumerate(fix_commands, 1):
                     if len(fix_commands) > 1:
@@ -2005,6 +2016,8 @@ class CliaraShell:
         cwd = str(Path.cwd())
         root = _get_project_root(Path(cwd))
         branch = _get_branch(Path(cwd))
+        parent_id = self._next_command_parent_id
+        self._next_command_parent_id = None  # consume once
         self.session_store.add_command(
             self.current_session.id,
             command=command,
@@ -2012,6 +2025,7 @@ class CliaraShell:
             exit_code=0 if success else (self.last_exit_code if self.last_exit_code != 0 else 1),
             branch=branch,
             project_root=root,
+            parent_id=parent_id,
         )
         # Refresh in-memory session so prompt and list stay in sync
         updated = self.session_store.get_by_id(self.current_session.id)
@@ -2428,10 +2442,78 @@ class CliaraShell:
         print("  session end [note]             End current session (optional closing note)")
         print("  session list                   List sessions for this project")
         print("  session show <name>             Show session summary without resuming")
+        print("  session graph [name]            Show execution graph (tree); optional: export [file], export --json <file>")
         print("  session note <text>            Add a note to the current session")
         print("  session help                   Show this help")
         print_dim("\n  Sessions are keyed by name + project (git root). Close the terminal")
         print_dim("  and run 'session resume <name>' later to continue.\n")
+
+    def _session_graph(self, rest: str):
+        """Show execution graph for current or named session. Optional: export [path] or export --json <path>."""
+        cwd = Path.cwd()
+        project_root = _get_project_root(cwd)
+
+        # Parse: rest can be "", "<name>", "export [path]", "export --json <path>", or "<name> export ..."
+        export_json = False
+        export_path: Optional[Path] = None
+        do_export = False
+        name_part = rest
+
+        if rest.strip().startswith("export"):
+            # Current session: "export" or "export path" or "export --json path"
+            name_part = ""
+            do_export = True
+            tokens = rest.split()
+            if len(tokens) >= 2 and tokens[1] == "--json":
+                export_json = True
+                export_path = Path(tokens[2]) if len(tokens) > 2 else None
+            else:
+                export_path = Path(tokens[1]) if len(tokens) > 1 else None
+        elif " export " in rest:
+            name_part, _, export_rest = rest.partition(" export ")
+            name_part = name_part.strip()
+            do_export = True
+            tokens = export_rest.split()
+            if tokens and tokens[0] == "--json":
+                export_json = True
+                export_path = Path(tokens[1]) if len(tokens) > 1 else None
+            else:
+                export_path = Path(tokens[0]) if tokens else None
+
+        session: Optional[TaskSession] = None
+        if name_part:
+            session = self.session_store.get_by_key(name_part, project_root)
+            if session is None:
+                print_error(f"[Cliara] No session named '{name_part}' in this project.")
+                return
+        else:
+            session = self.current_session
+            if session is None:
+                print_error("[Cliara] No active session. Start one with 'session start <name>' or use 'session graph <name>'.")
+                return
+
+        if not session.commands:
+            print_info(f"[Cliara] Session '{session.name}' has no commands yet.")
+            return
+
+        tree = build_execution_tree(session.commands)
+        text = render_execution_tree(tree)
+
+        if do_export or export_path is not None or export_json:
+            if export_path is None:
+                safe_name = session.name.replace(" ", "-")[:30]
+                export_path = Path(f"cliara-graph-{safe_name}.json" if export_json else f"cliara-graph-{safe_name}.txt")
+            export_path = Path(export_path)
+            if export_json:
+                export_tree_json(session.commands, export_path)
+                print_success(f"[Cliara] Graph exported to {export_path} (JSON)")
+            else:
+                export_path.write_text(text, encoding="utf-8")
+                print_success(f"[Cliara] Graph exported to {export_path}")
+        else:
+            print_info(f"\n[Cliara] Execution graph — {session.name}\n")
+            print(text)
+            print()
 
     # ------------------------------------------------------------------
     # Smart Deploy — detect project type and deploy in one word

@@ -24,6 +24,8 @@ class CommandEntry:
     cwd: str
     exit_code: int
     timestamp: str  # ISO
+    id: str = ""  # UUID for graph parent/child links
+    parent_id: Optional[str] = None  # id of command this is a follow-up of (e.g. fix after failure)
 
     def to_dict(self) -> dict:
         return {
@@ -31,6 +33,8 @@ class CommandEntry:
             "cwd": self.cwd,
             "exit_code": self.exit_code,
             "timestamp": self.timestamp,
+            "id": self.id,
+            "parent_id": self.parent_id,
         }
 
     @classmethod
@@ -40,6 +44,8 @@ class CommandEntry:
             cwd=data.get("cwd", ""),
             exit_code=data.get("exit_code", 0),
             timestamp=data.get("timestamp", ""),
+            id=data.get("id") or str(uuid.uuid4()),
+            parent_id=data.get("parent_id"),
         )
 
 
@@ -246,15 +252,24 @@ class SessionStore:
         exit_code: int,
         branch: Optional[str] = None,
         project_root: Optional[str] = None,
-    ):
-        """Append a command to the session and update cwds/branch/updated."""
+        parent_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Append a command to the session and update cwds/branch/updated.
+        Returns the new command's id, or None if session not found."""
         session = self.get_by_id(session_id)
         if session is None:
-            return
+            return None
         now = datetime.now(timezone.utc).isoformat()
-        session.commands.append(
-            CommandEntry(command=command, cwd=cwd, exit_code=exit_code, timestamp=now)
+        entry_id = str(uuid.uuid4())
+        entry = CommandEntry(
+            command=command,
+            cwd=cwd,
+            exit_code=exit_code,
+            timestamp=now,
+            id=entry_id,
+            parent_id=parent_id,
         )
+        session.commands.append(entry)
         if cwd and cwd not in session.cwds:
             session.cwds.append(cwd)
         if branch is not None:
@@ -263,6 +278,15 @@ class SessionStore:
             session.project_root = project_root
         session.updated = now
         self.update(session)
+        return entry_id
+
+    def get_last_command_id(self, session_id: str) -> Optional[str]:
+        """Return the id of the last command in the session, or None."""
+        session = self.get_by_id(session_id)
+        if session is None or not session.commands:
+            return None
+        last = session.commands[-1]
+        return last.id if last.id else None
 
     def add_note(self, session_id: str, text: str):
         """Append a note to the session."""

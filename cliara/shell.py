@@ -2224,6 +2224,9 @@ class CliaraShell:
         if sub == "show":
             self._session_show(rest)
             return
+        if sub == "graph":
+            self._session_graph(rest)
+            return
         if sub == "note":
             self._session_note(rest)
             return
@@ -2236,6 +2239,7 @@ class CliaraShell:
         print_dim("  session end [note]              End current session")
         print_dim("  session list                    List sessions")
         print_dim("  session show <name>             Show session summary (no resume)")
+        print_dim("  session graph [name]            Show execution graph (tree)")
         print_dim("  session note <text>             Add a note to current session")
         print_dim("  session help                    Show this help")
 

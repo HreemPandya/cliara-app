@@ -1,14 +1,33 @@
 """
 Execution graph for Cliara task sessions.
 
-Builds a tree from flat CommandEntry lists (using parent_id), renders as ASCII,
-and exports to JSON or text.
+Builds a tree from flat CommandEntry lists (using parent_id), renders as ASCII
+or Unicode box-drawing when stdout supports UTF-8, and exports to JSON or text.
 """
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, TYPE_CHECKING
+
+
+def _tree_chars():
+    """Use Unicode box-drawing (├ └ │) when stdout is UTF-8, else ASCII (+- \\- |)."""
+    if _tree_chars._cached is not None:
+        return _tree_chars._cached
+    try:
+        enc = getattr(sys.stdout, "encoding", None) or ""
+        if enc and enc.lower().startswith("utf-8"):
+            _tree_chars._cached = ("\u251c ", "\u2514 ", "\u2502")  # ├ └ │
+        else:
+            _tree_chars._cached = ("+- ", r"\- ", "|")
+    except Exception:
+        _tree_chars._cached = ("+- ", r"\- ", "|")
+    return _tree_chars._cached
+
+
+_tree_chars._cached = None  # type: ignore[attr-defined]
 
 if TYPE_CHECKING:
     from cliara.session_store import CommandEntry
@@ -67,15 +86,14 @@ def build_execution_tree(commands: List["CommandEntry"]) -> TreeNode:
 
 
 def render_execution_tree(node: TreeNode, prefix: str = "", is_last: bool = True) -> str:
-    """Render the tree as ASCII with ├ and L. Returns full string."""
+    """Render the tree. Uses Unicode ├ └ │ when stdout is UTF-8, else ASCII +- \\- |."""
+    branch, last_branch, vert = _tree_chars()
     if node.entry is None:
         # Root node: just the label, no connector
         line = node.label
         child_prefix = ""
     else:
-        # ASCII tree so it works in all terminals (├/└/│ would need UTF-8)
-        connector = r"\- " if is_last else "+- "
-        vert = "|"
+        connector = last_branch if is_last else branch
         line = prefix + connector + node.label
         child_prefix = prefix + ("   " if is_last else vert + "  ")
 

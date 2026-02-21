@@ -2746,7 +2746,7 @@ class CliaraShell:
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
-        commands = self.nl_handler.generate_commands_from_nl(description, context)
+        commands = self.nl_handler.generate_deploy_steps(description, context)
 
         if not commands or (len(commands) == 1 and commands[0].startswith("#")):
             print_error("  Could not generate deploy steps.")

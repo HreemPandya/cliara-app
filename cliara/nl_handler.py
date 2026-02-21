@@ -5,8 +5,11 @@ Converts natural language queries to shell commands using LLM.
 
 import json
 import re
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 from cliara.safety import SafetyChecker, DangerLevel
+from cliara.agents import AGENT_REGISTRY
+
+LLM_MODEL = "gpt-4o-mini"
 
 
 class NLHandler:
@@ -77,8 +80,8 @@ class NLHandler:
             # Create prompt
             prompt = self._create_prompt(query, context_info)
             
-            # Call LLM
-            response = self._call_llm(prompt)
+            # Call LLM with nl_to_commands agent
+            response = self._call_llm("nl_to_commands", prompt)
             
             # Parse response
             commands, explanation = self._parse_response(response)
@@ -171,25 +174,31 @@ JSON Response:"""
         
         return prompt
     
-    def _call_llm(self, prompt: str) -> str:
-        """Call LLM API and return response."""
+    def _call_llm(self, agent_type: str, user_message: str) -> str:
+        """Call LLM API with the given agent's system prompt and params. Returns assistant content."""
+        if agent_type not in AGENT_REGISTRY:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+        cfg = AGENT_REGISTRY[agent_type]
+        system = cfg["system"]
+        temperature = cfg["temperature"]
+        max_tokens = cfg["max_tokens"]
         if self.provider == "openai":
             try:
                 response = self.llm_client.chat.completions.create(
-                    model="gpt-4o-mini",  # Using mini for cost efficiency
+                    model=LLM_MODEL,
                     messages=[
-                        {"role": "system", "content": "You are a terminal command explainer: when a user provides a terminal command, explain in simple beginner-friendly language what it does in one clear sentence, briefly break down its parts (command, flags, arguments), give one simple real-world example of when it’s used, keep the response concise (max 6–8 short lines), avoid deep theory or edge cases, and include a short warning if the command is potentially dangerous."},
-                        {"role": "user", "content": prompt}
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_message},
                     ],
-                    temperature=0.3,  # Lower temperature for more consistent output
-                    max_tokens=500
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
                 return response.choices[0].message.content.strip()
             except Exception as e:
                 raise Exception(f"OpenAI API error: {e}")
         else:
             raise Exception(f"Unsupported provider: {self.provider}")
-    
+
     def _parse_response(self, response: str) -> Tuple[List[str], str]:
         """Parse LLM response and extract commands."""
         # Try to extract JSON from response
@@ -246,7 +255,7 @@ JSON Response:"""
         try:
             context_info = self._build_context(context)
             prompt = self._create_prompt(nl_description, context_info)
-            response = self._call_llm(prompt)
+            response = self._call_llm("nl_to_commands", prompt)
             commands, _ = self._parse_response(response)
             return commands if commands else [f"# Could not generate: {nl_description}"]
         except Exception as e:
@@ -276,37 +285,11 @@ OS: {os_name}, Shell: {shell}
 
 Command: {command}"""
 
-            response = self._call_llm_explain(prompt)
+            response = self._call_llm("explain", prompt)
             return response.strip()
 
         except Exception as e:
             return f"Error explaining command: {e}"
-
-    def _call_llm_explain(self, prompt: str) -> str:
-        """Call LLM API for an explain request (returns plain text)."""
-        if self.provider == "openai":
-            try:
-                response = self.llm_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You explain shell commands briefly in plain English. "
-                                "Use short bullet points with plain dashes to keep things readable. "
-                                "No markdown formatting like bold, headers, or code blocks."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.3,
-                    max_tokens=200,
-                )
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                raise Exception(f"OpenAI API error: {e}")
-        else:
-            raise Exception(f"Unsupported provider: {self.provider}")
 
     def _stub_explain(self, command: str) -> str:
         """Provide a basic stub explanation when LLM is not available."""
@@ -404,7 +387,7 @@ Rules:
 - If there are multiple kinds of changes, pick the most significant type
 - Return ONLY the commit message — one line, no quotes, no explanation"""
 
-            response = self._call_llm_commit(prompt)
+            response = self._call_llm("commit_message", prompt)
             # Strip any surrounding quotes the model might add
             msg = response.strip().strip("\"'")
             return msg
@@ -413,33 +396,6 @@ Rules:
             # Fall back to stub on any failure
             return self._stub_commit_message(files, context)
 
-    def _call_llm_commit(self, prompt: str) -> str:
-        """Call the LLM for commit-message generation."""
-        if self.provider == "openai":
-            try:
-                response = self.llm_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You generate concise, conventional git commit messages. "
-                                "Return ONLY the commit message — one line, no quotes, "
-                                "no explanation.  Use the format  type: description  where "
-                                "type is one of: feat, fix, docs, style, refactor, test, "
-                                "chore, build, ci, perf."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=100,
-                )
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                raise Exception(f"OpenAI API error: {e}")
-        else:
-            raise Exception(f"Unsupported provider: {self.provider}")
 
     def _stub_commit_message(
         self, files: List[str], context: Optional[dict] = None
@@ -507,6 +463,64 @@ Rules:
         return f"{prefix}: update {len(files)} files"
 
     # ------------------------------------------------------------------
+    # Deploy steps (no platform detected — user describes, deploy agent suggests steps)
+    # ------------------------------------------------------------------
+
+    def generate_deploy_steps(
+        self, description: str, context: Optional[dict] = None
+    ) -> List[str]:
+        """
+        Generate an ordered list of deploy steps (shell commands) from the user's
+        description and project context. Uses the deploy agent.
+
+        Returns:
+            List of shell commands, or a single comment line if LLM disabled/failed.
+        """
+        if not self.llm_enabled:
+            return [f"# LLM not configured: {description}"]
+
+        try:
+            context_info = self._build_context(context)
+            prompt = self._create_deploy_prompt(description, context_info)
+            response = self._call_llm("deploy", prompt)
+            response = re.sub(r"```json\s*", "", response)
+            response = re.sub(r"```\s*", "", response)
+            response = response.strip()
+            data = json.loads(response)
+            commands = data.get("commands", [])
+            if isinstance(commands, str):
+                commands = [commands]
+            return commands if commands else [f"# Could not generate deploy steps: {description}"]
+        except Exception as e:
+            return [f"# Error generating deploy steps: {str(e)}"]
+
+    def _create_deploy_prompt(self, description: str, context: dict) -> str:
+        """Build user message for the deploy agent."""
+        os_name = context.get("os", "Unknown")
+        shell = context.get("shell", "bash")
+        cwd = context.get("cwd", "")
+        project_type = context.get("project_type", "")
+
+        prompt = f"""User's deploy description: {description}
+
+Context:
+- OS: {os_name}
+- Shell: {shell}
+- Current directory: {cwd}
+"""
+        if project_type:
+            prompt += f"- Project type: {project_type}\n"
+        if context.get("has_git"):
+            prompt += "- Git repository detected\n"
+        if context.get("has_docker"):
+            prompt += "- Docker Compose detected\n"
+
+        prompt += """
+Return ONLY valid JSON in this format: {"commands": ["step1", "step2", ...]}
+Each step is a single shell command. Be concise and project-appropriate."""
+        return prompt
+
+    # ------------------------------------------------------------------
     # Error Translation (intercept stderr → plain-English explanation)
     # ------------------------------------------------------------------
 
@@ -539,7 +553,7 @@ Rules:
         try:
             context_info = self._build_context(context)
             prompt = self._create_error_prompt(command, exit_code, stderr, context_info)
-            response = self._call_llm_error_translate(prompt)
+            response = self._call_llm("fix", prompt)
             return self._parse_error_response(response)
         except Exception as e:
             return {
@@ -601,35 +615,6 @@ Rules:
 - Return ONLY the JSON. No commentary, no markdown fences.
 """
         return prompt
-
-    def _call_llm_error_translate(self, prompt: str) -> str:
-        """Call the LLM with an error-translation-specific system prompt."""
-        if self.provider == "openai":
-            try:
-                response = self.llm_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are Cliara, an AI shell assistant. "
-                                "The user just ran a command that failed. "
-                                "Your job is to explain the error in plain English "
-                                "and suggest a concrete fix when possible. "
-                                "Always respond with valid JSON only — no markdown, "
-                                "no explanation outside the JSON object."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=400,
-                )
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                raise Exception(f"OpenAI API error: {e}")
-        else:
-            raise Exception(f"Unsupported provider: {self.provider}")
 
     def _parse_error_response(self, response: str) -> Dict:
         """Parse the LLM's JSON response for error translation."""

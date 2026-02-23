@@ -1000,11 +1000,11 @@ class CliaraShell:
             print_error(f"[Error] {explanation}")
             return
         
-        # Show generated commands
-        print_info(f"[Explanation] {explanation}\n")
-        print("Generated commands:")
+        # Show generated commands (magenta so explanation is distinct from Processing / EXECUTING)
+        _cliara_console().print(f"[Explanation] {explanation}\n", style="magenta")
+        _cliara_console().print("Generated commands:", style="magenta")
         for i, cmd in enumerate(commands, 1):
-            print(f"  {i}. {cmd}")
+            _cliara_console().print(f"  {i}. {cmd}", style="magenta")
         
         # --save-as: save as macro instead of executing
         if save_as_name:

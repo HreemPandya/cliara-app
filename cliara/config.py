@@ -44,6 +44,7 @@ class Config:
         "llm_provider": None,  # "openai" or "anthropic" (Phase 2)
         "llm_api_key": None,  # Encrypted in real impl (Phase 2)
         "first_run_complete": False,
+        "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why
         # PostgreSQL configuration (optional)
         "postgres": {
             "host": "localhost",

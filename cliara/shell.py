@@ -38,6 +38,7 @@ from cliara.cross_platform import (
     translate_command,
     translate_pipeline,
 )
+from cliara import regression
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,22 @@ def _looks_like_fix(query: str) -> bool:
         return True
     # Adjacent-key transposition like "fxi" or "ifx"
     if sorted(word) == sorted("fix"):
+        return True
+    return False
+
+
+def _looks_like_why(query: str) -> bool:
+    """
+    Return True if *query* is 'why' or an obvious typo (for regression deep-dive).
+    """
+    word = query.strip().lower()
+    if word == "why":
+        return True
+    if " " in word or len(word) > 4 or len(word) < 2:
+        return False
+    if _edit_distance(word, "why") <= 1:
+        return True
+    if sorted(word) == sorted("why"):
         return True
     return False
 
@@ -539,7 +556,11 @@ class CliaraShell:
         # the Tab key binding in prompt_toolkit.  Pressing Tab on an empty
         # prompt fills in this command; any other input clears it.
         self._pending_fix: Optional[str] = None
-        
+
+        # Regression detection — last report (ranked_causes, last_snapshot, current_snapshot)
+        # for ? why after an automatic regression check on failure.
+        self._last_regression_report: Optional[Tuple[List[Tuple[str, str]], dict, dict]] = None
+
         progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
         self._initialize_llm(quiet=True)
@@ -909,6 +930,9 @@ class CliaraShell:
 
             # Auto-suggest a fix right below the error
             self._auto_suggest_fix()
+
+            # Regression: compare to last success, minimal one-line hint
+            self._regression_check_failure(user_input)
     
     def handle_nl_query(self, query: str):
         """
@@ -928,6 +952,11 @@ class CliaraShell:
         # Catches: ? fix, ? fox, ? fxi, ? fiz, ? fixe, etc.
         if _looks_like_fix(query):
             self.handle_fix()
+            return
+
+        # ── "? why" — regression deep-dive (typo-tolerant) ──
+        if _looks_like_why(query):
+            self.handle_why()
             return
         
         # Check for --save-as <name> flag
@@ -1057,6 +1086,37 @@ class CliaraShell:
         print()
 
         self._handle_error_translation(self.last_command, stderr)
+
+    def handle_why(self):
+        """
+        Regression deep-dive: show why the last failure might be a regression.
+        Uses stored report from automatic check, or runs comparison on the fly.
+        """
+        if self._last_regression_report:
+            causes, last_snap, current_snap = self._last_regression_report
+            print(regression.format_expanded_report(causes, last_snap, current_snap))
+            return
+        if not self.last_command or self.last_exit_code == 0:
+            print_dim("No recent failure to explain. Run a command that fails, then ? why")
+            return
+        key = self._regression_workflow_key(self.last_command)
+        if not key:
+            print_dim("No previous success for this workflow.")
+            return
+        store_path = self.config.config_dir / "regression_snapshots.json"
+        last = regression.load_last_success(key, store_path)
+        if not last:
+            print_dim("No previous success for this workflow.")
+            return
+        cwd = Path.cwd()
+        current = regression.gather_current_snapshot(cwd)
+        diff_result = regression.diff_snapshots(last, current)
+        causes = regression.rank_causes(diff_result, last, current)
+        if not causes:
+            print_dim("No snapshot diff (git/deps/env/runtime) — failure may be unrelated.")
+            return
+        self._last_regression_report = (causes, last, current)
+        print(regression.format_expanded_report(causes, last, current))
 
     def handle_macro_command(self, args: str):
         """
@@ -1912,6 +1972,8 @@ class CliaraShell:
                 success = result.returncode == 0
                 self._notify_completion(command, time.time() - start_time, success)
                 self._session_record_command(command, success)
+                if success and self.config.get("regression_snapshots", True):
+                    self._regression_save_success(command)
                 return success
             else:
                 # ── Streaming mode: stdout AND stderr piped ──
@@ -1996,6 +2058,8 @@ class CliaraShell:
                 success = proc.returncode == 0
                 self._notify_completion(command, time.time() - start_time, success)
                 self._session_record_command(command, success)
+                if success and self.config.get("regression_snapshots", True):
+                    self._regression_save_success(command)
                 return success
 
         except Exception as e:
@@ -2031,6 +2095,45 @@ class CliaraShell:
         updated = self.session_store.get_by_id(self.current_session.id)
         if updated:
             self.current_session = updated
+
+    def _regression_workflow_key(self, command: str) -> Optional[str]:
+        """Compute workflow key for regression snapshot (project_root or cwd + base command)."""
+        cwd = Path.cwd()
+        root = _get_project_root(cwd)
+        base = get_base_command(command)
+        if not base:
+            return None
+        return f"{root or 'cwd:' + str(cwd)}::{base}"
+
+    def _regression_save_success(self, command: str) -> None:
+        """Capture and save a success snapshot for this workflow (called after successful run)."""
+        key = self._regression_workflow_key(command)
+        if not key:
+            return
+        cwd = Path.cwd()
+        store_path = self.config.config_dir / "regression_snapshots.json"
+        snap = regression.capture_snapshot(cwd)
+        regression.save_success_snapshot(key, snap, store_path)
+
+    def _regression_check_failure(self, command: str) -> None:
+        """On failure: compare to last success, print minimal report, store for ? why."""
+        if not self.config.get("regression_snapshots", True):
+            return
+        key = self._regression_workflow_key(command)
+        if not key:
+            return
+        store_path = self.config.config_dir / "regression_snapshots.json"
+        last = regression.load_last_success(key, store_path)
+        if not last:
+            return
+        cwd = Path.cwd()
+        current = regression.gather_current_snapshot(cwd)
+        diff_result = regression.diff_snapshots(last, current)
+        causes = regression.rank_causes(diff_result, last, current)
+        if not causes:
+            return
+        self._last_regression_report = (causes, last, current)
+        print_dim(regression.format_minimal_report(causes))
 
     # ------------------------------------------------------------------
     # Smart Push — auto-commit-message + branch detection

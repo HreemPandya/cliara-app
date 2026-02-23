@@ -42,11 +42,11 @@ from cliara import regression
 
 
 # ---------------------------------------------------------------------------
-# Colorized output helpers
+# Colorized output helpers (Rich-backed for Cliara UI)
 # ---------------------------------------------------------------------------
 
 def _supports_color() -> bool:
-    """Check if the terminal supports ANSI colors."""
+    """Check if the terminal supports ANSI colors (used by progress bar and spinner)."""
     if os.getenv("NO_COLOR"):
         return False
     if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
@@ -61,38 +61,44 @@ if _COLOR and platform.system() == "Windows":
 
 
 def _c(code: str, text: str) -> str:
-    """Wrap *text* with an ANSI escape if colors are enabled."""
+    """Wrap *text* with an ANSI escape if colors are enabled (progress bar, spinner)."""
     return f"\033[{code}m{text}\033[0m" if _COLOR else text
+
+
+def _cliara_console():
+    """Lazy import to avoid circular deps; Rich used for all Cliara print_* output."""
+    from cliara.console import get_console
+    return get_console()
 
 
 def print_success(msg: str):
     """Print a green success message."""
-    print(_c("32", msg))
+    _cliara_console().print(msg, style="green")
 
 
 def print_error(msg: str, **kw):
     """Print a red error message."""
-    print(_c("31", msg), **kw)
+    _cliara_console().print(msg, style="red", **kw)
 
 
 def print_warning(msg: str):
     """Print a yellow warning message."""
-    print(_c("33", msg))
+    _cliara_console().print(msg, style="yellow")
 
 
 def print_info(msg: str):
     """Print a cyan informational message."""
-    print(_c("36", msg))
+    _cliara_console().print(msg, style="cyan")
 
 
 def print_header(msg: str):
     """Print a bold header message."""
-    print(_c("1", msg))
+    _cliara_console().print(msg, style="bold")
 
 
 def print_dim(msg: str):
     """Print a dimmed/muted message."""
-    print(_c("2", msg))
+    _cliara_console().print(msg, style="dim")
 
 
 # ---------------------------------------------------------------------------
@@ -594,35 +600,40 @@ class CliaraShell:
             pass
     
     def print_banner(self):
-        """Print welcome banner."""
+        """Print welcome banner as a Rich Panel."""
         from cliara import __version__
-        print_header("\n" + "="*60)
-        print_info(f"  Cliara {__version__} - AI-Powered Shell")
-        print(f"  Shell: {self.shell_path}")
-        if self.nl_handler.llm_enabled:
-            print_success(f"  LLM: {self.nl_handler.provider.upper()} (Ready)")
-        else:
-            print_dim("  LLM: Not configured (set OPENAI_API_KEY in .env)")
-        print_header("="*60)
+        from rich.panel import Panel
         nl = self.config.get('nl_prefix', '?')
-        print("\nQuick tips:")
+        lines = [
+            f"Shell: {self.shell_path}",
+            "",
+        ]
         if self.nl_handler.llm_enabled:
-            print_dim(f"  • {nl} <query>             Ask in plain English  (e.g. {nl} list large files)")
+            lines.append(f"LLM: {self.nl_handler.provider.upper()} (Ready)")
         else:
-            print_dim(f"  • {nl} <query>             Ask in plain English  (requires API key)")
-        print_dim(f"  • {nl} fix                 Diagnose & fix the last failed command")
-        print_dim(f"  • session start <name>   Start a task session")
-        print_dim(f"  • session end [note]     End session — session help for more")
-        print_dim(f"  • session help           More session commands (notes, list, show)")
-        print_dim(f"  • push                    Smart git push — auto-commit message & branch")
-        print_dim(f"  • explain <cmd>           Understand any command  (e.g. explain git rebase)")
-        print_dim(f"  • macro add <name>        Create a reusable macro")
-        print_dim(f"  • macro add <name> --nl   Create a macro from plain English")
-        print_dim(f"  • <macro-name>            Run a saved macro")
-        print_dim(f"  • help                    Show all commands")
-        print_dim(f"  • version                 Show Cliara version")
-        print_dim(f"  • exit                    Quit Cliara")
-        print()
+            lines.append("LLM: Not configured (set OPENAI_API_KEY in .env)")
+        lines.extend([
+            "",
+            "Quick tips:",
+            f"  • {nl} <query>             Ask in plain English" + (" (e.g. " + nl + " list large files)" if self.nl_handler.llm_enabled else " (requires API key)"),
+            f"  • {nl} fix                 Diagnose & fix the last failed command",
+            f"  • {nl} why                 Regression deep-dive after a failure",
+            "  • session start <name>   Start a task session",
+            "  • session end [note]     End session — session help for more",
+            "  • session help           More session commands (notes, list, show)",
+            "  • push                    Smart git push — auto-commit message & branch",
+            "  • explain <cmd>           Understand any command  (e.g. explain git rebase)",
+            "  • macro add <name>        Create a reusable macro",
+            "  • macro add <name> --nl   Create a macro from plain English",
+            "  • <macro-name>            Run a saved macro",
+            "  • help                    Show all commands",
+            "  • version                 Show Cliara version",
+            "  • exit                    Quit Cliara",
+        ])
+        content = "\n".join(lines)
+        panel = Panel(content, title=f"Cliara {__version__} — AI-Powered Shell", border_style="cyan")
+        _cliara_console().print(panel)
+        _cliara_console().print()
     
     # ------------------------------------------------------------------
     # Highlighted prompt (prompt_toolkit + Pygments)
@@ -1092,9 +1103,11 @@ class CliaraShell:
         Regression deep-dive: show why the last failure might be a regression.
         Uses stored report from automatic check, or runs comparison on the fly.
         """
+        from rich.panel import Panel
         if self._last_regression_report:
             causes, last_snap, current_snap = self._last_regression_report
-            print(regression.format_expanded_report(causes, last_snap, current_snap))
+            text = regression.format_expanded_report(causes, last_snap, current_snap)
+            _cliara_console().print(Panel(text, title="Regression (vs last success)", border_style="dim"))
             return
         if not self.last_command or self.last_exit_code == 0:
             print_dim("No recent failure to explain. Run a command that fails, then ? why")
@@ -1116,7 +1129,8 @@ class CliaraShell:
             print_dim("No snapshot diff (git/deps/env/runtime) — failure may be unrelated.")
             return
         self._last_regression_report = (causes, last, current)
-        print(regression.format_expanded_report(causes, last, current))
+        text = regression.format_expanded_report(causes, last, current)
+        _cliara_console().print(Panel(text, title="Regression (vs last success)", border_style="dim"))
 
     def handle_macro_command(self, args: str):
         """
@@ -2133,7 +2147,10 @@ class CliaraShell:
         if not causes:
             return
         self._last_regression_report = (causes, last, current)
-        print_dim(regression.format_minimal_report(causes))
+        from rich.panel import Panel
+        line = regression.format_minimal_report(causes)
+        panel = Panel(line, title="Regression", border_style="dim")
+        _cliara_console().print(panel)
 
     # ------------------------------------------------------------------
     # Smart Push — auto-commit-message + branch detection

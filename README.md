@@ -138,4 +138,3 @@ MIT
 ---
 
 **See [docs/README.md](docs/README.md) for complete documentation.**
-ECHO is on.

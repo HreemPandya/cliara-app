@@ -1142,7 +1142,7 @@ class CliaraShell:
         parts = args.split(maxsplit=1)
         if not parts:
             print("Usage: macro <command> [args]")
-            print("Commands: add, edit, list, search, show, run, delete, rename, save, help")
+            print("Commands: add, edit, list, stats, search, show, run, delete, rename, save, help")
             return
         
         cmd = parts[0].lower()
@@ -1160,6 +1160,8 @@ class CliaraShell:
                 self.macro_add(args_rest)
         elif cmd == 'list':
             self.macro_list()
+        elif cmd == 'stats':
+            self.macro_stats()
         elif cmd == 'search':
             self.macro_search(args_rest)
         elif cmd == 'show':
@@ -1315,6 +1317,24 @@ class CliaraShell:
             print(f"    {desc} ({cmd_count} command{'s' if cmd_count != 1 else ''})")
             if macro.run_count > 0:
                 print(f"    Run {macro.run_count} time{'s' if macro.run_count != 1 else ''}")
+        print()
+    
+    def macro_stats(self):
+        """Show macro statistics (total, most used, last used, total commands)."""
+        stats = self.macros.get_stats()
+        if stats["total"] == 0:
+            print_dim("\nNo macros yet.")
+            print_dim("Create one with: macro add <name>")
+            return
+        macros = self.macros.list_all()
+        total_commands = sum(len(m.commands) for m in macros.values())
+        print_info("\n[Macro stats]\n")
+        print(f"  Macros:        {stats['total']}")
+        print(f"  Total steps:  {total_commands}")
+        if stats.get("most_used"):
+            print(f"  Most used:     {stats['most_used']}")
+        if stats.get("recently_used"):
+            print(f"  Last run:      {stats['recently_used']}")
         print()
     
     def macro_search(self, keyword: str):
@@ -1498,6 +1518,7 @@ class CliaraShell:
         print("  macro add <name> --nl      Create macro from natural language")
         print("  macro edit <name>         Edit an existing macro")
         print("  macro list                List all macros")
+        print("  macro stats               Show macro statistics")
         print("  macro search <keyword>    Search macros by name, description, or tags")
         print("  macro show <name>         Show macro details")
         print("  macro run <name>          Run a macro")

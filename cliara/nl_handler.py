@@ -5,7 +5,7 @@ Converts natural language queries to shell commands using LLM.
 
 import json
 import re
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Callable
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.agents import AGENT_REGISTRY
 
@@ -59,13 +59,19 @@ class NLHandler:
             print(f"[Error] Failed to initialize LLM: {e}")
             return False
     
-    def process_query(self, query: str, context: Optional[dict] = None) -> Tuple[List[str], str, DangerLevel]:
+    def process_query(
+        self,
+        query: str,
+        context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[List[str], str, DangerLevel]:
         """
         Convert natural language query to commands using LLM.
         
         Args:
             query: Natural language query
             context: Optional context (cwd, os, shell, etc.)
+            stream_callback: Optional callback for each streamed token (OpenAI only).
         
         Returns:
             Tuple of (commands, explanation, danger_level)
@@ -81,7 +87,7 @@ class NLHandler:
             prompt = self._create_prompt(query, context_info)
             
             # Call LLM with nl_to_commands agent
-            response = self._call_llm("nl_to_commands", prompt)
+            response = self._call_llm_stream("nl_to_commands", prompt, stream_callback)
             
             # Parse response
             commands, explanation = self._parse_response(response)
@@ -174,30 +180,65 @@ JSON Response:"""
         
         return prompt
     
-    def _call_llm(self, agent_type: str, user_message: str) -> str:
-        """Call LLM API with the given agent's system prompt and params. Returns assistant content."""
+    def _call_llm_stream(
+        self,
+        agent_type: str,
+        user_message: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """
+        Call LLM API; optionally stream chunks to stream_callback. Returns full assistant content.
+        When stream_callback is None, uses non-streaming create() (current behavior).
+        """
         if agent_type not in AGENT_REGISTRY:
             raise ValueError(f"Unknown agent type: {agent_type}")
         cfg = AGENT_REGISTRY[agent_type]
         system = cfg["system"]
         temperature = cfg["temperature"]
         max_tokens = cfg["max_tokens"]
+
         if self.provider == "openai":
             try:
-                response = self.llm_client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_message},
-                    ],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                return response.choices[0].message.content.strip()
+                if stream_callback is not None:
+                    stream = self.llm_client.chat.completions.create(
+                        model=LLM_MODEL,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user_message},
+                        ],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=True,
+                    )
+                    full_content: List[str] = []
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta.content if chunk.choices else None
+                        if delta:
+                            stream_callback(delta)
+                            full_content.append(delta)
+                    return "".join(full_content).strip()
+                else:
+                    response = self.llm_client.chat.completions.create(
+                        model=LLM_MODEL,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user_message},
+                        ],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                    return response.choices[0].message.content.strip()
             except Exception as e:
                 raise Exception(f"OpenAI API error: {e}")
         else:
+            if stream_callback is not None:
+                # Non-OpenAI provider: fall back to non-streaming
+                return self._call_llm_stream(agent_type, user_message, stream_callback=None)
             raise Exception(f"Unsupported provider: {self.provider}")
+
+    def _call_llm(self, agent_type: str, user_message: str) -> str:
+        """Call LLM API with the given agent's system prompt and params. Returns assistant content."""
+        return self._call_llm_stream(agent_type, user_message, stream_callback=None)
 
     def _parse_response(self, response: str) -> Tuple[List[str], str]:
         """Parse LLM response and extract commands."""
@@ -261,12 +302,19 @@ JSON Response:"""
         except Exception as e:
             return [f"# Error generating commands: {str(e)}"]
     
-    def explain_command(self, command: str, context: Optional[dict] = None) -> str:
+    def explain_command(
+        self,
+        command: str,
+        context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
         """
         Explain a shell command in plain English using the LLM.
 
         Args:
             command: The shell command to explain
+            context: Optional context
+            stream_callback: Optional callback for each streamed token.
 
         Returns:
             A plain-English explanation string
@@ -285,7 +333,7 @@ OS: {os_name}, Shell: {shell}
 
 Command: {command}"""
 
-            response = self._call_llm("explain", prompt)
+            response = self._call_llm_stream("explain", prompt, stream_callback)
             return response.strip()
 
         except Exception as e:
@@ -338,6 +386,7 @@ Command: {command}"""
         diff_content: str,
         files: List[str],
         context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Generate a conventional commit message from a git diff.
@@ -347,6 +396,7 @@ Command: {command}"""
             diff_content: Output of ``git diff --cached`` (may be truncated)
             files:        List of changed file paths
             context:      Optional dict with branch, cwd, os, etc.
+            stream_callback: Optional callback for each streamed token.
 
         Returns:
             A single-line conventional commit message.
@@ -387,7 +437,7 @@ Rules:
 - If there are multiple kinds of changes, pick the most significant type
 - Return ONLY the commit message — one line, no quotes, no explanation"""
 
-            response = self._call_llm("commit_message", prompt)
+            response = self._call_llm_stream("commit_message", prompt, stream_callback)
             # Strip any surrounding quotes the model might add
             msg = response.strip().strip("\"'")
             return msg
@@ -467,7 +517,10 @@ Rules:
     # ------------------------------------------------------------------
 
     def generate_deploy_steps(
-        self, description: str, context: Optional[dict] = None
+        self,
+        description: str,
+        context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> List[str]:
         """
         Generate an ordered list of deploy steps (shell commands) from the user's
@@ -482,7 +535,7 @@ Rules:
         try:
             context_info = self._build_context(context)
             prompt = self._create_deploy_prompt(description, context_info)
-            response = self._call_llm("deploy", prompt)
+            response = self._call_llm_stream("deploy", prompt, stream_callback)
             response = re.sub(r"```json\s*", "", response)
             response = re.sub(r"```\s*", "", response)
             response = response.strip()
@@ -530,6 +583,7 @@ Each step is a single shell command. Be concise and project-appropriate."""
         exit_code: int,
         stderr: str,
         context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> Dict:
         """
         Translate a command's stderr into a plain-English explanation
@@ -540,6 +594,7 @@ Each step is a single shell command. Be concise and project-appropriate."""
             exit_code: The process exit code
             stderr: Captured stderr output
             context: Optional context (cwd, os, shell, etc.)
+            stream_callback: Optional callback for each streamed token.
 
         Returns:
             Dict with keys:
@@ -553,7 +608,7 @@ Each step is a single shell command. Be concise and project-appropriate."""
         try:
             context_info = self._build_context(context)
             prompt = self._create_error_prompt(command, exit_code, stderr, context_info)
-            response = self._call_llm("fix", prompt)
+            response = self._call_llm_stream("fix", prompt, stream_callback)
             return self._parse_error_response(response)
         except Exception as e:
             return {

@@ -45,6 +45,7 @@ class Config:
         "llm_api_key": None,  # Encrypted in real impl (Phase 2)
         "first_run_complete": False,
         "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why
+        "stream_llm": True,  # Stream LLM responses token-by-token when enabled
         # PostgreSQL configuration (optional)
         "postgres": {
             "host": "localhost",

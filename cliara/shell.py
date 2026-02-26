@@ -1003,11 +1003,17 @@ class CliaraShell:
         }
         
         # Process with LLM
-        commands, explanation, danger_level = self.nl_handler.process_query(query, context)
+        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
+        if stream_cb:
+            print_info("[Generating...]\n")
+        commands, explanation, danger_level = self.nl_handler.process_query(query, context, stream_callback=stream_cb)
         
         if not commands:
             print_error(f"[Error] {explanation}")
             return
+        
+        if stream_cb:
+            print()  # newline after streamed output
         
         # Show generated commands (magenta so explanation is distinct from Processing / EXECUTING)
         _cliara_console().print(f"[Explanation] {explanation}\n", style="magenta")
@@ -1818,19 +1824,24 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
 
+        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
         result = self.nl_handler.translate_error(
             command,
             self.last_exit_code,
             stderr,
             context,
+            stream_callback=stream_cb,
         )
 
         explanation = result.get("explanation", "")
         fix_commands = result.get("fix_commands", [])
         fix_explanation = result.get("fix_explanation", "")
 
-        # ── Display explanation ──
-        print_info(f"[Cliara] {explanation}")
+        # When we streamed, the raw output was already shown; skip repeating the explanation
+        if stream_cb is None:
+            print_info(f"[Cliara] {explanation}")
+        else:
+            print()  # newline after streamed output
 
         if fix_commands:
             # Show the suggested fix
@@ -2285,13 +2296,17 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
             "branch": branch,
         }
+        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
         commit_msg = self.nl_handler.generate_commit_message(
-            diff_stat, diff_content, files, context
+            diff_stat, diff_content, files, context, stream_callback=stream_cb
         )
 
         # ── 8. Show message and confirm ──
-        print_info("[Cliara] Commit message:")
-        print(f"\n  {commit_msg}\n")
+        if stream_cb is None:
+            print_info("[Cliara] Commit message:")
+            print(f"\n  {commit_msg}\n")
+        else:
+            print()  # newline after streamed output
         print_dim(f"  Branch: {branch}")
         print_dim(f"  Files:  {len(files)} changed")
         print()
@@ -2896,12 +2911,15 @@ class CliaraShell:
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
-        commands = self.nl_handler.generate_deploy_steps(description, context)
+        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
+        commands = self.nl_handler.generate_deploy_steps(description, context, stream_callback=stream_cb)
 
         if not commands or (len(commands) == 1 and commands[0].startswith("#")):
             print_error("  Could not generate deploy steps.")
             return
 
+        if stream_cb:
+            print()  # newline after streamed output
         print_info("  Generated steps:")
         for i, cmd in enumerate(commands, 1):
             print(f"    {i}. {cmd}")
@@ -3225,6 +3243,13 @@ class CliaraShell:
 
         return confirm in ("y", "yes")
 
+    def _stream_callback_for_console(self):
+        """Return a callable that prints each streamed LLM chunk to the console and flushes stdout."""
+        def callback(chunk: str) -> None:
+            _cliara_console().print(chunk, end="")
+            sys.stdout.flush()
+        return callback
+
     def handle_history(self, arg: str = ""):
         """
         Show recent command history. Usage: history [N]
@@ -3273,11 +3298,15 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
 
-        explanation = self.nl_handler.explain_command(command, context)
+        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
+        explanation = self.nl_handler.explain_command(command, context, stream_callback=stream_cb)
 
-        # Display the explanation with a nice header/footer
+        # Display the explanation with a nice header/footer (skip body when streamed — already shown)
         print_header("-" * 60)
-        print(explanation)
+        if stream_cb is None:
+            print(explanation)
+        else:
+            print()  # newline after streamed output
         print_header("-" * 60)
 
         # Offer to run the command

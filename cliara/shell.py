@@ -894,7 +894,11 @@ class CliaraShell:
         # Check for NL prefix (Phase 2 - stubbed for now)
         nl_prefix = self.config.get('nl_prefix', '?')
         if user_input.startswith(nl_prefix):
-            self.handle_nl_query(user_input[len(nl_prefix):].strip())
+            query_rest = user_input[len(nl_prefix):].strip()
+            if not query_rest:
+                print_dim(f"Type {nl_prefix} <question> for natural language (e.g. {nl_prefix} kill process on port 3000).")
+                return
+            self.handle_nl_query(query_rest)
             return
         
         # Check for macro commands

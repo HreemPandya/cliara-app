@@ -864,6 +864,11 @@ class CliaraShell:
             print_info(f"Cliara {__version__}")
             return
 
+        # Command history — history [N]
+        if user_input.lower() == 'history' or user_input.lower().startswith('history '):
+            self.handle_history(user_input[7:].strip() if len(user_input) > 7 else "")
+            return
+
         # Check for explain command
         if user_input.lower().startswith('explain '):
             self.handle_explain(user_input[8:].strip())
@@ -3216,6 +3221,31 @@ class CliaraShell:
 
         return confirm in ("y", "yes")
 
+    def handle_history(self, arg: str = ""):
+        """
+        Show recent command history. Usage: history [N]
+        Default: last 20 commands.
+        """
+        default_n = 20
+        max_n = min(500, self.config.get("history_size", 1000))
+        n = default_n
+        if arg:
+            try:
+                n = int(arg.strip())
+                n = max(1, min(n, max_n))
+            except ValueError:
+                print_error("[Error] history expects an optional number")
+                print_dim("Usage: history   or   history 10")
+                return
+        commands = self.history.get_recent(n)
+        if not commands:
+            print_dim("No command history yet.")
+            return
+        print_info(f"\nLast {len(commands)} command(s):\n")
+        for i, cmd in enumerate(reversed(commands), 1):
+            print(f"  {i:4}  {cmd}")
+        print()
+
     def handle_explain(self, command: str):
         """
         Explain a shell command in plain English using the LLM.
@@ -3344,6 +3374,7 @@ class CliaraShell:
         print_info("  Other")
         print_dim("  ─────────────────────────────────────")
         print("  help                       Show this help")
+        print("  history [N]                Show last N commands (default 20)")
         print("  version                    Show Cliara version")
         print("  exit / Ctrl+C              Quit Cliara")
 

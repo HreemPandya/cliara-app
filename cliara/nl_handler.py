@@ -376,6 +376,105 @@ Command: {command}"""
             f"Set OPENAI_API_KEY in your .env file for detailed, AI-powered explanations."
         )
 
+    def summarize_command_for_history(
+        self,
+        command: str,
+        context: Optional[dict] = None,
+    ) -> str:
+        """
+        Generate a one-sentence summary of a command for semantic history search.
+        Used when adding commands to the semantic store.
+
+        Args:
+            command: The shell command to summarize
+            context: Optional context (cwd, os, shell)
+
+        Returns:
+            A short sentence (under ~100 chars), or empty string on failure/LLM disabled.
+        """
+        if not self.llm_enabled:
+            return ""
+        if not (command or command.strip()):
+            return ""
+        # Truncate very long commands for API
+        cmd_for_prompt = command.strip()
+        if len(cmd_for_prompt) > 2000:
+            cmd_for_prompt = cmd_for_prompt[:2000] + " ..."
+        try:
+            context_info = self._build_context(context) if context else {}
+            os_name = context_info.get("os", "Unknown")
+            shell = context_info.get("shell", "bash")
+            prompt = f"""OS: {os_name}, Shell: {shell}
+
+Command: {cmd_for_prompt}"""
+            response = self._call_llm("history_summary", prompt)
+            summary = (response or "").strip()
+            if len(summary) > 150:
+                summary = summary[:147] + "..."
+            return summary
+        except Exception:
+            return ""
+
+    def search_history_by_intent(
+        self,
+        entries: List[Dict[str, Any]],
+        query: str,
+        max_entries_in_prompt: int = 100,
+        max_chars: int = 12000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Given a list of semantic history entries and a natural language query,
+        return the entries that match the user's intent (summary-only path).
+
+        Args:
+            entries: List of dicts with at least "command", "summary", "timestamp"
+            query: User's search question (e.g. "when did I fix the login bug")
+            max_entries_in_prompt: Cap how many entries to send to the LLM
+            max_chars: Approximate cap on total prompt length
+
+        Returns:
+            Subset of entries that match, in order of appearance in response.
+        """
+        if not self.llm_enabled or not entries or not (query or "").strip():
+            return []
+        # Use most recent entries
+        entries = entries[-max_entries_in_prompt:]
+        lines = []
+        total = 0
+        for i, e in enumerate(entries, 1):
+            cmd = (e.get("command") or "").strip()
+            summary = (e.get("summary") or "").strip()
+            ts = (e.get("timestamp") or "").strip()
+            line = f"{i}. Command: {cmd}"
+            if summary:
+                line += f" | Summary: {summary}"
+            if ts:
+                line += f" | Time: {ts}"
+            lines.append(line)
+            total += len(line) + 1
+            if total >= max_chars:
+                entries = entries[: i]
+                break
+        prompt = "Past commands (number, command, summary, time):\n\n" + "\n".join(lines)
+        prompt += f"\n\nUser's question: {query.strip()}\n\nReply with only the numbers of matching entries, comma-separated (e.g. 2, 5, 7), or NONE."
+        try:
+            response = self._call_llm("history_search", prompt)
+            response = (response or "").strip().upper()
+            if "NONE" in response or not response:
+                return []
+            # Parse "1, 3, 5" or "1,3,5"
+            indices = []
+            for part in response.replace(",", " ").split():
+                part = part.strip()
+                if part.isdigit():
+                    idx = int(part)
+                    if 1 <= idx <= len(entries) and idx not in indices:
+                        indices.append(idx)
+            result = [entries[i - 1] for i in indices]
+            return result
+        except Exception:
+            return []
+
     # ------------------------------------------------------------------
     # Commit-message generation (smart push)
     # ------------------------------------------------------------------
@@ -439,7 +538,7 @@ Rules:
 
             response = self._call_llm_stream("commit_message", prompt, stream_callback)
             # Strip any surrounding quotes the model might add
-            msg = response.strip().strip("\"'")
+            msg = (response or "").strip().strip("\"'")
             return msg
 
         except Exception as e:

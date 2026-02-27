@@ -26,7 +26,7 @@ cliara
 Cliara wraps your existing shell and adds:
 - 🗣️ Natural language commands with `?` prefix (Phase 2)
 - 📦 Powerful macro system (create, edit, delete, run)
-
+- 🔍 Semantic history search: `? find when I fixed the login` or `? what did I run to deploy`
 - 🛡️ Safety checks for dangerous operations
 - 💾 Save last command as macro instantly
 - 🔄 Persistent command history with arrow-key recall across sessions
@@ -106,6 +106,7 @@ cliara:src >
 - LLM integration (OpenAI)
 - Natural language → commands
 - Context-aware suggestions
+- **Semantic history search**: `? find ...` / `? when did I ...` / `? what did I run ...` — search past commands by intent (stored in `~/.cliara/semantic_history.json`)
 
 ### Storage Backends
 - **JSON** (default) - Simple file-based storage

@@ -46,6 +46,11 @@ class Config:
         "first_run_complete": False,
         "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why
         "stream_llm": True,  # Stream LLM responses token-by-token when enabled
+        # Semantic history search (? find / ? when did I ...)
+        "semantic_history_enabled": True,
+        "semantic_history_max_entries": 500,
+        "semantic_history_use_embeddings": False,
+        "semantic_history_summary_on_add": True,
         # PostgreSQL configuration (optional)
         "postgres": {
             "host": "localhost",

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import os
 import platform
+import queue
 import threading
 import time
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ from cliara.nl_handler import NLHandler
 from cliara.diff_preview import DiffPreview
 from cliara.deploy_detector import detect_all as detect_deploy_targets, DeployPlan
 from cliara.deploy_store import DeployStore
+from cliara.semantic_history import SemanticHistoryStore
 from cliara.session_store import (
     SessionStore,
     TaskSession,
@@ -155,6 +157,28 @@ def _looks_like_why(query: str) -> bool:
     if _edit_distance(word, "why") <= 1:
         return True
     if sorted(word) == sorted("why"):
+        return True
+    return False
+
+
+def _is_semantic_history_search_intent(query: str) -> bool:
+    """Return True if the query looks like a search over past commands by intent."""
+    q = query.strip().lower()
+    if not q:
+        return False
+    if q.startswith("find "):
+        return True
+    if q.startswith("when did i "):
+        return True
+    if q.startswith("what did i run"):
+        return True
+    if "when did i " in q:
+        return True
+    if "what did i run " in q or q == "what did i run":
+        return True
+    if q.startswith("search history"):
+        return True
+    if q.startswith("history ") and len(q) > 8:
         return True
     return False
 
@@ -567,6 +591,27 @@ class CliaraShell:
         # for ? why after an automatic regression check on failure.
         self._last_regression_report: Optional[Tuple[List[Tuple[str, str]], dict, dict]] = None
 
+        # Semantic history — store + background worker for ? find / ? when did I ...
+        self._semantic_history: Optional[SemanticHistoryStore] = None
+        self._semantic_history_queue: Optional[queue.Queue] = None
+        self._semantic_history_thread: Optional[threading.Thread] = None
+        self._last_explained_command: Optional[str] = None
+        self._last_explained_summary: Optional[str] = None
+        if self.config.get("semantic_history_enabled", True):
+            max_entries = self.config.get("semantic_history_max_entries", 500)
+            store_path = self.config.config_dir / "semantic_history.json"
+            self._semantic_history = SemanticHistoryStore(
+                store_path=store_path,
+                max_entries=max_entries,
+            )
+            if self.config.get("semantic_history_summary_on_add", True):
+                self._semantic_history_queue = queue.Queue()
+                self._semantic_history_thread = threading.Thread(
+                    target=self._semantic_history_worker,
+                    daemon=True,
+                )
+                self._semantic_history_thread.start()
+
         progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
         self._initialize_llm(quiet=True)
@@ -598,7 +643,83 @@ class CliaraShell:
         else:
             # LLM not configured, will use stub responses
             pass
-    
+
+    def _semantic_history_worker(self):
+        """Background worker: get (command, cwd, exit_code, summary_override) from queue; add to semantic store."""
+        q = self._semantic_history_queue
+        store = self._semantic_history
+        if not q or not store:
+            return
+        while True:
+            item = None
+            try:
+                item = q.get()
+                if item is None:
+                    break
+                command, cwd, exit_code, summary_override = item
+                if summary_override:
+                    summary = summary_override
+                else:
+                    context = {
+                        "cwd": cwd or str(Path.cwd()),
+                        "os": platform.system(),
+                        "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+                    }
+                    summary = self.nl_handler.summarize_command_for_history(command, context) or ""
+                store.add(
+                    command=command,
+                    summary=summary,
+                    cwd=cwd,
+                    exit_code=exit_code,
+                )
+            except Exception:
+                # Still add with empty summary so store populates (e.g. LLM timeout)
+                if item is not None:
+                    try:
+                        command, cwd, exit_code, _ = item
+                        store.add(command=command, summary="", cwd=cwd, exit_code=exit_code)
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    q.task_done()
+                except Exception:
+                    pass
+
+    def _enqueue_semantic_add(
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        exit_code: Optional[int] = None,
+    ):
+        """Add command to semantic history (sync so store is never empty); enqueue for background summary."""
+        if not self._semantic_history:
+            return
+        summary_override = None
+        if self._last_explained_command is not None and command.strip() == self._last_explained_command.strip():
+            summary_override = self._last_explained_summary or ""
+            self._last_explained_command = None
+            self._last_explained_summary = None
+        # Add synchronously so store is always populated even if worker fails or is slow
+        try:
+            self._semantic_history.add(
+                command=command,
+                summary=summary_override or "",
+                cwd=cwd,
+                exit_code=exit_code,
+            )
+        except Exception:
+            pass
+        # Enqueue for background summary (worker will add again with summary; dedupe replaces)
+        if not self._semantic_history_queue:
+            return
+        if not self.config.get("semantic_history_summary_on_add", True):
+            return
+        try:
+            self._semantic_history_queue.put((command, cwd, exit_code, summary_override))
+        except Exception:
+            pass
+
     def print_banner(self):
         """Print welcome banner as a Rich Panel."""
         from cliara import __version__
@@ -618,6 +739,7 @@ class CliaraShell:
             f"  • {nl} <query>             Ask in plain English" + (" (e.g. " + nl + " list large files)" if self.nl_handler.llm_enabled else " (requires API key)"),
             f"  • {nl} fix                 Diagnose & fix the last failed command",
             f"  • {nl} why                 Regression deep-dive after a failure",
+            f"  • {nl} find / when did I   Search history by meaning",
             "  • session start <name>   Start a task session",
             "  • session end [note]     End session — session help for more",
             "  • session help           More session commands (notes, list, show)",
@@ -978,7 +1100,12 @@ class CliaraShell:
         if _looks_like_why(query):
             self.handle_why()
             return
-        
+
+        # ── Semantic history search: ? find ... / ? when did I ... / ? what did I run ... ──
+        if _is_semantic_history_search_intent(query):
+            self.handle_semantic_history_search(query)
+            return
+
         # Check for --save-as <name> flag
         save_as_name = None
         if '--save-as' in query:
@@ -1146,6 +1273,61 @@ class CliaraShell:
         self._last_regression_report = (causes, last, current)
         text = regression.format_expanded_report(causes, last, current)
         _cliara_console().print(Panel(text, title="Regression (vs last success)", border_style="dim"))
+
+    def handle_semantic_history_search(self, query: str):
+        """
+        Search command history by intent. Called for ? find ... / ? when did I ... / ? what did I run ...
+        """
+        if not self.config.get("semantic_history_enabled", True):
+            print_dim("Semantic history search is disabled. Use 'history [N]' for a plain list.")
+            return
+        store = self._semantic_history
+        if not store or store.is_empty():
+            print_dim("No semantic history yet. Run some commands, then try again.")
+            print_dim("Use 'history [N]' for a plain list of recent commands.")
+            return
+        if not self.nl_handler.llm_enabled:
+            print_dim("LLM not configured. Semantic search requires OPENAI_API_KEY.")
+            print_dim("Use 'history [N]' for a plain list.")
+            return
+        entries = store.get_recent(100)
+        if not entries:
+            print_dim("No matching commands found. Try a different phrase or run more commands.")
+            return
+        print_info(f"\n[Searching] {query.strip()}\n")
+        matches = self.nl_handler.search_history_by_intent(entries, query.strip())
+        if not matches:
+            print_dim("No matching commands found. Try a different phrase or run more commands.")
+            return
+        print_info(f"Found {len(matches)} matching command(s):\n")
+        for i, e in enumerate(matches, 1):
+            cmd = e.get("command", "")
+            summary = e.get("summary", "").strip()
+            ts = e.get("timestamp", "").strip()
+            cwd = e.get("cwd", "").strip()
+            line = f"  {i}. {cmd}"
+            if summary:
+                line += f"\n     {summary}"
+            if ts:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    line += f"\n     {dt.strftime('%Y-%m-%d %H:%M')}"
+                except Exception:
+                    line += f"\n     {ts}"
+            if cwd:
+                line += f"  |  {cwd}"
+            print(line)
+            print()
+        # Offer to run the first match
+        first_cmd = matches[0].get("command", "").strip()
+        if first_cmd:
+            try:
+                run_again = input("Run the first command again? (y/n): ").strip().lower()
+                if run_again in ("y", "yes"):
+                    self.execute_shell_command(first_cmd)
+            except (EOFError, KeyboardInterrupt):
+                print()
 
     def handle_macro_command(self, args: str):
         """
@@ -1709,6 +1891,7 @@ class CliaraShell:
         # Record in history
         self.history.add(command)
         self.history.set_last_execution([command])
+        self._enqueue_semantic_add(command, str(Path.cwd()), None)
 
         if platform.system() == "Windows" and is_powershell(self.shell_path or ""):
             try:
@@ -1998,6 +2181,7 @@ class CliaraShell:
             # Add to history
             self.history.add(command)
             self.history.set_last_execution([command])
+            self._enqueue_semantic_add(command, str(Path.cwd()), None)
 
             if capture:
                 # ── Capture mode: both stdout and stderr captured ──
@@ -2204,7 +2388,7 @@ class CliaraShell:
         # ── 1. Are we in a git repo? ──
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if result.returncode != 0:
             print_error("[Cliara] Not inside a git repository.")
@@ -2213,9 +2397,9 @@ class CliaraShell:
         # ── 2. Current branch ──
         result = subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        branch = result.stdout.strip()
+        branch = (result.stdout or "").strip()
         if not branch:
             print_error("[Cliara] Detached HEAD state — checkout a branch first.")
             return
@@ -2223,17 +2407,17 @@ class CliaraShell:
         # ── 3. Anything to commit? ──
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        status_output = result.stdout.strip()
+        status_output = (result.stdout or "").strip()
 
         if not status_output:
             # Nothing to commit — maybe there are unpushed commits?
             result = subprocess.run(
                 ["git", "log", f"origin/{branch}..HEAD", "--oneline"],
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
-            unpushed = result.stdout.strip()
+            unpushed = (result.stdout or "").strip()
             if unpushed:
                 count = len(unpushed.splitlines())
                 print_info(
@@ -2266,26 +2450,31 @@ class CliaraShell:
 
         # ── 5. Stage everything ──
         print_dim("\nStaging all changes...")
-        subprocess.run(["git", "add", "-A"], capture_output=True)
+        subprocess.run(
+            ["git", "add", "-A"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
 
         # ── 6. Gather diff for message generation ──
         result = subprocess.run(
             ["git", "diff", "--cached", "--stat"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        diff_stat = result.stdout.strip()
+        diff_stat = (result.stdout or "").strip()
 
         result = subprocess.run(
             ["git", "diff", "--cached"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        diff_content = result.stdout.strip()
+        diff_content = (result.stdout or "").strip()
 
         result = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        files = [f for f in result.stdout.strip().splitlines() if f]
+        files = [f for f in (result.stdout or "").strip().splitlines() if f]
 
         # ── 7. Generate commit message ──
         print_dim("Generating commit message...\n")
@@ -2300,6 +2489,10 @@ class CliaraShell:
         commit_msg = self.nl_handler.generate_commit_message(
             diff_stat, diff_content, files, context, stream_callback=stream_cb
         )
+        if not commit_msg or not commit_msg.strip():
+            print_error("[Cliara] Could not generate commit message. Try again or use: git commit -m \"your message\"")
+            self._unstage_all()
+            return
 
         # ── 8. Show message and confirm ──
         if stream_cb is None:
@@ -2345,9 +2538,9 @@ class CliaraShell:
         # Check if the remote branch already exists
         result = subprocess.run(
             ["git", "ls-remote", "--heads", "origin", branch],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        if result.stdout.strip():
+        if (result.stdout or "").strip():
             success = self.execute_shell_command(f"git push origin {branch}")
         else:
             print_dim(f"Branch '{branch}' is new on remote — setting up tracking...")
@@ -3309,6 +3502,17 @@ class CliaraShell:
             print()  # newline after streamed output
         print_header("-" * 60)
 
+        # Cache for semantic history: if user runs this command next, use explanation as summary
+        one_line = (explanation or "").strip().split("\n")[0].strip()
+        if len(one_line) > 150:
+            one_line = one_line[:147] + "..."
+        self._last_explained_command = command.strip()
+        self._last_explained_summary = one_line if one_line else None
+        if self._semantic_history and one_line:
+            self._semantic_history.update_summary_for_command(
+                command.strip(), one_line, str(Path.cwd())
+            )
+
         # Offer to run the command
         print()
         run = input("Run this command? (y/n): ").strip().lower()
@@ -3352,6 +3556,13 @@ class CliaraShell:
         print_dim("  ─────────────────────────────────────")
         print("  explain <command>          Plain-English explanation of any command")
         print_dim("  Example: explain git rebase -i HEAD~3\n")
+
+        print_info("  Semantic History Search")
+        print_dim("  ─────────────────────────────────────")
+        print(f"  {nl} find <what>             Search past commands by meaning")
+        print(f"  {nl} when did I ...          e.g. when did I fix the login bug")
+        print(f"  {nl} what did I run ...      e.g. what did I run to deploy last time")
+        print_dim("  Requires LLM; uses stored summaries of your commands.\n")
 
         print_info("  Macros")
         print_dim("  ─────────────────────────────────────")
@@ -3408,6 +3619,7 @@ class CliaraShell:
         print_dim("  ─────────────────────────────────────")
         print("  help                       Show this help")
         print("  history [N]                Show last N commands (default 20)")
+        print(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
         print("  version                    Show Cliara version")
         print("  exit / Ctrl+C              Quit Cliara")
 

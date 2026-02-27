@@ -2186,7 +2186,7 @@ class CliaraShell:
             if capture:
                 # ── Capture mode: both stdout and stderr captured ──
                 if spinner_delay > 0:
-                    timer: Union[_LiveTimer, _NullTimer] = _LiveTimer(
+                    timer = _LiveTimer(
                         command, delay=spinner_delay, inline=True,
                     )
                 else:
@@ -2209,10 +2209,11 @@ class CliaraShell:
                 self.last_stderr = result.stderr or ""
                 self.last_exit_code = result.returncode
                 success = result.returncode == 0
-                self._notify_completion(command, time.time() - start_time, success)
+                elapsed = time.time() - start_time
+                self._notify_completion(command, elapsed, success)
                 self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
-                    self._regression_save_success(command)
+                    self._regression_save_success(command, elapsed)
                 return success
             else:
                 # ── Streaming mode: stdout AND stderr piped ──
@@ -2222,8 +2223,10 @@ class CliaraShell:
                 # it) means the spinner and command output never fight
                 # over the same cursor.
                 if spinner_delay > 0:
+                    # In streaming mode, keep the spinner to the title bar only
+                    # to avoid choppy inline updates fighting with command output.
                     timer = _LiveTimer(
-                        command, delay=spinner_delay, inline=True,
+                        command, delay=spinner_delay, inline=False,
                     )
                 else:
                     timer = _NullTimer()
@@ -2295,10 +2298,11 @@ class CliaraShell:
                 self.last_stderr = "".join(stderr_lines)
                 self.last_exit_code = proc.returncode
                 success = proc.returncode == 0
-                self._notify_completion(command, time.time() - start_time, success)
+                elapsed = time.time() - start_time
+                self._notify_completion(command, elapsed, success)
                 self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
-                    self._regression_save_success(command)
+                    self._regression_save_success(command, elapsed)
                 return success
 
         except Exception as e:
@@ -2344,8 +2348,20 @@ class CliaraShell:
             return None
         return f"{root or 'cwd:' + str(cwd)}::{base}"
 
-    def _regression_save_success(self, command: str) -> None:
-        """Capture and save a success snapshot for this workflow (called after successful run)."""
+    def _regression_save_success(self, command: str, elapsed: Optional[float] = None) -> None:
+        """Capture and save a success snapshot for this workflow (called after successful run).
+
+        To keep common, fast commands snappy, we only record a snapshot when the
+        command ran for at least ``regression_min_success_seconds`` (default: 3s).
+        """
+        # Skip very fast commands so regression tracking doesn't add noticeable latency.
+        try:
+            min_seconds = float(self.config.get("regression_min_success_seconds", 3.0))
+        except Exception:
+            min_seconds = 3.0
+        if elapsed is not None and elapsed < max(min_seconds, 0.0):
+            return
+
         key = self._regression_workflow_key(command)
         if not key:
             return

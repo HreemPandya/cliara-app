@@ -1312,7 +1312,9 @@ class CliaraShell:
                 try:
                     from datetime import datetime
                     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    line += f"\n     {dt.strftime('%Y-%m-%d %H:%M')}"
+                    # Convert UTC timestamp to local time and show 12-hour clock with AM/PM
+                    local_dt = dt.astimezone()
+                    line += f"\n     {local_dt.strftime('%Y-%m-%d %I:%M %p')}"
                 except Exception:
                     line += f"\n     {ts}"
             if cwd:

@@ -41,6 +41,12 @@ from cliara.cross_platform import (
     translate_pipeline,
 )
 from cliara import regression
+from cliara.copilot_gate import (
+    SourceDetector,
+    InputSource,
+    RiskEngine,
+    CopilotGate,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +581,14 @@ class CliaraShell:
         self.diff_preview = DiffPreview()
         self.nl_handler = NLHandler(self.safety)
 
+        # Copilot Gate — AI-command interception
+        self._source_detector = SourceDetector()
+        _risk_engine = RiskEngine(self.safety, self.diff_preview)
+        self._copilot_gate = CopilotGate(
+            _risk_engine,
+            auto_approve_safe=self.config.get("copilot_gate_auto_approve_safe", True),
+        )
+
         progress.step("Loading history...")
         history_file = self.config.config_dir / "history.txt"
         self.history = CommandHistory(
@@ -887,8 +901,19 @@ class CliaraShell:
                     text = self._read_system_clipboard()
                     if text:
                         event.current_buffer.insert_text(text)
+                        self._source_detector.mark_paste()
                 except Exception:
                     pass
+
+            try:
+                from prompt_toolkit.keys import Keys
+                @kb.add(Keys.BracketedPaste)
+                def _bracketed_paste(event):
+                    """Bracket-paste: terminal wraps pasted text in escape sequences."""
+                    event.current_buffer.insert_text(event.data)
+                    self._source_detector.mark_paste()
+            except (ImportError, Exception):
+                pass
 
             @kb.add("tab", eager=True)
             def _accept_fix(event):
@@ -991,6 +1016,27 @@ class CliaraShell:
         """
         # Any new input clears a pending fix suggestion
         self._pending_fix = None
+
+        # --- @run bypass: skip the Copilot Gate for this command ---
+        if user_input.startswith("@run "):
+            user_input = user_input[5:].strip()
+            if not user_input:
+                return
+
+        # --- Copilot Gate: intercept AI-generated commands ---
+        elif self.config.get("copilot_gate", True):
+            gate_mode = self.config.get("copilot_gate_mode", "auto")
+            source = self._source_detector.classify(
+                user_input, self.last_command, mode=gate_mode)
+            if self._source_detector.is_ai_generated(source):
+                command = user_input[4:].strip() if source == InputSource.AI_TAGGED else user_input
+                if not command:
+                    return
+                approved = self._copilot_gate.evaluate(command, source)
+                if not approved:
+                    print_warning("  [Cancelled]")
+                    return
+                user_input = command
 
         # Check for exit commands
         if user_input.lower() in ['exit', 'quit', 'q']:

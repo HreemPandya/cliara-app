@@ -11,6 +11,7 @@ from cliara.agents import explain as _explain
 from cliara.agents import history_summary as _history_summary
 from cliara.agents import history_search as _history_search
 from cliara.agents import commit_and_deploy as _commit_deploy
+from cliara.agents import copilot_explain as _copilot_explain
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -29,6 +30,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
         | _history_summary.AGENTS
         | _history_search.AGENTS
         | _commit_deploy.AGENTS
+        | _copilot_explain.AGENTS
     )
     for name, cfg in all_agents.items():
         registry[name] = {

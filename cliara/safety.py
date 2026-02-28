@@ -35,6 +35,11 @@ DANGER_PATTERNS = {
         r'\brd\s+/s\b',      # Windows remove directory
         r'\bchmod\s+777\b',
         r'\bchown\s+.*root',
+        r'\bgit\s+filter-branch\b',            # History rewriting
+        r'\bterraform\s+destroy\b',            # Infrastructure destruction
+        r'\bfind\s+.*-exec\s+rm\b',            # Mass deletion via find
+        r'\bxargs\s+rm\b',                     # Mass deletion via xargs
+        r'\bgit\s+clean\s+-fd',                # Remove untracked files + dirs
     ],
     DangerLevel.CAUTION: [
         r'\bsudo\b',  # Elevated privileges
@@ -43,6 +48,19 @@ DANGER_PATTERNS = {
         r'\bpip\s+install.*--force',
         r'\bgit\s+push\s+.*--force',
         r'\bgit\s+reset\s+--hard',
+        r'\bnpm\s+publish\b',                  # Package publishing
+        r'\bcargo\s+publish\b',
+        r'\bdocker\s+push\b',                  # Image publishing
+        r'\bfly\s+deploy\b',                   # Deployment
+        r'\bterraform\s+apply\b',              # Infrastructure changes
+        r'\bgit\s+rebase\b',                   # History rewriting
+        r'\bcat\s+.*\.env\b',                  # Credential exposure
+        r'\bprintenv\b.*\|.*\bcurl\b',         # Env piped to network
+        r'\bcurl\b.*(-d|--data)\s+@',          # Upload file via curl
+        r'\bscp\b',                            # Remote file copy
+        r'\bgit\s+push\s+.*--no-verify',       # Skips pre-push hooks
+        r'\bgit\s+commit\s+.*--no-verify',     # Skips pre-commit hooks
+        r'\bdocker\s+system\s+prune\b',        # Bulk Docker cleanup
     ]
 }
 

@@ -51,6 +51,10 @@ class Config:
         "semantic_history_max_entries": 500,
         "semantic_history_use_embeddings": False,
         "semantic_history_summary_on_add": True,
+        # Copilot Gate — AI-command interception layer
+        "copilot_gate": True,
+        "copilot_gate_mode": "auto",            # "auto" | "explicit" | "all"
+        "copilot_gate_auto_approve_safe": True,  # Auto-execute SAFE pasted commands
         # PostgreSQL configuration (optional)
         "postgres": {
             "host": "localhost",

@@ -1,0 +1,38 @@
+{
+  "name": "cliara-gate",
+  "displayName": "Cliara Gate",
+  "description": "Intercepts terminal commands, explains them, and requires approval for risky ones.",
+  "version": "0.1.0",
+  "publisher": "cliara",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "terminal": {
+      "profiles": [
+        {
+          "title": "Cliara Gate",
+          "id": "cliara-gate",
+          "icon": "shield"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}

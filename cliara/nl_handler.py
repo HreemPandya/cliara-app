@@ -4,8 +4,13 @@ Converts natural language queries to shell commands using LLM.
 """
 
 import json
+import os
+import platform
 import re
+from pathlib import Path
+from shutil import which
 from typing import List, Tuple, Optional, Dict, Any, Callable
+
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.agents import AGENT_REGISTRY
 
@@ -80,43 +85,120 @@ class NLHandler:
             return self._stub_response(query)
         
         try:
-            # Build context information
-            context_info = self._build_context(context)
-            
-            # Create prompt
+            context_info = self._build_context(context, include_directory_listing=True)
             prompt = self._create_prompt(query, context_info)
-            
-            # Call LLM with nl_to_commands agent
             response = self._call_llm_stream("nl_to_commands", prompt, stream_callback)
-            
-            # Parse response
             commands, explanation = self._parse_response(response)
-            
+
             if not commands:
                 return [], "Could not generate commands from query", DangerLevel.SAFE
-            
-            # Safety check
+
             level, dangerous = self.safety.check_commands(commands)
-            
             return commands, explanation, level
         
         except Exception as e:
             print(f"[Error] LLM processing failed: {e}")
             return [], f"Error: {str(e)}", DangerLevel.SAFE
     
-    def _build_context(self, context: Optional[dict]) -> dict:
-        """Build context information for LLM."""
-        import os
-        import platform
-        from pathlib import Path
-        
-        ctx = context or {}
-        
-        # Add system info
+    # ------------------------------------------------------------------
+    # Shell detection helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_shell_fallback() -> str:
+        """Auto-detect the user's shell when no configured value is available."""
+        if platform.system() == "Windows":
+            pwsh = which("pwsh") or which("powershell")
+            return pwsh if pwsh else "cmd.exe"
+        return os.environ.get("SHELL", "/bin/bash")
+
+    # ------------------------------------------------------------------
+    # Directory listing for fuzzy-path resolution
+    # ------------------------------------------------------------------
+
+    _SKIP_DIRS = frozenset({
+        ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv",
+        "venv", ".env", ".idea", ".vscode", ".vs", ".mypy_cache",
+        ".pytest_cache", ".tox", "dist", "build", ".next", ".nuxt",
+        "target", ".cargo", ".gradle", "vendor", "coverage", ".coverage",
+        "htmlcov", "bin", "obj",
+    })
+    _SKIP_SUFFIXES = (".egg-info", ".dist-info")
+
+    def _gather_directory_listing(
+        self, cwd_path: str, max_depth: int = 2, max_entries: int = 80,
+    ) -> str:
+        """
+        Build a compact directory tree (up to *max_depth* levels) starting
+        from *cwd_path*.  The output is a human-readable indented listing
+        that the LLM can use to resolve ambiguous path references.
+        """
+        root = Path(cwd_path)
+        if not root.is_dir():
+            return ""
+
+        lines: List[str] = []
+        count = 0
+
+        def _scan(directory: Path, indent: str, depth: int):
+            nonlocal count
+            if depth > max_depth or count >= max_entries:
+                return
+            try:
+                entries = sorted(
+                    directory.iterdir(),
+                    key=lambda e: (not e.is_dir(), e.name.lower()),
+                )
+            except (PermissionError, OSError):
+                return
+
+            for entry in entries:
+                if count >= max_entries:
+                    break
+                name = entry.name
+                if name.startswith("."):
+                    continue
+                if entry.is_dir():
+                    lower = name.lower()
+                    if lower in self._SKIP_DIRS:
+                        continue
+                    if any(lower.endswith(s) for s in self._SKIP_SUFFIXES):
+                        continue
+                    lines.append(f"{indent}{name}/")
+                    count += 1
+                    _scan(entry, indent + "  ", depth + 1)
+                else:
+                    lines.append(f"{indent}{name}")
+                    count += 1
+
+        _scan(root, "  ", 0)
+
+        if count >= max_entries:
+            lines.append(f"  ... ({count}+ entries, truncated)")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Context builder
+    # ------------------------------------------------------------------
+
+    def _build_context(
+        self,
+        context: Optional[dict] = None,
+        include_directory_listing: bool = False,
+    ) -> dict:
+        """Build context information for LLM.
+
+        When *include_directory_listing* is True a compact filesystem
+        snapshot of the cwd (depth 2) is included so the model can
+        resolve ambiguous / fuzzy path references.
+        """
+        ctx = context.copy() if context else {}
+
         ctx.setdefault("os", platform.system())
-        ctx.setdefault("shell", os.environ.get("SHELL", "bash"))
+        ctx.setdefault("shell", self._detect_shell_fallback())
         ctx.setdefault("cwd", str(Path.cwd()))
-        
+
         # Detect project type
         cwd = Path(ctx["cwd"])
         if (cwd / "package.json").exists():
@@ -125,59 +207,44 @@ class NLHandler:
             ctx["project_type"] = "python"
         elif (cwd / "Cargo.toml").exists():
             ctx["project_type"] = "rust"
-        elif (cwd / "docker-compose.yml").exists():
+        if (cwd / "docker-compose.yml").exists():
             ctx["has_docker"] = True
-        
-        # Check for git
+
         if (cwd / ".git").exists():
             ctx["has_git"] = True
-        
+
+        if include_directory_listing and "directory_listing" not in ctx:
+            ctx["directory_listing"] = self._gather_directory_listing(ctx["cwd"])
+
         return ctx
     
     def _create_prompt(self, query: str, context: dict) -> str:
-        """Create prompt for LLM."""
+        """Create the user message for the NL-to-commands agent.
+
+        All behavioural rules live in the system prompt (nl_to_commands.txt).
+        This method only supplies the request and runtime context.
+        """
         os_name = context.get("os", "Unknown")
-        shell = context.get("shell", "bash")
+        shell = context.get("shell", "unknown")
         cwd = context.get("cwd", "")
         project_type = context.get("project_type", "")
-        
-        prompt = f"""You are a helpful assistant that converts natural language requests into shell commands.
+        dir_listing = context.get("directory_listing", "")
 
-User's request: {query}
+        prompt = f"User's request: {query}\n\nContext:\n"
+        prompt += f"- Operating System: {os_name}\n"
+        prompt += f"- Shell: {shell}\n"
+        prompt += f"- Current Directory: {cwd}\n"
 
-Context:
-- Operating System: {os_name}
-- Shell: {shell}
-- Current Directory: {cwd}
-"""
-        
         if project_type:
             prompt += f"- Project Type: {project_type}\n"
         if context.get("has_git"):
             prompt += "- Git repository detected\n"
         if context.get("has_docker"):
             prompt += "- Docker Compose detected\n"
-        
-        prompt += """
-Instructions:
-1. Generate the most appropriate shell command(s) for the user's request
-2. Consider the OS and shell type
-3. Return ONLY valid JSON in this exact format:
-{
-  "commands": ["command1", "command2"],
-  "explanation": "Brief explanation of what these commands do"
-}
 
-Rules:
-- Return commands that work on the specified OS and shell
-- Use appropriate commands for Windows (PowerShell/cmd) vs Unix (bash/zsh)
-- If multiple commands are needed, return them as an array
-- Keep commands simple and safe
-- Do NOT include any markdown formatting or code blocks
-- Return ONLY the JSON, nothing else
+        if dir_listing:
+            prompt += f"\nDirectory listing (depth 2 from cwd):\n{dir_listing}\n"
 
-JSON Response:"""
-        
         return prompt
     
     def _call_llm_stream(
@@ -294,7 +361,7 @@ JSON Response:"""
             return [f"# LLM not configured: {nl_description}"]
         
         try:
-            context_info = self._build_context(context)
+            context_info = self._build_context(context, include_directory_listing=True)
             prompt = self._create_prompt(nl_description, context_info)
             response = self._call_llm("nl_to_commands", prompt)
             commands, _ = self._parse_response(response)

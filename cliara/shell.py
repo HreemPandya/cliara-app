@@ -79,8 +79,29 @@ def print_success(msg: str):
 
 
 def print_error(msg: str, **kw):
-    """Print a red error message."""
-    _cliara_console().print(msg, style="red", **kw)
+    """
+    Print an error message with the important parts highlighted in light red,
+    without making the entire line bright red (which can be jarring).
+    """
+    from rich.text import Text
+
+    # If the caller passes a Rich Text object or something already styled,
+    # just print it as-is.
+    if isinstance(msg, Text):
+        _cliara_console().print(msg, **kw)
+        return
+
+    text = Text(str(msg))
+
+    # Highlight common error prefixes lightly so only the important cue is red.
+    prefixes = ["[Error]", "[Cliara]", "[X]"]
+    for p in prefixes:
+        idx = text.plain.find(p)
+        if idx != -1:
+            text.stylize("bold bright_red", idx, idx + len(p))
+            break
+
+    _cliara_console().print(text, **kw)
 
 
 def print_warning(msg: str):
@@ -563,6 +584,8 @@ class CliaraShell:
 
         self.running = True
         self.shell_path = self.config.get("shell")
+        if not self.shell_path:
+            self.shell_path = self.config._detect_shell()
 
         # Deploy store — persisted per-project deploy configs
         self.deploy_store = DeployStore()
@@ -2195,13 +2218,28 @@ class CliaraShell:
                     timer = _NullTimer()
                 timer.start()
                 try:
-                    result = subprocess.run(
-                        command,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                    )
+                    # On Windows with a PowerShell-configured shell, run via PowerShell
+                    # so cmdlets like Get-ChildItem work as expected.
+                    if platform.system() == "Windows" and is_powershell(self.shell_path or ""):
+                        ps_exe = (
+                            "pwsh"
+                            if "pwsh" in (self.shell_path or "").lower()
+                            else "powershell"
+                        )
+                        result = subprocess.run(
+                            [ps_exe, "-NoProfile", "-Command", command],
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                        )
+                    else:
+                        result = subprocess.run(
+                            command,
+                            shell=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                        )
                 finally:
                     timer.stop()
 
@@ -2233,14 +2271,32 @@ class CliaraShell:
                 else:
                     timer = _NullTimer()
 
-                proc = subprocess.Popen(
-                    command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    encoding="utf-8",
-                    errors="replace",
-                )
+                # On Windows + PowerShell shell, invoke PowerShell directly so
+                # that PowerShell cmdlets are available. Otherwise, fall back
+                # to the platform's default shell.
+                if platform.system() == "Windows" and is_powershell(self.shell_path or ""):
+                    ps_exe = (
+                        "pwsh"
+                        if "pwsh" in (self.shell_path or "").lower()
+                        else "powershell"
+                    )
+                    popen_cmd = [ps_exe, "-NoProfile", "-Command", command]
+                    popen_kwargs = {
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.PIPE,
+                        "encoding": "utf-8",
+                        "errors": "replace",
+                    }
+                    proc = subprocess.Popen(popen_cmd, **popen_kwargs)
+                else:
+                    proc = subprocess.Popen(
+                        command,
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
 
                 stderr_lines: List[str] = []
 

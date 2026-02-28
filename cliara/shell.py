@@ -1152,24 +1152,18 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash")
         }
         
-        # Process with LLM
-        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
-        if stream_cb:
-            print_info("[Generating...]\n")
-        commands, explanation, danger_level = self.nl_handler.process_query(query, context, stream_callback=stream_cb)
+        # Process with LLM (no streaming for ? queries — we show only the parsed explanation and commands)
+        commands, explanation, danger_level = self.nl_handler.process_query(query, context, stream_callback=None)
         
         if not commands:
             print_error(f"[Error] {explanation}")
             return
         
-        if stream_cb:
-            print()  # newline after streamed output
-        
-        # Show generated commands (magenta so explanation is distinct from Processing / EXECUTING)
-        _cliara_console().print(f"[Explanation] {explanation}\n", style="magenta")
+        # Show generated commands first, then explanation
         _cliara_console().print("Generated commands:", style="magenta")
         for i, cmd in enumerate(commands, 1):
             _cliara_console().print(f"  {i}. {cmd}", style="magenta")
+        _cliara_console().print(f"\n[Explanation] {explanation}\n", style="magenta")
         
         # --save-as: save as macro instead of executing
         if save_as_name:

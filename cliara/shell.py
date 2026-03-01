@@ -703,11 +703,19 @@ class CliaraShell:
                         "shell": self.shell_path or os.environ.get("SHELL", "bash"),
                     }
                     summary = self.nl_handler.summarize_command_for_history(command, context) or ""
+
+                # Generate embedding when the feature is enabled
+                embedding = None
+                if self.config.get("semantic_history_use_embeddings", False):
+                    emb_text = f"{command} {summary}".strip()
+                    embedding = self.nl_handler.get_embedding(emb_text)
+
                 store.add(
                     command=command,
                     summary=summary,
                     cwd=cwd,
                     exit_code=exit_code,
+                    embedding=embedding,
                 )
             except Exception:
                 # Still add with empty summary so store populates (e.g. LLM timeout)
@@ -1388,12 +1396,22 @@ class CliaraShell:
             print_dim("LLM not configured. Semantic search requires OPENAI_API_KEY.")
             print_dim("Use 'history [N]' for a plain list.")
             return
-        entries = store.get_recent(100)
+        use_embeddings = self.config.get("semantic_history_use_embeddings", False)
+        entries = store.get_all() if use_embeddings else store.get_recent(100)
         if not entries:
             print_dim("No matching commands found. Try a different phrase or run more commands.")
             return
         print_info(f"\n[Searching] {query.strip()}\n")
-        matches = self.nl_handler.search_history_by_intent(entries, query.strip())
+
+        matches: list = []
+        if use_embeddings:
+            matches = self.nl_handler.search_history_by_embeddings(entries, query.strip())
+            if not matches:
+                # No embeddings stored yet — fall back to summary-based search
+                entries_recent = store.get_recent(100)
+                matches = self.nl_handler.search_history_by_intent(entries_recent, query.strip())
+        else:
+            matches = self.nl_handler.search_history_by_intent(entries, query.strip())
         if not matches:
             print_dim("No matching commands found. Try a different phrase or run more commands.")
             return

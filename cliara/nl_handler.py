@@ -15,6 +15,7 @@ from cliara.safety import SafetyChecker, DangerLevel
 from cliara.agents import AGENT_REGISTRY
 
 LLM_MODEL = "gpt-4o-mini"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 class NLHandler:
@@ -541,6 +542,76 @@ Command: {cmd_for_prompt}"""
             return result
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # Embedding-based semantic search
+    # ------------------------------------------------------------------
+
+    def get_embedding(self, text: str) -> Optional[List[float]]:
+        """
+        Fetch an embedding vector for *text* via the OpenAI embeddings API.
+        Returns None if the client is not initialised or the call fails.
+        """
+        if not self.llm_enabled or self.provider != "openai" or not text.strip():
+            return None
+        try:
+            resp = self.llm_client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=text.strip(),
+            )
+            return resp.data[0].embedding
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+        """Cosine similarity between two equal-length vectors (pure-Python, no deps)."""
+        dot = sum(x * y for x, y in zip(a, b))
+        mag_a = sum(x * x for x in a) ** 0.5
+        mag_b = sum(x * x for x in b) ** 0.5
+        if mag_a == 0 or mag_b == 0:
+            return 0.0
+        return dot / (mag_a * mag_b)
+
+    def search_history_by_embeddings(
+        self,
+        entries: List[Dict[str, Any]],
+        query: str,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Vector-similarity search over semantic history entries.
+
+        Entries that already have an ``embedding`` field are ranked by cosine
+        similarity to the query embedding.  Entries without embeddings are
+        excluded from this path (they were added before the feature was
+        enabled).
+
+        Returns up to *top_k* entries in descending similarity order.
+        Returns an empty list if no embeddings are stored yet or the API call
+        fails (caller should fall back to summary-only search).
+        """
+        if not self.llm_enabled or not entries or not (query or "").strip():
+            return []
+
+        # Filter to only entries that have embeddings
+        with_emb = [e for e in entries if e.get("embedding")]
+        if not with_emb:
+            return []
+
+        query_emb = self.get_embedding(query)
+        if not query_emb:
+            return []
+
+        scored = [
+            (self._cosine_similarity(query_emb, e["embedding"]), e)
+            for e in with_emb
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Only return entries with a meaningful similarity score
+        threshold = 0.30
+        return [e for score, e in scored[:top_k] if score >= threshold]
 
     # ------------------------------------------------------------------
     # Commit-message generation (smart push)

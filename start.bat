@@ -1,9 +1,9 @@
 @echo off
-REM Natural Language Macros - Quick Start Script for Windows
+REM Cliara - Quick Start Script for Windows
 
 echo.
 echo ===============================================
-echo   Natural Language Macros - Quick Start
+echo   Cliara - Quick Start
 echo ===============================================
 echo.
 
@@ -16,20 +16,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/3] Checking dependencies...
-pip show thefuzz >nul 2>&1
+echo [1/2] Checking dependencies...
+pip show cliara >nul 2>&1
 if errorlevel 1 (
-    echo Installing dependencies...
-    pip install -q thefuzz python-Levenshtein
+    echo Installing Cliara...
+    pip install -q -e .
 )
 
-echo [2/3] Setting up demo macros...
-python setup_demo.py
-
 echo.
-echo [3/3] Starting Natural Language Macros CLI...
+echo [2/2] Starting Cliara...
 echo.
 echo Press Ctrl+C or type 'exit' to quit
 echo.
 
-python -m app.main
+python -m cliara.main

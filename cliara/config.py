@@ -50,7 +50,7 @@ class Config:
         # Semantic history search (? find / ? when did I ...)
         "semantic_history_enabled": True,
         "semantic_history_max_entries": 500,
-        "semantic_history_use_embeddings": False,
+        "semantic_history_use_embeddings": True,
         "semantic_history_summary_on_add": True,
         # Copilot Gate — AI-command interception layer
         "copilot_gate": True,

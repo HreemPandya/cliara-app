@@ -8,6 +8,7 @@ import sys
 import os
 import platform
 import queue
+import random
 import threading
 import time
 from contextlib import contextmanager
@@ -765,6 +766,37 @@ class CliaraShell:
         except Exception:
             pass
 
+    # Rotating "did you know?" tips shown on startup.
+    # Each entry may contain {nl} which is replaced by the configured nl_prefix.
+    _STARTUP_TIPS: List[str] = [
+        "Try '{nl} fix' right after a failed command — Cliara diagnoses the error and suggests a fix.",
+        "'{nl} why' runs a regression deep-dive: it compares the current failure to past successes.",
+        "'{nl} find <phrase>' searches your command history by intent, not just text.",
+        "Prefix any command with '{nl}' to translate plain English to shell — e.g. '{nl} kill port 3000'.",
+        "Use 'explain <cmd>' to get a plain-English breakdown of any shell command.",
+        "Run 'macro add <name>' to save any command (or a series) as a reusable macro.",
+        "Run 'macro add <name> --nl' to define a macro entirely in plain English.",
+        "Type just a macro name to run it — no prefix needed.",
+        "Risky commands (rm -rf, format …) always pause for approval, even when piped.",
+        "'push' automatically writes your commit message and selects the right branch.",
+        "'session start <name>' groups your work so you can review what you shipped later.",
+        "'session end' closes the session; 'session list' shows all past ones.",
+        "Run 'theme <name>' to switch colour themes — try dracula, nord, or catppuccin.",
+        "'history' shows recent commands; '{nl} when did I <phrase>' finds them by meaning.",
+        "Cliara watches long-running commands and notifies you when they finish.",
+        "Set OPENAI_API_KEY in a .env file and Cliara picks it up automatically.",
+        "Use '{nl} deploy' to get guided deployment steps for your current project.",
+        "The diff preview shows what a destructive command will affect before it runs.",
+        "'macro list' shows all your saved macros with descriptions and run counts.",
+        "Press Ctrl+C to cancel a running command; Cliara will offer to diagnose failures.",
+    ]
+
+    def _pick_tip(self) -> str:
+        """Return a random startup tip, substituting the configured nl_prefix."""
+        nl = self.config.get("nl_prefix", "?")
+        tip = random.choice(self._STARTUP_TIPS)
+        return tip.replace("{nl}", nl)
+
     def print_banner(self):
         """Print welcome banner as a Rich Panel."""
         from cliara import __version__
@@ -797,6 +829,10 @@ class CliaraShell:
             "  • version                 Show Cliara version",
             "  • theme [name]            List or set color theme (e.g. dracula, nord)",
             "  • exit                    Quit Cliara",
+        ])
+        lines.extend([
+            "",
+            f"[dim]💡 Did you know? {self._pick_tip()}[/dim]",
         ])
         content = "\n".join(lines)
         panel = Panel(content, title=f"Cliara {__version__} — AI-Powered Shell", border_style="cyan")

@@ -2733,6 +2733,50 @@ class CliaraShell:
     # ------------------------------------------------------------------
     # Smart Push — auto-commit-message + branch detection
     # ------------------------------------------------------------------
+    def _edit_commit_message(self, initial_message: str):
+        """
+        Open the user's editor with the given message pre-filled.
+        Returns the edited message (stripped), or None if empty/cancelled.
+        """
+        import shlex
+        import tempfile
+        editor = (
+            os.environ.get("GIT_EDITOR")
+            or os.environ.get("EDITOR")
+            or ("notepad" if platform.system() == "Windows" else "nano")
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            delete=False,
+            encoding="utf-8",
+            newline="\n",
+        ) as f:
+            f.write(initial_message)
+            path = f.name
+        try:
+            try:
+                argv = shlex.split(editor) + [path]
+            except ValueError:
+                argv = [editor, path]
+            subprocess.run(argv, cwd=os.getcwd())
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        # Strip git-style comment lines and blank lines at end
+        lines = []
+        for line in raw.splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            lines.append(line.rstrip("\n"))
+        result = "\n".join(lines).strip()
+        return result if result else None
+
     def handle_push(self):
         """
         Built-in smart push: detect branch, stage changes, generate a
@@ -2867,8 +2911,8 @@ class CliaraShell:
             return
 
         if response in ("e", "edit"):
-            custom = input("Enter commit message: ").strip()
-            if not custom:
+            custom = self._edit_commit_message(commit_msg)
+            if custom is None:
                 print_warning("[Cancelled]")
                 self._unstage_all()
                 return

@@ -1902,98 +1902,129 @@ class CliaraShell:
     def _apply_theme(self, name: str):
         """Set theme in config, refresh prompt session, and print an instant colored preview."""
         from cliara.highlighting import get_theme_preview_markup
+        from rich.panel import Panel
         self.config.set("theme", name)
         session = self._create_prompt_session()
         if session is not None:
             self._prompt_session = session
-        # Immediate visual confirmation — show what the new theme looks like RIGHT NOW
         console = _cliara_console()
-        console.print(f"\n  Theme → [bold]{name}[/bold]")
         try:
             markup = get_theme_preview_markup(name)
-            console.print(markup)
+            console.print(Panel(
+                markup,
+                title=f"[bold]Theme applied: {name}[/bold]",
+                border_style="green",
+                padding=(0, 1),
+            ))
         except Exception:
-            pass
+            console.print(f"[green]✓ Theme set to '{name}'.[/green]")
         console.print()
     
     def _run_theme_picker(self, themes: list, current: str):
         """
         Run an interactive theme picker with up/down arrows and Enter.
         Returns the selected theme name or None if cancelled.
+        Uses Rich for the header panel and prompt_toolkit for the live list.
         """
         try:
             from prompt_toolkit import Application
             from prompt_toolkit.key_binding import KeyBindings
             from prompt_toolkit.layout import Layout, HSplit, Window
             from prompt_toolkit.layout.controls import FormattedTextControl
-            from prompt_toolkit.styles import Style
+            from rich.panel import Panel
+            from cliara.highlighting import THEMES as _THEMES
         except ImportError:
-            # Fallback: print list and ask for input
+            # Fallback: plain text list
             print_info("[Cliara] Color themes — type a name to set")
-            print_dim(f"  Current: {current}\n")
             for name in themes:
-                mark = " *" if name == current else ""
+                mark = " (active)" if name == current else ""
                 print_dim(f"  {name}{mark}")
             try:
-                name = input("\nTheme name (or Enter to cancel): ").strip().lower()
-                return name if name in themes else None
+                choice = input("\nTheme name (Enter to cancel): ").strip().lower()
+                return choice if choice in themes else None
             except (EOFError, KeyboardInterrupt):
                 return None
-        # Mutable state for selected index (used by key bindings and text callable)
-        selected_index = [max(0, themes.index(current))] if current in themes else [0]
+
+        # ── Rich header panel ─────────────────────────────────────────
+        console = _cliara_console()
+        console.print()
+        console.print(Panel(
+            "[bold]↑ / ↓[/bold]  navigate   [bold]Enter[/bold]  select   [bold]Escape[/bold]  cancel",
+            title="[bold cyan]✦ Theme Selector[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 2),
+        ))
+        console.print()
+
+        # ── State ─────────────────────────────────────────────────────
+        selected_index = [themes.index(current) if current in themes else 0]
         n = len(themes)
 
-        def get_formatted_lines():
-            result = []
-            for i, name in enumerate(themes):
-                is_current = name == current
-                is_selected = i == selected_index[0]
-                if is_selected and is_current:
-                    result.append(("class:selected-current", f"  {name} (current)\n"))
-                elif is_selected:
-                    result.append(("class:selected", f"  {name}\n"))
-                elif is_current:
-                    result.append(("class:current", f"  {name} (current)\n"))
-                else:
-                    result.append(("class:default", f"  {name}\n"))
-            return result
+        def _fg(theme_name: str) -> str:
+            """Return the plain ANSI fg color for a theme (strips 'bold')."""
+            ps = _THEMES.get(theme_name, _THEMES["monokai"])["prompt_style"]
+            return ps["prompt-name"].replace("bold", "").strip()
 
-        control = FormattedTextControl(text=get_formatted_lines)
+        # ── Live list renderer ─────────────────────────────────────────
+        def get_rows():
+            rows = []
+            for i, name in enumerate(themes):
+                is_sel = i == selected_index[0]
+                is_cur = name == current
+                fg = _fg(name)
+                bg = "bg:ansibrightblack " if is_sel else ""
+
+                rows.append((f"{bg}fg:ansiwhite bold" if is_sel else "", " ❯ " if is_sel else "   "))
+                rows.append((f"{bg}fg:{fg} bold", "████"))
+                rows.append((f"{bg}bold" if is_sel else f"fg:{fg}", f"  {name:<13}"))
+                if is_cur:
+                    rows.append((f"{bg}fg:ansiyellow bold", " ✓ active"))
+                rows.append(("", "\n"))
+            return rows
+
+        list_control = FormattedTextControl(text=get_rows)
+
+        footer_text = [
+            ("fg:ansibrightblack", "  "),
+            ("fg:ansicyan bold", "↑"),
+            ("fg:ansibrightblack", "/"),
+            ("fg:ansicyan bold", "↓"),
+            ("fg:ansibrightblack", " move   "),
+            ("fg:ansicyan bold", "Enter"),
+            ("fg:ansibrightblack", " select   "),
+            ("fg:ansicyan bold", "Esc"),
+            ("fg:ansibrightblack", " cancel\n"),
+        ]
+
+        # ── Key bindings ──────────────────────────────────────────────
         kb = KeyBindings()
 
         @kb.add("up")
         def _up(event):
-            selected_index[0] = max(0, selected_index[0] - 1)
+            selected_index[0] = (selected_index[0] - 1) % n
 
         @kb.add("down")
         def _down(event):
-            selected_index[0] = min(n - 1, selected_index[0] + 1)
+            selected_index[0] = (selected_index[0] + 1) % n
 
         @kb.add("enter")
         def _enter(event):
             event.app.exit(result=themes[selected_index[0]])
 
         @kb.add("c-c")
-        @kb.add("c-g")
+        @kb.add("escape")
         def _cancel(event):
             event.app.exit(result=None)
 
-        style = Style.from_dict({
-            "selected": "bg:#268bd2 #ffffff",       # colorized: blue bg, white text
-            "selected-current": "bg:#268bd2 #ffffff bold",  # colorized + bold
-            "current": "bold",                      # bold only (current theme)
-            "default": "",
-        })
+        # ── Layout ────────────────────────────────────────────────────
         layout = Layout(HSplit([
-            Window(FormattedTextControl("Pick a theme (↑/↓ move, Enter select, Ctrl+C cancel)\n"), height=1),
-            Window(content=control),
+            Window(content=list_control, height=n),
+            Window(height=1),
+            Window(FormattedTextControl(footer_text), height=1),
+            Window(height=1),
         ]))
-        app = Application(
-            layout=layout,
-            key_bindings=kb,
-            style=style,
-            full_screen=False,
-        )
+
+        app = Application(layout=layout, key_bindings=kb, full_screen=False)
         return app.run()
     
     def _handle_cd(self, user_input: str):

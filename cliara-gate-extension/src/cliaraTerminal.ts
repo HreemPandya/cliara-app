@@ -1,17 +1,23 @@
 /**
  * Pseudoterminal implementation for the Cliara Gate terminal profile.
  * Buffers keystrokes, gates commands through the risk engine,
- * shows VS Code approval UI, then spawns the real command and
- * pipes output back to the terminal.
+ * renders warnings inline in the terminal with y/n approval,
+ * then spawns the real command and pipes output back.
  */
 
 import * as vscode from "vscode";
 import { spawn, ChildProcess } from "child_process";
 import * as path from "path";
+import * as fs from "fs";
 import { RiskEngine, RiskAssessment } from "./riskEngine";
 import { DangerLevel, INTERACTIVE_PROGRAMS } from "./patterns";
 
 const IS_WINDOWS = process.platform === "win32";
+
+const enum InputMode {
+  COMMAND,
+  CONFIRM,
+}
 
 export class CliaraTerminal implements vscode.Pseudoterminal {
   private writeEmitter = new vscode.EventEmitter<string>();
@@ -26,6 +32,10 @@ export class CliaraTerminal implements vscode.Pseudoterminal {
   private activeProcess: ChildProcess | null = null;
   private isRunning = false;
   private dimensions: { columns: number; rows: number } = { columns: 80, rows: 24 };
+
+  private inputMode: InputMode = InputMode.COMMAND;
+  private pendingCommand = "";
+  private confirmBuffer = "";
 
   constructor(startCwd?: string) {
     this.cwd = startCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
@@ -54,28 +64,32 @@ export class CliaraTerminal implements vscode.Pseudoterminal {
   // ── input handling ────────────────────────────────────────────────
 
   handleInput(data: string): void {
-    // If a child process is running, forward raw input to it
     if (this.isRunning && this.activeProcess?.stdin?.writable) {
       this.activeProcess.stdin.write(data);
       return;
     }
 
+    if (this.inputMode === InputMode.CONFIRM) {
+      this.handleConfirmInput(data);
+      return;
+    }
+
     for (const ch of data) {
       switch (ch) {
-        case "\r": // Enter
+        case "\r":
           this.writeEmitter.fire("\r\n");
           this.handleCommand(this.buffer.trim());
           this.buffer = "";
           break;
 
-        case "\x7f": // Backspace
+        case "\x7f":
           if (this.buffer.length > 0) {
             this.buffer = this.buffer.slice(0, -1);
             this.writeEmitter.fire("\b \b");
           }
           break;
 
-        case "\x03": // Ctrl+C
+        case "\x03":
           if (this.isRunning) {
             this.killActive();
           } else {
@@ -93,101 +107,144 @@ export class CliaraTerminal implements vscode.Pseudoterminal {
     }
   }
 
+  // ── y/n confirmation input ────────────────────────────────────────
+
+  private handleConfirmInput(data: string): void {
+    for (const ch of data) {
+      if (ch === "\x03") {
+        this.writeEmitter.fire("^C\r\n");
+        this.writeLine("\x1b[90mCancelled.\x1b[0m");
+        this.inputMode = InputMode.COMMAND;
+        this.pendingCommand = "";
+        this.confirmBuffer = "";
+        this.showPrompt();
+        return;
+      }
+
+      if (ch === "\r") {
+        this.writeEmitter.fire("\r\n");
+        const answer = this.confirmBuffer.trim().toLowerCase();
+        const cmd = this.pendingCommand;
+        this.inputMode = InputMode.COMMAND;
+        this.pendingCommand = "";
+        this.confirmBuffer = "";
+
+        if (answer === "y" || answer === "yes") {
+          this.spawnCommand(cmd);
+        } else {
+          this.writeLine("\x1b[90mCancelled.\x1b[0m");
+          this.showPrompt();
+        }
+        return;
+      }
+
+      if (ch === "\x7f") {
+        if (this.confirmBuffer.length > 0) {
+          this.confirmBuffer = this.confirmBuffer.slice(0, -1);
+          this.writeEmitter.fire("\b \b");
+        }
+        continue;
+      }
+
+      this.confirmBuffer += ch;
+      this.writeEmitter.fire(ch);
+    }
+  }
+
   // ── command processing ────────────────────────────────────────────
 
-  private async handleCommand(command: string): Promise<void> {
+  private handleCommand(command: string): void {
     if (!command) {
       this.showPrompt();
       return;
     }
 
-    // Handle `cd` specially so the working directory persists
     if (/^cd\s+/.test(command) || command === "cd") {
       this.handleCd(command);
       return;
     }
 
-    // Handle `clear` / `cls`
     if (/^(clear|cls)$/i.test(command)) {
       this.writeEmitter.fire("\x1b[2J\x1b[H");
       this.showPrompt();
       return;
     }
 
-    // Detect interactive programs — pass through without gating
     const baseBin = command.split(/\s+/)[0];
     if (this.isInteractive(baseBin, command)) {
       this.spawnCommand(command);
       return;
     }
 
-    // Risk assessment
-    const assessment = this.riskEngine.assess(command);
-    const approved = await this.gateCommand(command, assessment);
-
-    if (approved) {
-      this.spawnCommand(command);
-    } else {
-      this.writeLine("\x1b[90mCancelled.\x1b[0m");
-      this.showPrompt();
-    }
+    const ra = this.riskEngine.assess(command);
+    this.gateCommand(command, ra);
   }
 
-  // ── gating UI ─────────────────────────────────────────────────────
+  // ── inline terminal gating ────────────────────────────────────────
 
-  private async gateCommand(command: string, ra: RiskAssessment): Promise<boolean> {
-    const detailParts: string[] = [];
-    if (ra.blastRadius !== "local") {
-      detailParts.push(`Scope: ${ra.blastRadius}`);
-    }
-    detailParts.push(...ra.riskFactors);
-    detailParts.push(...ra.contextWarnings);
-
-    const detail = detailParts.length > 0 ? ` [${detailParts.join(" | ")}]` : "";
-    const message = `${ra.explanation}${detail}`;
-
+  private gateCommand(command: string, ra: RiskAssessment): void {
     switch (ra.dangerLevel) {
       case DangerLevel.SAFE:
-        this.showStatusBarExplanation(ra.explanation);
-        return true;
+        this.renderSafe(ra);
+        this.spawnCommand(command);
+        break;
 
-      case DangerLevel.CAUTION: {
-        const pick = await vscode.window.showInformationMessage(
-          `⚡ ${message}`,
-          { detail: `Command: ${command}` },
-          "Run",
-          "Cancel",
-        );
-        return pick === "Run";
-      }
+      case DangerLevel.CAUTION:
+        this.renderCaution(ra);
+        this.promptConfirm(command);
+        break;
 
-      case DangerLevel.DANGEROUS: {
-        const pick = await vscode.window.showWarningMessage(
-          `⚠️ ${message}`,
-          { detail: `Command: ${command}` },
-          "Run",
-          "Cancel",
-        );
-        return pick === "Run";
-      }
+      case DangerLevel.DANGEROUS:
+        this.renderDangerous(ra);
+        this.promptConfirm(command);
+        break;
 
-      case DangerLevel.CRITICAL: {
-        const pick = await vscode.window.showWarningMessage(
-          `🛑 ${message}`,
-          { modal: true, detail: `Command: ${command}\n\nThis action is potentially destructive and irreversible.` },
-          "Run",
-        );
-        return pick === "Run";
-      }
+      case DangerLevel.CRITICAL:
+        this.renderCritical(ra);
+        this.promptConfirm(command);
+        break;
     }
   }
 
-  private showStatusBarExplanation(explanation: string): void {
-    const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    item.text = `$(shield) ${explanation}`;
-    item.color = new vscode.ThemeColor("statusBar.foreground");
-    item.show();
-    setTimeout(() => item.dispose(), 3000);
+  // ── rendering tiers ───────────────────────────────────────────────
+
+  private renderSafe(ra: RiskAssessment): void {
+    this.writeLine(`  \x1b[90m↳ ${ra.explanation}\x1b[0m`);
+  }
+
+  private renderCaution(ra: RiskAssessment): void {
+    this.writeLine(`  \x1b[33m⚡ CAUTION:\x1b[0m ${ra.explanation}`);
+    this.renderDetails(ra, "33");
+  }
+
+  private renderDangerous(ra: RiskAssessment): void {
+    this.writeLine(`  \x1b[31m⚠  DANGEROUS:\x1b[0m ${ra.explanation}`);
+    this.renderDetails(ra, "31");
+  }
+
+  private renderCritical(ra: RiskAssessment): void {
+    this.writeLine(`  \x1b[1;31m🛑 CRITICAL:\x1b[0m ${ra.explanation}`);
+    this.renderDetails(ra, "1;31");
+    this.writeLine(`  \x1b[1;31mThis action is potentially destructive and irreversible.\x1b[0m`);
+  }
+
+  private renderDetails(ra: RiskAssessment, colorCode: string): void {
+    if (ra.blastRadius !== "local") {
+      this.writeLine(`  \x1b[${colorCode}m│\x1b[0m Scope: ${ra.blastRadius}`);
+    }
+    for (const factor of ra.riskFactors) {
+      this.writeLine(`  \x1b[${colorCode}m│\x1b[0m ${factor}`);
+    }
+    for (const warning of ra.contextWarnings) {
+      this.writeLine(`  \x1b[${colorCode}m│\x1b[0m ${warning}`);
+    }
+  }
+
+  private promptConfirm(command: string): void {
+    this.inputMode = InputMode.CONFIRM;
+    this.pendingCommand = command;
+    this.confirmBuffer = "";
+    this.writeEmitter.fire("  Proceed? (\x1b[1my\x1b[0m/\x1b[1mn\x1b[0m): ");
   }
 
   // ── spawning ──────────────────────────────────────────────────────
@@ -236,8 +293,6 @@ export class CliaraTerminal implements vscode.Pseudoterminal {
     const target = command.replace(/^cd\s*/, "").trim() || (IS_WINDOWS ? process.env.USERPROFILE! : process.env.HOME!);
     try {
       const resolved = path.resolve(this.cwd, target);
-      // Verify it exists by trying to read it
-      const fs = require("fs");
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
         this.writeLine(`\x1b[31mcd: no such directory: ${target}\x1b[0m`);
         this.showPrompt();
@@ -256,7 +311,6 @@ export class CliaraTerminal implements vscode.Pseudoterminal {
   private isInteractive(bin: string, command: string): boolean {
     const base = path.basename(bin).replace(/\.exe$/i, "");
     if (INTERACTIVE_PROGRAMS.has(base)) {
-      // python/node with a file argument are scripts, not interactive
       if ((base === "python" || base === "python3" || base === "node") && command.split(/\s+/).length > 1) {
         return false;
       }
@@ -276,7 +330,6 @@ export class CliaraTerminal implements vscode.Pseudoterminal {
     this.writeEmitter.fire(text + "\r\n");
   }
 
-  /** Write raw process output, normalising bare \n to \r\n for the terminal. */
   private writeRaw(text: string): void {
     const normalised = text.replace(/\r?\n/g, "\r\n");
     this.writeEmitter.fire(normalised);

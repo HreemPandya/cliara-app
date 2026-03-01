@@ -19,7 +19,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  cliara                    Start Cliara shell
+  cliara                    Start interactive Cliara shell
+  cliara -c "git status"    Run a single command through Cliara's gate
+  cliara -c "rm -rf dist"   Risky commands still require approval
   cliara --config-dir ~/my-config  Use custom config directory
   cliara --version          Show version
   
@@ -35,6 +37,13 @@ Once in the shell:
         '--version',
         action='version',
         version=f'Cliara {__version__}'
+    )
+    
+    parser.add_argument(
+        '-c',
+        type=str,
+        metavar='COMMAND',
+        help='Run a single command through Cliara\'s risk gate, then exit'
     )
     
     parser.add_argument(
@@ -70,7 +79,13 @@ Once in the shell:
         if args.shell:
             config.set('shell', args.shell)
         
-        # Start shell
+        # Single-command mode: gate → execute → exit
+        if args.c:
+            shell = CliaraShell(config)
+            exit_code = shell.run_single_command(args.c)
+            sys.exit(exit_code)
+        
+        # Interactive mode
         shell = CliaraShell(config)
         shell.run()
     

@@ -970,12 +970,12 @@ class CliaraShell:
                 if session is not None:
                     # Coloured, syntax-highlighted prompt
                     message = [
-                        ("class:prompt-name", "cliara"),
-                        ("class:prompt-sep", ":"),
+                        ("class:prompt-name", "[cliara]"),
+                        ("class:prompt-sep", " "),
                     ]
                     if self.current_session:
                         message.append(("class:prompt-path", f"[{self.current_session.name}]"))
-                        message.append(("class:prompt-sep", ":"))
+                        message.append(("class:prompt-sep", " "))
                     message.extend([
                         ("class:prompt-path", cwd),
                         ("", " "),
@@ -985,9 +985,9 @@ class CliaraShell:
                 else:
                     # Plain fallback
                     if self.current_session:
-                        prompt = f"cliara [{self.current_session.name}]:{cwd} {prompt_arrow} "
+                        prompt = f"[cliara] [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
-                        prompt = f"cliara:{cwd} {prompt_arrow} "
+                        prompt = f"[cliara] {cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:
@@ -1007,6 +1007,28 @@ class CliaraShell:
                     import traceback
                     traceback.print_exc()
     
+    def run_single_command(self, command: str) -> int:
+        """
+        Run a single command through the risk gate then exit.
+        Used by ``cliara -c "command"``.
+
+        When stdin is not a TTY (e.g. agent/CI), risky commands are denied
+        without prompting so the run does not block.
+
+        Returns the process exit code (0 = success).
+        """
+        import sys
+        from cliara.safety import DangerLevel as _DL
+
+        assessment = self._risk_engine.assess(command)
+        non_interactive = not sys.stdin.isatty()
+
+        if not self._inline_gate(command, assessment, non_interactive=non_interactive):
+            return 130  # cancelled, same as Ctrl+C convention
+
+        success = self.execute_shell_command(command, capture=False)
+        return 0 if success else self.last_exit_code or 1
+
     def handle_input(self, user_input: str):
         """
         Route user input to appropriate handler.
@@ -1916,11 +1938,14 @@ class CliaraShell:
     # ------------------------------------------------------------------
     # Inline risk gate — warn and confirm risky commands in the terminal
     # ------------------------------------------------------------------
-    def _inline_gate(self, command: str, assessment) -> bool:
+    def _inline_gate(self, command: str, assessment, *, non_interactive: bool = False) -> bool:
         """
         Render an inline risk warning and ask for y/n confirmation.
         Returns *True* to proceed, *False* to cancel.
         SAFE commands always proceed with a dim explanation line.
+
+        When *non_interactive* is True (e.g. stdin not a TTY), risky commands
+        are denied without prompting so the process does not block.
         """
         from cliara.copilot_gate import RiskAssessment
 
@@ -1928,7 +1953,7 @@ class CliaraShell:
         level = ra.danger_level
 
         if level == DangerLevel.SAFE:
-            print_dim(f"  ↳ {ra.explanation}")
+            print_dim(f"  -> {ra.explanation}")
             return True
 
         # Build detail lines
@@ -1939,18 +1964,22 @@ class CliaraShell:
         details.extend(ra.context_warnings)
 
         if level == DangerLevel.CAUTION:
-            print_warning(f"  ⚡ CAUTION: {ra.explanation}")
+            print_warning(f"  [!] CAUTION: {ra.explanation}")
             for d in details:
-                print_warning(f"  │ {d}")
+                print_warning(f"  | {d}")
         elif level == DangerLevel.DANGEROUS:
-            print_error(f"  ⚠  DANGEROUS: {ra.explanation}")
+            print_error(f"  [!!] DANGEROUS: {ra.explanation}")
             for d in details:
-                print_error(f"  │ {d}")
+                print_error(f"  | {d}")
         elif level == DangerLevel.CRITICAL:
-            print_error(f"  🛑 CRITICAL: {ra.explanation}")
+            print_error(f"  [!!!] CRITICAL: {ra.explanation}")
             for d in details:
-                print_error(f"  │ {d}")
+                print_error(f"  | {d}")
             print_error("  This action is potentially destructive and irreversible.")
+
+        if non_interactive:
+            print_warning("  [Skipped] Non-interactive (no TTY); risky commands are not run.")
+            return False
 
         try:
             response = input("  Proceed? (y/n): ").strip().lower()

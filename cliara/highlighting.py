@@ -107,8 +107,8 @@ class CliaraStyle(PygmentsStyle):
 # ---------------------------------------------------------------------------
 
 PROMPT_STYLE = {
-    "prompt-name":  "#00d7d7 bold",     # cyan bold   — "cliara"
-    "prompt-sep":   "#888888",          # grey        — ":"
+    "prompt-name":  "#00d7d7 bold",     # cyan bold   — "[cliara]"
+    "prompt-sep":   "#888888",          # grey        — " " / ":"
     "prompt-path":  "#ffffff",          # white       — directory name
     "prompt-arrow": "#6a6a6a",          # dim grey    — ">"
 }

@@ -583,9 +583,9 @@ class CliaraShell:
 
         # Copilot Gate — AI-command interception
         self._source_detector = SourceDetector()
-        _risk_engine = RiskEngine(self.safety, self.diff_preview)
+        self._risk_engine = RiskEngine(self.safety, self.diff_preview)
         self._copilot_gate = CopilotGate(
-            _risk_engine,
+            self._risk_engine,
             auto_approve_safe=self.config.get("copilot_gate_auto_approve_safe", True),
         )
 
@@ -1130,6 +1130,12 @@ class CliaraShell:
         # Diff preview: show exactly what destructive commands will affect
         if self.config.get("diff_preview", True) and self.diff_preview.should_preview(user_input):
             if not self._confirm_with_preview(user_input):
+                return
+
+        # Risk gate: assess every command and require confirmation for risky ones
+        if self.config.get("copilot_gate", True):
+            assessment = self._risk_engine.assess(user_input)
+            if not self._inline_gate(user_input, assessment):
                 return
 
         # Default: pass through to underlying shell
@@ -1897,6 +1903,57 @@ class CliaraShell:
 
         try:
             response = input("\n  Proceed? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+        if response in ("y", "yes"):
+            return True
+
+        print_warning("  [Cancelled]")
+        return False
+
+    # ------------------------------------------------------------------
+    # Inline risk gate — warn and confirm risky commands in the terminal
+    # ------------------------------------------------------------------
+    def _inline_gate(self, command: str, assessment) -> bool:
+        """
+        Render an inline risk warning and ask for y/n confirmation.
+        Returns *True* to proceed, *False* to cancel.
+        SAFE commands always proceed with a dim explanation line.
+        """
+        from cliara.copilot_gate import RiskAssessment
+
+        ra: RiskAssessment = assessment
+        level = ra.danger_level
+
+        if level == DangerLevel.SAFE:
+            print_dim(f"  ↳ {ra.explanation}")
+            return True
+
+        # Build detail lines
+        details: List[str] = []
+        if ra.blast_radius != "local":
+            details.append(f"Scope: {ra.blast_radius}")
+        details.extend(ra.risk_factors)
+        details.extend(ra.context_warnings)
+
+        if level == DangerLevel.CAUTION:
+            print_warning(f"  ⚡ CAUTION: {ra.explanation}")
+            for d in details:
+                print_warning(f"  │ {d}")
+        elif level == DangerLevel.DANGEROUS:
+            print_error(f"  ⚠  DANGEROUS: {ra.explanation}")
+            for d in details:
+                print_error(f"  │ {d}")
+        elif level == DangerLevel.CRITICAL:
+            print_error(f"  🛑 CRITICAL: {ra.explanation}")
+            for d in details:
+                print_error(f"  │ {d}")
+            print_error("  This action is potentially destructive and irreversible.")
+
+        try:
+            response = input("  Proceed? (y/n): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return False

@@ -787,6 +787,7 @@ class CliaraShell:
             "  • <macro-name>            Run a saved macro",
             "  • help                    Show all commands",
             "  • version                 Show Cliara version",
+            "  • theme [name]            List or set color theme (e.g. dracula, nord)",
             "  • exit                    Quit Cliara",
         ])
         content = "\n".join(lines)
@@ -889,7 +890,7 @@ class CliaraShell:
             from prompt_toolkit.lexers import PygmentsLexer
             from prompt_toolkit.styles import merge_styles, Style as PTStyle
             from prompt_toolkit.styles.pygments import style_from_pygments_cls
-            from cliara.highlighting import ShellLexer, CliaraStyle, PROMPT_STYLE
+            from cliara.highlighting import ShellLexer, get_style_for_theme
 
             # ── Custom key bindings ──
             kb = KeyBindings()
@@ -932,9 +933,11 @@ class CliaraShell:
             for cmd in self.history.history:
                 pt_history.store_string(cmd)
 
+            theme_name = self.config.get("theme", "monokai")
+            style_cls, prompt_style = get_style_for_theme(theme_name)
             style = merge_styles([
-                style_from_pygments_cls(CliaraStyle),
-                PTStyle.from_dict(PROMPT_STYLE),
+                style_from_pygments_cls(style_cls),
+                PTStyle.from_dict(prompt_style),
             ])
 
             return PromptSession(
@@ -954,9 +957,8 @@ class CliaraShell:
         self.print_banner()
 
         # Try to set up the highlighted prompt; fall back to plain input
-        session = self._create_prompt_session()
-        self._prompt_session = session  # store for _auto_suggest_fix
-        if session is None:
+        self._prompt_session = self._create_prompt_session()
+        if self._prompt_session is None:
             # prompt_toolkit unavailable — use readline instead
             self.history.setup_readline()
 
@@ -967,8 +969,8 @@ class CliaraShell:
             try:
                 cwd = str(Path.cwd())
 
-                if session is not None:
-                    # Coloured, syntax-highlighted prompt
+                if self._prompt_session is not None:
+                    # Coloured, syntax-highlighted prompt (uses current theme from config)
                     message = [
                         ("class:prompt-name", "[cliara]"),
                         ("class:prompt-sep", " "),
@@ -981,7 +983,7 @@ class CliaraShell:
                         ("", " "),
                         ("class:prompt-arrow", f"{prompt_arrow} "),
                     ])
-                    user_input = session.prompt(message).strip()
+                    user_input = self._prompt_session.prompt(message).strip()
                 else:
                     # Plain fallback
                     if self.current_session:
@@ -1117,6 +1119,11 @@ class CliaraShell:
         # Check for macro commands
         if user_input.startswith('macro '):
             self.handle_macro_command(user_input[6:].strip())
+            return
+
+        # Theme: list or set color scheme
+        if user_input.strip() == 'theme' or user_input.startswith('theme '):
+            self._handle_theme_command(user_input[5:].strip())
             return
         
         # Check if it's a macro name
@@ -1873,6 +1880,121 @@ class CliaraShell:
         
         # Save to history for "save last"
         self.history.set_last_execution(macro.commands)
+    
+    def _handle_theme_command(self, arg: str):
+        """Show scrollable theme picker (up/down to select, Enter to apply) or set theme by name."""
+        from cliara.highlighting import list_themes, get_style_for_theme
+        themes = list_themes()
+        current = self.config.get("theme", "monokai")
+        # If they passed a name, set directly
+        if arg:
+            name = arg.strip().lower()
+            if name not in themes:
+                print_error(f"[Error] Unknown theme: {arg}. Available: {', '.join(themes)}")
+                return
+            self._apply_theme(name)
+            return
+        # No arg: show scrollable picker
+        selected = self._run_theme_picker(themes, current)
+        if selected is not None:
+            self._apply_theme(selected)
+    
+    def _apply_theme(self, name: str):
+        """Set theme in config, refresh prompt session, and print an instant colored preview."""
+        from cliara.highlighting import get_theme_preview_markup
+        self.config.set("theme", name)
+        session = self._create_prompt_session()
+        if session is not None:
+            self._prompt_session = session
+        # Immediate visual confirmation — show what the new theme looks like RIGHT NOW
+        console = _cliara_console()
+        console.print(f"\n  Theme → [bold]{name}[/bold]")
+        try:
+            markup = get_theme_preview_markup(name)
+            console.print(markup)
+        except Exception:
+            pass
+        console.print()
+    
+    def _run_theme_picker(self, themes: list, current: str):
+        """
+        Run an interactive theme picker with up/down arrows and Enter.
+        Returns the selected theme name or None if cancelled.
+        """
+        try:
+            from prompt_toolkit import Application
+            from prompt_toolkit.key_binding import KeyBindings
+            from prompt_toolkit.layout import Layout, HSplit, Window
+            from prompt_toolkit.layout.controls import FormattedTextControl
+            from prompt_toolkit.styles import Style
+        except ImportError:
+            # Fallback: print list and ask for input
+            print_info("[Cliara] Color themes — type a name to set")
+            print_dim(f"  Current: {current}\n")
+            for name in themes:
+                mark = " *" if name == current else ""
+                print_dim(f"  {name}{mark}")
+            try:
+                name = input("\nTheme name (or Enter to cancel): ").strip().lower()
+                return name if name in themes else None
+            except (EOFError, KeyboardInterrupt):
+                return None
+        # Mutable state for selected index (used by key bindings and text callable)
+        selected_index = [max(0, themes.index(current))] if current in themes else [0]
+        n = len(themes)
+
+        def get_formatted_lines():
+            result = []
+            for i, name in enumerate(themes):
+                is_current = name == current
+                is_selected = i == selected_index[0]
+                if is_selected and is_current:
+                    result.append(("class:selected-current", f"  {name} (current)\n"))
+                elif is_selected:
+                    result.append(("class:selected", f"  {name}\n"))
+                elif is_current:
+                    result.append(("class:current", f"  {name} (current)\n"))
+                else:
+                    result.append(("class:default", f"  {name}\n"))
+            return result
+
+        control = FormattedTextControl(text=get_formatted_lines)
+        kb = KeyBindings()
+
+        @kb.add("up")
+        def _up(event):
+            selected_index[0] = max(0, selected_index[0] - 1)
+
+        @kb.add("down")
+        def _down(event):
+            selected_index[0] = min(n - 1, selected_index[0] + 1)
+
+        @kb.add("enter")
+        def _enter(event):
+            event.app.exit(result=themes[selected_index[0]])
+
+        @kb.add("c-c")
+        @kb.add("c-g")
+        def _cancel(event):
+            event.app.exit(result=None)
+
+        style = Style.from_dict({
+            "selected": "bg:#268bd2 #ffffff",       # colorized: blue bg, white text
+            "selected-current": "bg:#268bd2 #ffffff bold",  # colorized + bold
+            "current": "bold",                      # bold only (current theme)
+            "default": "",
+        })
+        layout = Layout(HSplit([
+            Window(FormattedTextControl("Pick a theme (↑/↓ move, Enter select, Ctrl+C cancel)\n"), height=1),
+            Window(content=control),
+        ]))
+        app = Application(
+            layout=layout,
+            key_bindings=kb,
+            style=style,
+            full_screen=False,
+        )
+        return app.run()
     
     def _handle_cd(self, user_input: str):
         """
@@ -3802,6 +3924,12 @@ class CliaraShell:
         print("  deploy reset               Re-detect deploy target")
         print("  Detects Vercel, Netlify, Fly.io, Docker, npm, PyPI, and more.")
         print("  Remembers your config — second deploy is just 'deploy' + 'y'.\n")
+
+        print_info("  Theme")
+        print_dim("  ─────────────────────────────────────")
+        print("  theme                      List color themes and show current")
+        print("  theme <name>               Set theme (monokai, dracula, nord, solarized, catppuccin, light)")
+        print("  Stored in ~/.cliara/config.json — applies immediately.\n")
 
         print_info("  Diff Preview")
         print_dim("  ─────────────────────────────────────")

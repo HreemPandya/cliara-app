@@ -206,12 +206,15 @@ Configuration is stored in `~/.cliara/config.json`:
   "shell": "/bin/bash",
   "os": "Linux",
   "nl_prefix": "?",
+  "theme": "monokai",
   "macro_storage": "~/.cliara/macros.json",
   "history_size": 1000,
   "safety_checks": true,
   "first_run_complete": true
 }
 ```
+
+`theme` can be: `monokai`, `dracula`, `nord`, `solarized`, or `catppuccin`. Use the `theme` command in the shell to list or change it.
 
 ---
 

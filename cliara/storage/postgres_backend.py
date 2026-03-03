@@ -33,7 +33,7 @@ class PostgresStorage(StorageBackend):
         
         Args:
             connection_string: PostgreSQL connection string
-                Format: postgresql://user:password@host:port/database
+                Format: postgresql://user:<secret>@host:port/database
             **kwargs: Alternative connection parameters
                 - host, port, database, user, password
         """
@@ -52,9 +52,10 @@ class PostgresStorage(StorageBackend):
             port = kwargs.get('port') or os.getenv('POSTGRES_PORT', '5432')
             database = kwargs.get('database') or os.getenv('POSTGRES_DB', 'cliara')
             user = kwargs.get('user') or os.getenv('POSTGRES_USER', 'cliara')
-            password = kwargs.get('password') or os.getenv('POSTGRES_PASSWORD', '')
+            db_password = kwargs.get('password') or os.getenv('POSTGRES_PASSWORD', '')
             
-            self.connection_string = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+            # Build DSN-style connection string without hardcoding secrets
+            self.connection_string = f"postgresql://{user}:{db_password}@{host}:{port}/{database}"
         
         # Test connection and initialize schema
         self._init_schema()
@@ -77,6 +78,7 @@ class PostgresStorage(StorageBackend):
                         commands JSONB NOT NULL,
                         description TEXT,
                         tags TEXT[],
+                        params JSONB DEFAULT '[]',
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         run_count INTEGER DEFAULT 0,
@@ -84,6 +86,10 @@ class PostgresStorage(StorageBackend):
                         is_public BOOLEAN DEFAULT FALSE,
                         UNIQUE(user_id, name)
                     )
+                """)
+                # Non-destructive migration: add params column to existing tables
+                cur.execute("""
+                    ALTER TABLE macros ADD COLUMN IF NOT EXISTS params JSONB DEFAULT '[]'
                 """)
                 
                 # Create indexes for performance
@@ -116,14 +122,14 @@ class PostgresStorage(StorageBackend):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 if user_id:
                     cur.execute("""
-                        SELECT name, commands, description, tags, 
+                        SELECT name, commands, description, tags, params,
                                created_at, run_count, last_run
                         FROM macros
                         WHERE name = %s AND user_id = %s
                     """, (name, user_id))
                 else:
                     cur.execute("""
-                        SELECT name, commands, description, tags, 
+                        SELECT name, commands, description, tags, params,
                                created_at, run_count, last_run
                         FROM macros
                         WHERE name = %s AND user_id IS NULL
@@ -141,16 +147,18 @@ class PostgresStorage(StorageBackend):
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
+                params = getattr(macro, 'params', []) or []
                 cur.execute("""
-                    INSERT INTO macros 
-                    (user_id, name, commands, description, tags, 
+                    INSERT INTO macros
+                    (user_id, name, commands, description, tags, params,
                      created_at, updated_at, run_count, last_run)
-                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s)
-                    ON CONFLICT (user_id, name) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s)
+                    ON CONFLICT (user_id, name)
                     DO UPDATE SET
                         commands = EXCLUDED.commands,
                         description = EXCLUDED.description,
                         tags = EXCLUDED.tags,
+                        params = EXCLUDED.params,
                         updated_at = CURRENT_TIMESTAMP,
                         run_count = EXCLUDED.run_count,
                         last_run = EXCLUDED.last_run
@@ -160,6 +168,7 @@ class PostgresStorage(StorageBackend):
                     json.dumps(macro.commands),
                     macro.description,
                     macro.tags,
+                    json.dumps(params),
                     macro.created,
                     macro.run_count,
                     macro.last_run
@@ -197,7 +206,7 @@ class PostgresStorage(StorageBackend):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 if user_id:
                     cur.execute("""
-                        SELECT name, commands, description, tags, 
+                        SELECT name, commands, description, tags, params,
                                created_at, run_count, last_run
                         FROM macros
                         WHERE user_id = %s
@@ -205,7 +214,7 @@ class PostgresStorage(StorageBackend):
                     """, (user_id,))
                 else:
                     cur.execute("""
-                        SELECT name, commands, description, tags, 
+                        SELECT name, commands, description, tags, params,
                                created_at, run_count, last_run
                         FROM macros
                         WHERE user_id IS NULL
@@ -227,7 +236,7 @@ class PostgresStorage(StorageBackend):
                 
                 if user_id:
                     cur.execute("""
-                        SELECT name, commands, description, tags, 
+                        SELECT name, commands, description, tags, params,
                                created_at, run_count, last_run
                         FROM macros
                         WHERE user_id = %s
@@ -235,22 +244,22 @@ class PostgresStorage(StorageBackend):
                             name ILIKE %s OR
                             description ILIKE %s OR
                             EXISTS (
-                                SELECT 1 FROM unnest(tags) AS tag 
+                                SELECT 1 FROM unnest(tags) AS tag
                                 WHERE tag ILIKE %s
                             )
                         )
-                        ORDER BY 
-                            CASE 
+                        ORDER BY
+                            CASE
                                 WHEN name ILIKE %s THEN 1
                                 WHEN description ILIKE %s THEN 2
                                 ELSE 3
                             END,
                             name
-                    """, (user_id, search_query, search_query, search_query, 
+                    """, (user_id, search_query, search_query, search_query,
                           search_query, search_query))
                 else:
                     cur.execute("""
-                        SELECT name, commands, description, tags, 
+                        SELECT name, commands, description, tags, params,
                                created_at, run_count, last_run
                         FROM macros
                         WHERE user_id IS NULL
@@ -258,18 +267,18 @@ class PostgresStorage(StorageBackend):
                             name ILIKE %s OR
                             description ILIKE %s OR
                             EXISTS (
-                                SELECT 1 FROM unnest(tags) AS tag 
+                                SELECT 1 FROM unnest(tags) AS tag
                                 WHERE tag ILIKE %s
                             )
                         )
-                        ORDER BY 
-                            CASE 
+                        ORDER BY
+                            CASE
                                 WHEN name ILIKE %s THEN 1
                                 WHEN description ILIKE %s THEN 2
                                 ELSE 3
                             END,
                             name
-                    """, (search_query, search_query, search_query, 
+                    """, (search_query, search_query, search_query,
                           search_query, search_query))
                 
                 rows = cur.fetchall()
@@ -324,12 +333,18 @@ class PostgresStorage(StorageBackend):
             commands = json.loads(commands)
         elif not isinstance(commands, list):
             commands = list(commands) if commands else []
-        
+
+        raw_params = row.get('params') or []
+        if isinstance(raw_params, str):
+            raw_params = json.loads(raw_params)
+        params = list(raw_params) if raw_params else []
+
         macro = Macro(
             name=row['name'],
             commands=commands,
             description=row['description'] or "",
             tags=list(row['tags']) if row['tags'] else [],
+            params=params,
             created=row['created_at'].isoformat() if row['created_at'] else None
         )
         macro.run_count = row['run_count'] or 0
@@ -342,7 +357,7 @@ class PostgresStorage(StorageBackend):
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT name, commands, description, tags, 
+                    SELECT name, commands, description, tags, params,
                            created_at, run_count, last_run
                     FROM macros
                     WHERE is_public = TRUE

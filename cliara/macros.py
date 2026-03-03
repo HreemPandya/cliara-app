@@ -16,13 +16,15 @@ from cliara.storage.factory import get_storage_backend
 class Macro:
     """Represents a single macro."""
     
-    def __init__(self, name: str, commands: List[str], description: str = "", 
-                 created: Optional[str] = None, tags: Optional[List[str]] = None):
+    def __init__(self, name: str, commands: List[str], description: str = "",
+                 created: Optional[str] = None, tags: Optional[List[str]] = None,
+                 params: Optional[List[str]] = None):
         self.name = name
         self.commands = commands if isinstance(commands, list) else [commands]
         self.description = description
         self.created = created or datetime.now().isoformat()
         self.tags = tags or []
+        self.params = params or []   # declared parameter names, e.g. ["env", "tag"]
         self.run_count = 0
         self.last_run = None
     
@@ -33,6 +35,7 @@ class Macro:
             "description": self.description,
             "created": self.created,
             "tags": self.tags,
+            "params": self.params,
             "run_count": self.run_count,
             "last_run": self.last_run,
         }
@@ -45,7 +48,8 @@ class Macro:
             commands=data.get("commands", []),
             description=data.get("description", ""),
             created=data.get("created"),
-            tags=data.get("tags", [])
+            tags=data.get("tags", []),
+            params=data.get("params", [])
         )
         macro.run_count = data.get("run_count", 0)
         macro.last_run = data.get("last_run")
@@ -99,8 +103,9 @@ class MacroManager:
         except:
             return None
     
-    def add(self, name: str, commands: List[str], description: str = "", 
-            tags: Optional[List[str]] = None) -> Macro:
+    def add(self, name: str, commands: List[str], description: str = "",
+            tags: Optional[List[str]] = None,
+            params: Optional[List[str]] = None) -> Macro:
         """
         Add or update a macro.
         
@@ -109,11 +114,12 @@ class MacroManager:
             commands: List of commands
             description: Human-readable description
             tags: Optional tags for organization
+            params: Declared parameter names (e.g. ["env", "tag"])
         
         Returns:
             Created/updated Macro object
         """
-        macro = Macro(name, commands, description, tags=tags)
+        macro = Macro(name, commands, description, tags=tags, params=params)
         self.storage.add(macro, user_id=self.user_id)
         return macro
     
@@ -216,3 +222,12 @@ class MacroManager:
         macro = Macro.from_dict(name, data)
         self.storage.add(macro, user_id=self.user_id)
         return macro
+
+    def update_params(self, name: str, params: List[str]) -> bool:
+        """Update the params list for an existing macro. Returns True if updated."""
+        macro = self.get(name)
+        if not macro:
+            return False
+        macro.params = params
+        self.storage.add(macro, user_id=self.user_id)
+        return True

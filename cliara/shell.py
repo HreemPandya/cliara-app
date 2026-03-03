@@ -9,10 +9,11 @@ import os
 import platform
 import queue
 import random
+import re
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Optional, List, Tuple, Union
+from typing import Any, Dict, Optional, List, Tuple, Union
 from pathlib import Path
 
 from cliara.config import Config
@@ -1182,9 +1183,15 @@ class CliaraShell:
             self._handle_setup_ollama()
             return
         
-        # Check if it's a macro name
+        # Check if it's a macro name (exact match)
         if self.macros.exists(user_input):
             self.run_macro(user_input)
+            return
+
+        # Check for "macroname key=value ..." parameterised invocation
+        _first_token = user_input.split()[0] if user_input.split() else ""
+        if _first_token and _first_token != user_input and self.macros.exists(_first_token):
+            self.run_macro(user_input)   # run_macro splits name from args
             return
 
         # Bare "fix" (without ?) — shortcut when there's a recent failure
@@ -1495,10 +1502,71 @@ class CliaraShell:
             except (EOFError, KeyboardInterrupt):
                 print()
 
+    # ------------------------------------------------------------------
+    # Parameterized-macro helpers
+    # ------------------------------------------------------------------
+
+    _PARAM_PATTERN = re.compile(r'\{(\w+)\}')
+
+    @staticmethod
+    def _extract_param_names(commands: List[str]) -> List[str]:
+        """Return unique {param} names found across all commands, in order."""
+        seen: set = set()
+        result: List[str] = []
+        for cmd in commands:
+            for m in re.finditer(r'\{(\w+)\}', cmd):
+                p = m.group(1)
+                if p not in seen:
+                    seen.add(p)
+                    result.append(p)
+        return result
+
+    @staticmethod
+    def _parse_inline_args(args_str: str) -> Dict[str, str]:
+        """Parse 'key=value key2=value2 ...' into a dict.  Values may be quoted."""
+        values: Dict[str, str] = {}
+        for token in args_str.split():
+            if '=' in token:
+                k, _, v = token.partition('=')
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k:
+                    values[k] = v
+        return values
+
+    @staticmethod
+    def _substitute_params(cmd: str, values: Dict[str, str]) -> str:
+        """Replace {param} placeholders in *cmd* with values from *values*."""
+        for param, value in values.items():
+            cmd = cmd.replace(f'{{{param}}}', value)
+        return cmd
+
+    def _collect_param_values(self, params: List[str],
+                               prefilled: Dict[str, str]) -> Optional[Dict[str, str]]:
+        """
+        Prompt the user for any params not already in *prefilled*.
+        Returns the completed dict, or None if the user cancels.
+        """
+        values = dict(prefilled)
+        for p in params:
+            if p not in values:
+                try:
+                    val = input(f"  {p}: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return None
+                if not val:
+                    print_warning(f"[Cancelled] No value provided for '{p}'")
+                    return None
+                values[p] = val
+        return values
+
+    # ------------------------------------------------------------------
+
     def handle_macro_command(self, args: str):
         """
         Handle macro subcommands.
-        
+
         Args:
             args: Command arguments after 'macro '
         """
@@ -1530,6 +1598,7 @@ class CliaraShell:
         elif cmd == 'show':
             self.macro_show(args_rest)
         elif cmd == 'run':
+            # args_rest may be "name key=val ..." — run_macro handles the split
             self.run_macro(args_rest)
         elif cmd == 'edit':
             self.macro_edit(args_rest)
@@ -1545,30 +1614,59 @@ class CliaraShell:
             print_error(f"Unknown macro command: {cmd}")
             print_dim("Type 'macro help' for available commands")
     
-    def macro_add(self, name: str):
-        """Create a new macro interactively."""
+    def macro_add(self, raw: str):
+        """Create a new macro interactively.
+
+        Accepts an optional ``--params name1,name2`` flag so the macro can
+        declare typed placeholders.  Example::
+
+            macro add deploy-to --params env,tag
+        """
+        # ── Parse --params flag ─────────────────────────────────────────
+        params: List[str] = []
+        name = raw
+        if '--params' in raw:
+            before, _, after = raw.partition('--params')
+            name = before.strip()
+            params_token = after.strip().split()[0] if after.strip() else ""
+            params = [p.strip() for p in params_token.split(',') if p.strip()]
+
         if not name:
             name = input("Macro name: ").strip()
             if not name:
                 print_error("[Error] Macro name required")
                 return
-        
+
         print_info(f"\nCreating macro '{name}'")
+        if params:
+            print_dim(f"Parameters declared: {', '.join(params)}")
+            print_dim("Use {param} in commands to reference them, e.g.  kubectl apply -n {env}")
+        else:
+            print_dim("Tip: use {param} placeholders to make commands reusable, e.g.  echo {msg}")
         print_dim("Enter commands (one per line, empty line to finish):")
-        
+
         commands = []
         while True:
             cmd = input("  > ").strip()
             if not cmd:
                 break
             commands.append(cmd)
-        
+
         if not commands:
             print_error("[Error] At least one command required")
             return
-        
+
+        # Auto-detect any {var} in commands and merge with declared params
+        detected = self._extract_param_names(commands)
+        for p in detected:
+            if p not in params:
+                params.append(p)
+
+        if params:
+            print_dim(f"\nParams: {', '.join(params)}")
+
         description = input("Description (optional): ").strip()
-        
+
         # Safety check
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
@@ -1577,12 +1675,13 @@ class CliaraShell:
             if confirm not in ['yes', 'y']:
                 print_warning("[Cancelled]")
                 return
-        
+
         if not self._check_macro_name_conflict(name):
             print_warning("[Cancelled]")
             return
-        self.macros.add(name, commands, description)
-        print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s)")
+        self.macros.add(name, commands, description, params=params or None)
+        param_hint = f" [{', '.join(params)}]" if params else ""
+        print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s){param_hint}")
     
     def macro_add_nl(self, name: Optional[str] = None):
         """Create a macro using natural language description."""
@@ -1676,7 +1775,13 @@ class CliaraShell:
         for name, macro in sorted(macros.items()):
             desc = macro.description or "No description"
             cmd_count = len(macro.commands)
-            print(f"  • {name}")
+            # Combine declared + auto-detected params for the hint
+            eff_params = list(macro.params) if macro.params else []
+            for p in self._extract_param_names(macro.commands):
+                if p not in eff_params:
+                    eff_params.append(p)
+            param_hint = f"  [{', '.join(eff_params)}]" if eff_params else ""
+            print(f"  • {name}{param_hint}")
             print(f"    {desc} ({cmd_count} command{'s' if cmd_count != 1 else ''})")
             if macro.run_count > 0:
                 print(f"    Run {macro.run_count} time{'s' if macro.run_count != 1 else ''}")
@@ -1728,14 +1833,25 @@ class CliaraShell:
         if not name:
             print_error("[Error] Macro name required")
             return
-        
+
         macro = self.macros.get(name)
         if not macro:
             print_error(f"[Error] Macro '{name}' not found")
             return
-        
+
         print_info(f"\n[Macro] {name}")
         print(f"Description: {macro.description or 'None'}")
+
+        # Show declared / auto-detected params
+        effective_params = list(macro.params) if macro.params else []
+        detected = self._extract_param_names(macro.commands)
+        for p in detected:
+            if p not in effective_params:
+                effective_params.append(p)
+        if effective_params:
+            print(f"Parameters: {', '.join(effective_params)}")
+            print_dim(f"  Usage: {name} " + " ".join(f"{p}=<value>" for p in effective_params))
+
         print(f"Commands ({len(macro.commands)}):")
         for i, cmd in enumerate(macro.commands, 1):
             print(f"  {i}. {cmd}")
@@ -1785,6 +1901,22 @@ class CliaraShell:
         new_desc = input(f"New description (Enter to keep '{macro.description or ''}'): ").strip()
         description = new_desc if new_desc else macro.description
 
+        # Update params
+        existing_params = macro.params or []
+        detected_params = self._extract_param_names(commands)
+        all_params = list(existing_params)
+        for p in detected_params:
+            if p not in all_params:
+                all_params.append(p)
+        current_params_str = ','.join(all_params)
+        new_params_input = input(
+            f"Parameters (comma-separated, Enter to keep '{current_params_str}'): "
+        ).strip()
+        if new_params_input:
+            params = [p.strip() for p in new_params_input.split(',') if p.strip()]
+        else:
+            params = all_params
+
         # Safety check on the (possibly new) commands
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
@@ -1794,8 +1926,9 @@ class CliaraShell:
                 print_warning("[Cancelled]")
                 return
 
-        self.macros.add(name, commands, description)
-        print_success(f"\n[OK] Macro '{name}' updated with {len(commands)} command(s)")
+        self.macros.add(name, commands, description, params=params or None)
+        param_hint = f" [{', '.join(params)}]" if params else ""
+        print_success(f"\n[OK] Macro '{name}' updated with {len(commands)} command(s){param_hint}")
 
     def macro_delete(self, name: str):
         """Delete a macro."""
@@ -1877,37 +2010,100 @@ class CliaraShell:
     def macro_help(self):
         """Show macro help."""
         print_info("\n[Macro Commands]\n")
-        print("  macro add <name>          Create a new macro")
-        print("  macro add <name> --nl      Create macro from natural language")
-        print("  macro edit <name>         Edit an existing macro")
-        print("  macro list                List all macros")
-        print("  macro stats               Show macro statistics")
-        print("  macro search <keyword>    Search macros by name, description, or tags")
-        print("  macro show <name>         Show macro details")
-        print("  macro run <name>          Run a macro")
-        print("  macro delete <name>       Delete a macro")
-        print("  macro rename <old> <new>  Rename a macro")
-        print("  macro save last as <name> Save last commands as macro")
+        print("  macro add <name>                    Create a new macro")
+        print("  macro add <name> --params p1,p2     Create a parameterised macro")
+        print("  macro add <name> --nl               Create macro from natural language")
+        print("  macro edit <name>                   Edit an existing macro")
+        print("  macro list                          List all macros")
+        print("  macro stats                         Show macro statistics")
+        print("  macro search <keyword>              Search macros by name, description, or tags")
+        print("  macro show <name>                   Show macro details")
+        print("  macro run <name>                    Run a macro (prompts for params if needed)")
+        print("  macro run <name> p1=v1 p2=v2        Run a macro with inline param values")
+        print("  macro delete <name>                 Delete a macro")
+        print("  macro rename <old> <new>            Rename a macro")
+        print("  macro save last as <name>           Save last commands as macro")
+        print_dim("\nParameterised macros:")
+        print_dim("  Use {param} placeholders in commands, e.g.  kubectl apply -n {env}")
+        print_dim("  Declare them with --params: macro add deploy --params env,tag")
+        print_dim("  Run with inline values:     deploy env=prod tag=v1.2")
+        print_dim("  Or just type the name and Cliara will prompt for each value.")
         print("\nYou can also run macros by just typing their name:")
-        print("  cliara > my-macro\n")
+        print("  cliara > my-macro")
+        print("  cliara > my-macro param=value\n")
     
-    def run_macro(self, name: str):
-        """Execute a macro."""
+    def run_macro(self, name_and_args: str):
+        """Execute a macro, optionally with inline parameter values.
+
+        Accepts either:
+          • a plain macro name:                  ``deploy-to``
+          • a name followed by key=value pairs:  ``deploy-to env=prod tag=v1.2``
+
+        If the macro declares parameters that are not supplied inline, the user
+        is prompted for each missing value interactively.
+        """
+        # ── Split name from optional inline key=value args ──────────────
+        parts = name_and_args.split(maxsplit=1)
+        name = parts[0]
+        inline_str = parts[1] if len(parts) > 1 else ""
+
         macro = self.macros.get(name)
         if not macro:
             print_error(f"[Error] Macro '{name}' not found")
             return
-        
-        # Show preview
+
+        # ── Resolve parameter values ─────────────────────────────────────
+        # Effective param list: declared params ∪ {var} patterns in commands
+        effective_params = list(macro.params) if macro.params else []
+        detected = self._extract_param_names(macro.commands)
+        for p in detected:
+            if p not in effective_params:
+                effective_params.append(p)
+
+        inline_values = self._parse_inline_args(inline_str) if inline_str else {}
+        param_values: Dict[str, str] = {}
+
+        if effective_params:
+            missing = [p for p in effective_params if p not in inline_values]
+            if missing:
+                print_info(f"\n[Macro] {name}")
+                if macro.description:
+                    print_dim(macro.description)
+                print_dim(f"\nProvide values for: {', '.join(effective_params)}")
+                if inline_values:
+                    for k, v in inline_values.items():
+                        print_dim(f"  {k} = {v}  (from command line)")
+                collected = self._collect_param_values(effective_params, inline_values)
+                if collected is None:
+                    return
+                param_values = collected
+            else:
+                param_values = dict(inline_values)
+        else:
+            # No params — any inline tokens are ignored (pass-through)
+            param_values = {}
+
+        # ── Build the final commands with substituted values ─────────────
+        resolved_commands = [
+            self._substitute_params(cmd, param_values)
+            for cmd in macro.commands
+        ]
+
+        # ── Show preview ─────────────────────────────────────────────────
         print_info(f"\n[Macro] {name}")
         if macro.description:
             print(f"{macro.description}\n")
+        if param_values:
+            print_dim("Parameters:")
+            for k, v in param_values.items():
+                print_dim(f"  {k} = {v}")
+            print()
         print("Commands:")
-        for i, cmd in enumerate(macro.commands, 1):
+        for i, cmd in enumerate(resolved_commands, 1):
             print(f"  {i}. {cmd}")
-        
-        # Safety check
-        level, dangerous = self.safety.check_commands(macro.commands)
+
+        # ── Safety check (on resolved commands) ──────────────────────────
+        level, dangerous = self.safety.check_commands(resolved_commands)
         if level != DangerLevel.SAFE:
             print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
             prompt = self.safety.get_confirmation_prompt(level)
@@ -1920,18 +2116,18 @@ class CliaraShell:
             if confirm not in ['y', 'yes']:
                 print_warning("[Cancelled]")
                 return
-        
-        # Execute
+
+        # ── Execute ───────────────────────────────────────────────────────
         print_header("\n" + "="*60)
         print_header(f"EXECUTING: {name}")
         print_header("="*60 + "\n")
-        
-        for i, cmd in enumerate(macro.commands, 1):
-            print_info(f"[{i}/{len(macro.commands)}] {cmd}")
+
+        for i, cmd in enumerate(resolved_commands, 1):
+            print_info(f"[{i}/{len(resolved_commands)}] {cmd}")
             print("-" * 60)
             success = self.execute_shell_command(cmd, capture=False)
             print()
-            
+
             if not success:
                 print_error(f"[X] Command {i} failed")
                 self._auto_suggest_fix()
@@ -1941,10 +2137,9 @@ class CliaraShell:
             print_success(f"[OK] Macro '{name}' completed successfully")
             print_header("="*60 + "\n")
             macro.mark_run()
-            # Save updated macro back to storage
             self.macros.storage.add(macro, user_id=self.macros.user_id)
-        
-        # Save to history for "save last"
+
+        # Save to history for "save last" (store template commands, not resolved)
         self.history.set_last_execution(macro.commands)
     
     def _handle_config_command(self, args: str):

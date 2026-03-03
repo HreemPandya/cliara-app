@@ -7,6 +7,6 @@ AGENTS = {
     },
     "deploy": {
         "temperature": 0.2,
-        "max_tokens": 300,
+        "max_tokens": 500,
     },
 }

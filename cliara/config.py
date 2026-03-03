@@ -42,8 +42,20 @@ class Config:
         "clear_show_header": True,  # After clear/cls, show a minimal "Cliara ready" line
         "prompt_style": "cliara",
         "theme": "monokai",  # monokai | dracula | nord | solarized | catppuccin
-        "llm_provider": None,  # "openai" or "anthropic" (Phase 2)
-        "llm_api_key": None,  # Encrypted in real impl (Phase 2)
+        "llm_provider": None,  # "openai" | "anthropic" | "ollama"
+        "llm_api_key": None,  # Never persisted to disk — comes from env
+        "llm_model": None,    # Global model override; None = provider default
+        # Per-task model overrides — None means fall back to llm_model then provider default
+        # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "llama3.2" for ollama
+        "model_nl": None,       # ? natural-language → commands
+        "model_fix": None,      # Error translation & fix suggestions
+        "model_explain": None,  # explain <command>
+        "model_commit": None,   # smart push commit message
+        "model_deploy": None,   # deploy step generation
+        "model_history": None,  # history summarisation & search
+        "model_copilot": None,  # CopilotGate explain
+        # Ollama (local LLM) settings
+        "ollama_base_url": "http://localhost:11434",  # Ollama server URL
         "first_run_complete": False,
         "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why
         "stream_llm": True,  # Stream LLM responses token-by-token when enabled
@@ -221,29 +233,74 @@ class Config:
     
     def _load_env_vars(self):
         """Load environment variables into config."""
-        # Load OpenAI API key from .env if present
+        # Ollama takes precedence when OLLAMA_BASE_URL or OLLAMA_HOST is set —
+        # no API key required (uses a dummy value so the client initialises).
+        ollama_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+        if ollama_url:
+            self.settings["llm_provider"] = "ollama"
+            self.settings["ollama_base_url"] = ollama_url.rstrip("/")
+            self.settings["llm_api_key"] = "ollama"  # pragma: allowlist secret
+            return
+
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if anthropic_key:
+            self.settings["llm_provider"] = "anthropic"
+            self.settings["llm_api_key"] = anthropic_key
+            return
+
         openai_key = os.getenv("OPENAI_API_KEY")
         if openai_key:
             self.settings["llm_provider"] = "openai"
             self.settings["llm_api_key"] = openai_key
-            # Don't save API key to config file for security
-            # It will be loaded from .env each time
     
     def get_llm_api_key(self) -> Optional[str]:
         """Get LLM API key from environment or config."""
-        # First check environment (most secure)
+        if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
+            return "ollama"
         api_key = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
         if api_key:
             return api_key
-        # Fallback to config (less secure, but allows manual setup)
         return self.settings.get("llm_api_key")
-    
+
     def get_llm_provider(self) -> Optional[str]:
         """Get LLM provider name."""
-        # Auto-detect from env vars
+        if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
+            return "ollama"
         if os.getenv("OPENAI_API_KEY"):
             return "openai"
         if os.getenv("ANTHROPIC_API_KEY"):
             return "anthropic"
-        # Fallback to config
         return self.settings.get("llm_provider")
+
+    def get_ollama_base_url(self) -> str:
+        """Get the Ollama server base URL."""
+        env_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+        if env_url:
+            return env_url.rstrip("/")
+        return self.settings.get("ollama_base_url", "http://localhost:11434")
+
+    def get_llm_model(self, agent_type: Optional[str] = None) -> Optional[str]:
+        """Resolve the model to use for *agent_type*.
+
+        Resolution order:
+          1. Per-task config key  (e.g. ``model_explain``)
+          2. Global ``llm_model`` override
+          3. None → caller applies the provider default
+        """
+        _AGENT_CONFIG_KEYS: Dict[str, str] = {
+            "nl_to_commands": "model_nl",
+            "fix":            "model_fix",
+            "explain":        "model_explain",
+            "history_summary":"model_history",
+            "history_search": "model_history",
+            "commit_message": "model_commit",
+            "deploy":         "model_deploy",
+            "copilot_explain":"model_copilot",
+        }
+        if agent_type:
+            key = _AGENT_CONFIG_KEYS.get(agent_type)
+            if key:
+                model = self.settings.get(key)
+                if model:
+                    return model
+        return self.settings.get("llm_model") or None

@@ -14,56 +14,120 @@ from typing import List, Tuple, Optional, Dict, Any, Callable
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.agents import AGENT_REGISTRY
 
-LLM_MODEL = "gpt-4o-mini"
 EMBEDDING_MODEL = "text-embedding-3-small"
+
+# Default model used when no per-task or global override is configured.
+_PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
+    "openai":    "gpt-4o-mini",
+    "anthropic": "claude-3-haiku-20240307",
+    "ollama":    "llama3.2",
+}
+
+# Agents whose output is plain text and can be streamed token-by-token to the
+# console.  JSON-returning agents must NOT stream to the console because raw
+# JSON appearing mid-parse gives broken UX.
+_STREAMING_SAFE_AGENTS = frozenset({
+    "explain",
+    "commit_message",
+    "copilot_explain",
+})
 
 
 class NLHandler:
     """Handles natural language to command conversion using LLM."""
-    
-    def __init__(self, safety_checker: SafetyChecker):
+
+    def __init__(self, safety_checker: SafetyChecker, config=None):
         """
         Initialize NL handler.
-        
+
         Args:
             safety_checker: Safety checker instance
+            config: Optional Config instance for model/provider settings
         """
         self.safety = safety_checker
+        self.config = config
         self.llm_enabled = False
         self.llm_client = None
         self.provider = None
-    
-    def initialize_llm(self, provider: str, api_key: str):
+
+    # ------------------------------------------------------------------
+    # Provider initialisation
+    # ------------------------------------------------------------------
+
+    def initialize_llm(self, provider: str, api_key: str, base_url: Optional[str] = None) -> bool:
         """
         Initialize LLM client.
-        
+
         Args:
-            provider: "openai" or "anthropic"
-            api_key: API key for the provider
+            provider:  "openai" | "anthropic" | "ollama"
+            api_key:   API key (use any non-empty string for ollama)
+            base_url:  Base URL override (required for ollama, optional for openai-compatible)
         """
         if not api_key:
             return False
-        
+
         try:
-            if provider == "openai":
+            if provider in ("openai", "ollama"):
                 from openai import OpenAI
-                self.llm_client = OpenAI(api_key=api_key)
-                self.provider = "openai"
+                kwargs: Dict[str, Any] = {"api_key": api_key}
+                if provider == "ollama":
+                    url = base_url or "http://localhost:11434"
+                    kwargs["base_url"] = url.rstrip("/") + "/v1"
+                    # Probe Ollama before marking as ready — fail fast with a
+                    # clear message rather than hanging on the first query.
+                    import urllib.request
+                    import urllib.error
+                    try:
+                        urllib.request.urlopen(url.rstrip("/"), timeout=3)
+                    except urllib.error.URLError:
+                        print(
+                            f"[Warning] Ollama is not reachable at {url}. "
+                            "Start Ollama and restart cliara to enable local LLM."
+                        )
+                        return False
+                elif base_url:
+                    kwargs["base_url"] = base_url
+                self.llm_client = OpenAI(**kwargs)
+                self.provider = provider
                 self.llm_enabled = True
                 return True
+
             elif provider == "anthropic":
-                # Future: Add Anthropic support
-                print("[Warning] Anthropic support coming soon")
-                return False
+                from anthropic import Anthropic
+                self.llm_client = Anthropic(api_key=api_key)
+                self.provider = "anthropic"
+                self.llm_enabled = True
+                return True
+
             else:
                 print(f"[Error] Unknown LLM provider: {provider}")
                 return False
+
         except ImportError:
-            print("[Error] OpenAI package not installed. Run: pip install openai")
+            pkg = "anthropic" if provider == "anthropic" else "openai"
+            print(f"[Error] {pkg} package not installed. Run: pip install {pkg}")
             return False
         except Exception as e:
             print(f"[Error] Failed to initialize LLM: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Model resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_model(self, agent_type: str) -> str:
+        """Return the model name to use for *agent_type*.
+
+        Resolution order:
+          1. Per-task config key   (e.g. config model_explain)
+          2. Global config llm_model
+          3. Provider default      (see _PROVIDER_DEFAULT_MODELS)
+        """
+        if self.config is not None:
+            model = self.config.get_llm_model(agent_type)
+            if model:
+                return model
+        return _PROVIDER_DEFAULT_MODELS.get(self.provider or "", "gpt-4o-mini")
     
     def process_query(
         self,
@@ -254,98 +318,204 @@ class NLHandler:
         user_message: str,
         stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
-        """
-        Call LLM API; optionally stream chunks to stream_callback. Returns full assistant content.
-        When stream_callback is None, uses non-streaming create() (current behavior).
+        """Call the LLM; optionally stream tokens to *stream_callback*.
+
+        *stream_callback* should only be supplied for agents in
+        ``_STREAMING_SAFE_AGENTS`` (plain-text output).  JSON-returning agents
+        must not stream to the console.
+
+        Returns the full assistant reply as a single string.
         """
         if agent_type not in AGENT_REGISTRY:
             raise ValueError(f"Unknown agent type: {agent_type}")
         cfg = AGENT_REGISTRY[agent_type]
-        system = cfg["system"]
-        temperature = cfg["temperature"]
-        max_tokens = cfg["max_tokens"]
+        system: str = cfg["system"]
+        temperature: float = cfg["temperature"]
+        max_tokens: int = cfg["max_tokens"]
+        model: str = self._resolve_model(agent_type)
 
-        if self.provider == "openai":
-            try:
-                if stream_callback is not None:
-                    stream = self.llm_client.chat.completions.create(
-                        model=LLM_MODEL,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user_message},
-                        ],
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        stream=True,
-                    )
-                    full_content: List[str] = []
-                    for chunk in stream:
-                        delta = chunk.choices[0].delta.content if chunk.choices else None
-                        if delta:
-                            stream_callback(delta)
-                            full_content.append(delta)
-                    return "".join(full_content).strip()
-                else:
-                    response = self.llm_client.chat.completions.create(
-                        model=LLM_MODEL,
-                        messages=[
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": user_message},
-                        ],
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                    return response.choices[0].message.content.strip()
-            except Exception as e:
-                raise Exception(f"OpenAI API error: {e}")
+        # Enforce safety: never stream JSON agents to the console
+        safe_cb = stream_callback if agent_type in _STREAMING_SAFE_AGENTS else None
+
+        if self.provider in ("openai", "ollama"):
+            return self._call_openai_compat(
+                system, user_message, model, temperature, max_tokens, safe_cb
+            )
+        elif self.provider == "anthropic":
+            return self._call_anthropic(
+                system, user_message, model, temperature, max_tokens, safe_cb
+            )
         else:
-            if stream_callback is not None:
-                # Non-OpenAI provider: fall back to non-streaming
-                return self._call_llm_stream(agent_type, user_message, stream_callback=None)
             raise Exception(f"Unsupported provider: {self.provider}")
 
+    def _call_openai_compat(
+        self,
+        system: str,
+        user_message: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        stream_callback: Optional[Callable[[str], None]],
+    ) -> str:
+        """OpenAI / Ollama (OpenAI-compatible) completion — with optional streaming."""
+        try:
+            if stream_callback is not None:
+                stream = self.llm_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
+                full_content: List[str] = []
+                for chunk in stream:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        stream_callback(delta)
+                        full_content.append(delta)
+                return "".join(full_content).strip()
+            else:
+                response = self.llm_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content.strip()
+        except Exception as e:
+            raise Exception(f"{self.provider} API error: {e}")
+
+    def _call_anthropic(
+        self,
+        system: str,
+        user_message: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        stream_callback: Optional[Callable[[str], None]],
+    ) -> str:
+        """Anthropic completion — with optional streaming."""
+        try:
+            if stream_callback is not None:
+                with self.llm_client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system,
+                    messages=[{"role": "user", "content": user_message}],
+                ) as stream:
+                    full_content: List[str] = []
+                    for text in stream.text_stream:
+                        stream_callback(text)
+                        full_content.append(text)
+                    return "".join(full_content).strip()
+            else:
+                response = self.llm_client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system,
+                    messages=[{"role": "user", "content": user_message}],
+                )
+                return response.content[0].text.strip()
+        except Exception as e:
+            raise Exception(f"Anthropic API error: {e}")
+
     def _call_llm(self, agent_type: str, user_message: str) -> str:
-        """Call LLM API with the given agent's system prompt and params. Returns assistant content."""
+        """Non-streaming LLM call. Convenience wrapper around _call_llm_stream."""
         return self._call_llm_stream(agent_type, user_message, stream_callback=None)
 
-    def _parse_response(self, response: str) -> Tuple[List[str], str]:
-        """Parse LLM response and extract commands."""
-        # Try to extract JSON from response
-        # Sometimes LLM wraps JSON in markdown code blocks
-        
-        # Remove markdown code blocks if present
-        response = re.sub(r'```json\s*', '', response)
-        response = re.sub(r'```\s*', '', response)
-        response = response.strip()
-        
+    @staticmethod
+    def _extract_json(text: str) -> Optional[str]:
+        """Find the first complete JSON object in *text*.
+
+        Local models often prefix/suffix JSON with prose ("Sure! Here is...",
+        "```json", etc.).  This extracts the raw JSON regardless of surrounding
+        text by scanning for the first '{' and matching its closing '}'.
+        """
+        # Strip markdown fences first
+        text = re.sub(r"```json\s*", "", text)
+        text = re.sub(r"```\s*", "", text)
+        text = text.strip()
+
+        # Fast path: the whole string is valid JSON
         try:
-            data = json.loads(response)
-            commands = data.get("commands", [])
-            explanation = data.get("explanation", "Generated commands")
-            
-            # Ensure commands is a list
-            if isinstance(commands, str):
-                commands = [commands]
-            
-            return commands, explanation
+            json.loads(text)
+            return text
         except json.JSONDecodeError:
-            # Try to extract commands from plain text
-            # Look for command-like patterns
-            lines = response.split('\n')
-            commands = []
-            for line in lines:
-                line = line.strip()
-                # Skip empty lines and comments
-                if not line or line.startswith('#'):
-                    continue
-                # If it looks like a command, add it
-                if any(keyword in line.lower() for keyword in ['echo', 'ls', 'cd', 'git', 'npm', 'docker', 'python', 'node']):
-                    commands.append(line)
-            
-            if commands:
-                return commands, "Generated from natural language query"
-            else:
-                return [], "Could not parse LLM response"
+            pass
+
+        # Scan for the first '{' and find its matching '}'
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[start:], start):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        json.loads(candidate)
+                        return candidate
+                    except json.JSONDecodeError:
+                        return None
+        return None
+
+    def _parse_response(self, response: str) -> Tuple[List[str], str]:
+        """Parse LLM response and extract commands.
+
+        Handles local models that wrap JSON in prose or markdown fences.
+        """
+        raw = self._extract_json(response)
+        if raw:
+            try:
+                data = json.loads(raw)
+                commands = data.get("commands", [])
+                explanation = data.get("explanation", "Generated commands")
+                if isinstance(commands, str):
+                    commands = [commands]
+                return commands, explanation
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        # Last-resort: pull shell-looking lines from plain text
+        lines = response.split("\n")
+        commands = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if any(kw in line.lower() for kw in [
+                "echo", "ls", "get-childitem", "dir", "cd", "git",
+                "npm", "docker", "python", "node", "pip", "mv", "cp",
+                "rm", "mkdir", "curl", "wget", "find", "grep",
+            ]):
+                commands.append(line)
+        if commands:
+            return commands, "Generated from natural language query"
+        return [], "Could not parse LLM response"
     
     def generate_commands_from_nl(self, nl_description: str, context: Optional[dict] = None) -> List[str]:
         """
@@ -441,7 +611,8 @@ Command: {command}"""
             f"  Command: {command}\n"
             f"  Base program: {base}\n"
             f"  {hint}\n\n"
-            f"Set OPENAI_API_KEY in your .env file for detailed, AI-powered explanations."
+            f"Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_BASE_URL in your .env "
+            f"file for detailed, AI-powered explanations."
         )
 
     def summarize_command_for_history(
@@ -548,15 +719,17 @@ Command: {cmd_for_prompt}"""
     # ------------------------------------------------------------------
 
     def get_embedding(self, text: str) -> Optional[List[float]]:
+        """Fetch an embedding vector for *text*.
+
+        Supports OpenAI and Ollama (OpenAI-compatible).  Returns None for
+        Anthropic (no embeddings API) or on any failure.
         """
-        Fetch an embedding vector for *text* via the OpenAI embeddings API.
-        Returns None if the client is not initialised or the call fails.
-        """
-        if not self.llm_enabled or self.provider != "openai" or not text.strip():
+        if not self.llm_enabled or self.provider not in ("openai", "ollama") or not text.strip():
             return None
+        model = EMBEDDING_MODEL if self.provider == "openai" else "nomic-embed-text"
         try:
             resp = self.llm_client.embeddings.create(
-                model=EMBEDDING_MODEL,
+                model=model,
                 input=text.strip(),
             )
             return resp.data[0].embedding
@@ -773,10 +946,10 @@ Rules:
             context_info = self._build_context(context)
             prompt = self._create_deploy_prompt(description, context_info)
             response = self._call_llm_stream("deploy", prompt, stream_callback)
-            response = re.sub(r"```json\s*", "", response)
-            response = re.sub(r"```\s*", "", response)
-            response = response.strip()
-            data = json.loads(response)
+            raw = self._extract_json(response)
+            if not raw:
+                return [f"# Could not parse deploy steps from response"]
+            data = json.loads(raw)
             commands = data.get("commands", [])
             if isinstance(commands, str):
                 commands = [commands]
@@ -910,25 +1083,22 @@ Rules:
 
     def _parse_error_response(self, response: str) -> Dict:
         """Parse the LLM's JSON response for error translation."""
-        # Strip markdown fences if the model added them anyway
-        response = re.sub(r"```json\s*", "", response)
-        response = re.sub(r"```\s*", "", response)
-        response = response.strip()
-
-        try:
-            data = json.loads(response)
-            return {
-                "explanation": data.get("explanation", "Unknown error."),
-                "fix_commands": data.get("fix_commands", []),
-                "fix_explanation": data.get("fix_explanation", ""),
-            }
-        except json.JSONDecodeError:
-            # Fallback: treat the whole response as the explanation
-            return {
-                "explanation": response[:500] if response else "Could not parse error analysis.",
-                "fix_commands": [],
-                "fix_explanation": "",
-            }
+        raw = self._extract_json(response)
+        if raw:
+            try:
+                data = json.loads(raw)
+                return {
+                    "explanation": data.get("explanation", "Unknown error."),
+                    "fix_commands": data.get("fix_commands", []),
+                    "fix_explanation": data.get("fix_explanation", ""),
+                }
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return {
+            "explanation": response[:500] if response else "Could not parse error analysis.",
+            "fix_commands": [],
+            "fix_explanation": "",
+        }
 
     def _stub_error_translation(
         self, command: str, exit_code: int, stderr: str
@@ -1097,7 +1267,10 @@ Rules:
             
         else:
             commands = []
-            explanation = "LLM not configured. Set OPENAI_API_KEY in .env file to enable natural language."
+            explanation = (
+                "LLM not configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or "
+                "OLLAMA_BASE_URL in your .env file to enable natural language."
+            )
             level = DangerLevel.SAFE
         
         return commands, explanation, level

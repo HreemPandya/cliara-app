@@ -12,7 +12,7 @@ import random
 import threading
 import time
 from contextlib import contextmanager
-from typing import Optional, List, Tuple, Union
+from typing import Any, Optional, List, Tuple, Union
 from pathlib import Path
 
 from cliara.config import Config
@@ -580,7 +580,7 @@ class CliaraShell:
         progress.step("Loading safety checker...")
         self.safety = SafetyChecker()
         self.diff_preview = DiffPreview()
-        self.nl_handler = NLHandler(self.safety)
+        self.nl_handler = NLHandler(self.safety, config=self.config)
 
         # Copilot Gate — AI-command interception
         self._source_detector = SourceDetector()
@@ -670,16 +670,18 @@ class CliaraShell:
         """Initialize LLM if API key is configured."""
         provider = self.config.get_llm_provider()
         api_key = self.config.get_llm_api_key()
-        
+
         if provider and api_key:
-            if self.nl_handler.initialize_llm(provider, api_key):
+            base_url = self.config.get_ollama_base_url() if provider == "ollama" else None
+            if self.nl_handler.initialize_llm(provider, api_key, base_url=base_url):
                 if not quiet:
-                    print_success(f"[OK] LLM initialized ({provider})")
+                    model = self.config.get_llm_model() or ""
+                    model_hint = f", model: {model}" if model else ""
+                    print_success(f"[OK] LLM initialized ({provider}{model_hint})")
             else:
                 if not quiet:
                     print_warning(f"[Warning] Failed to initialize LLM ({provider})")
         else:
-            # LLM not configured, will use stub responses
             pass
 
     def _semantic_history_worker(self):
@@ -1168,6 +1170,16 @@ class CliaraShell:
         # Theme: list or set color scheme
         if user_input.strip() == 'theme' or user_input.startswith('theme '):
             self._handle_theme_command(user_input[5:].strip())
+            return
+
+        # Config — read/write persistent settings
+        if user_input.strip() == 'config' or user_input.lower().startswith('config '):
+            self._handle_config_command(user_input[6:].strip() if len(user_input) > 6 else "")
+            return
+
+        # Ollama setup wizard
+        if user_input.lower().strip() == 'setup-ollama':
+            self._handle_setup_ollama()
             return
         
         # Check if it's a macro name
@@ -1935,6 +1947,94 @@ class CliaraShell:
         # Save to history for "save last"
         self.history.set_last_execution(macro.commands)
     
+    def _handle_config_command(self, args: str):
+        """Built-in config command: get/set/list persistent cliara settings.
+
+        Usage:
+          config list              — show all current settings
+          config get <key>         — print one value
+          config set <key> <value> — persist a value to ~/.cliara/config.json
+        """
+        # Read-only keys that must never be set via this command
+        _READONLY = {"llm_api_key", "llm_provider", "postgres"}
+
+        parts = args.split(None, 2)
+        sub = parts[0].lower() if parts else ""
+
+        if sub in ("list", "show", ""):
+            print_info("[Cliara] Current config (~/.cliara/config.json):\n")
+            skip = {"llm_api_key", "connection_string"}
+            for k, v in sorted(self.config.settings.items()):
+                if k in skip:
+                    continue
+                if isinstance(v, dict):
+                    continue
+                display = str(v) if v is not None else "(not set)"
+                print(f"  {k:<32} {display}")
+            print()
+            print_dim("  Use 'config set <key> <value>' to change a setting.")
+            return
+
+        if sub == "get":
+            if len(parts) < 2:
+                print_error("[Cliara] Usage: config get <key>")
+                return
+            key = parts[1]
+            val = self.config.get(key)
+            if val is None:
+                print_dim(f"  {key} = (not set)")
+            else:
+                print_info(f"  {key} = {val}")
+            return
+
+        if sub == "set":
+            if len(parts) < 3:
+                print_error("[Cliara] Usage: config set <key> <value>")
+                return
+            key = parts[1]
+            raw_val = parts[2]
+
+            if key in _READONLY:
+                print_error(f"[Cliara] '{key}' is read-only — set it via your .env file instead.")
+                return
+
+            # Type-coerce: booleans and integers
+            val: Any
+            if raw_val.lower() in ("true", "yes", "on"):
+                val = True
+            elif raw_val.lower() in ("false", "no", "off"):
+                val = False
+            elif raw_val.lower() in ("none", "null", ""):
+                val = None
+            else:
+                try:
+                    val = int(raw_val)
+                except ValueError:
+                    try:
+                        val = float(raw_val)
+                    except ValueError:
+                        val = raw_val
+
+            self.config.set(key, val)
+            print_success(f"[Cliara] {key} = {val!r}  (saved)")
+
+            # Live-apply a small set of settings without restart
+            if key == "llm_model" and self.nl_handler.llm_enabled:
+                print_dim(f"  Model will be used on next LLM call.")
+            return
+
+        print_error(f"[Cliara] Unknown config subcommand: '{sub}'")
+        print_dim("  Usage: config list | config get <key> | config set <key> <value>")
+
+    # ------------------------------------------------------------------
+    # Ollama setup wizard
+    # ------------------------------------------------------------------
+
+    def _handle_setup_ollama(self):
+        """Delegate to the dedicated setup_ollama module."""
+        from cliara import setup_ollama
+        setup_ollama.run(self)
+
     def _handle_theme_command(self, arg: str):
         """Show scrollable theme picker (up/down to select, Enter to apply) or set theme by name."""
         from cliara.highlighting import list_themes, get_style_for_theme
@@ -2365,24 +2465,20 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
 
-        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
+        # fix agent returns JSON — do not stream raw JSON to the console
         result = self.nl_handler.translate_error(
             command,
             self.last_exit_code,
             stderr,
             context,
-            stream_callback=stream_cb,
+            stream_callback=None,
         )
 
         explanation = result.get("explanation", "")
         fix_commands = result.get("fix_commands", [])
         fix_explanation = result.get("fix_explanation", "")
 
-        # When we streamed, the raw output was already shown; skip repeating the explanation
-        if stream_cb is None:
-            print_info(f"[Cliara] {explanation}")
-        else:
-            print()  # newline after streamed output
+        print_info(f"[Cliara] {explanation}")
 
         if fix_commands:
             # Show the suggested fix
@@ -3515,15 +3611,13 @@ class CliaraShell:
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
-        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
-        commands = self.nl_handler.generate_deploy_steps(description, context, stream_callback=stream_cb)
+        # deploy agent returns JSON — do not stream raw JSON to the console
+        commands = self.nl_handler.generate_deploy_steps(description, context, stream_callback=None)
 
         if not commands or (len(commands) == 1 and commands[0].startswith("#")):
             print_error("  Could not generate deploy steps.")
             return
 
-        if stream_cb:
-            print()  # newline after streamed output
         print_info("  Generated steps:")
         for i, cmd in enumerate(commands, 1):
             print(f"    {i}. {cmd}")
@@ -3815,7 +3909,7 @@ class CliaraShell:
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
         "exit", "quit", "q", "help", "version", "explain", "push", "session", "deploy",
-        "macro", "cd", "clear", "cls", "fix",
+        "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama",
     })
 
     def _check_macro_name_conflict(self, name: str) -> bool:

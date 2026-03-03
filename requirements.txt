@@ -8,9 +8,10 @@ pygments>=2.0.0          # Syntax highlighting
 thefuzz>=0.20.0
 python-Levenshtein>=0.20.0
 
-# Phase 2: LLM integration
-openai>=1.0.0
-python-dotenv>=1.0.0  # For loading .env files
+# LLM integration (providers)
+openai>=1.0.0          # OpenAI + Ollama (OpenAI-compatible API)
+anthropic>=0.25.0      # Anthropic Claude (optional — only needed for anthropic provider)
+python-dotenv>=1.0.0   # For loading .env files
 
 # Database backends (optional)
 psycopg2-binary>=2.9.0  # PostgreSQL support

@@ -10,6 +10,7 @@ import platform
 import queue
 import random
 import re
+import shlex
 import threading
 import time
 from contextlib import contextmanager
@@ -1573,7 +1574,7 @@ class CliaraShell:
         parts = args.split(maxsplit=1)
         if not parts:
             print("Usage: macro <command> [args]")
-            print("Commands: add, edit, list, stats, search, show, run, delete, rename, save, help")
+            print("Commands: add, edit, list, stats, search, show, run, chain, delete, rename, save, help")
             return
         
         cmd = parts[0].lower()
@@ -1606,6 +1607,8 @@ class CliaraShell:
             self.macro_delete(args_rest)
         elif cmd == 'rename':
             self.macro_rename(args_rest)
+        elif cmd == 'chain':
+            self.macro_chain(args_rest)
         elif cmd == 'save':
             self.macro_save_last(args_rest)
         elif cmd == 'help':
@@ -2020,6 +2023,9 @@ class CliaraShell:
         print("  macro show <name>                   Show macro details")
         print("  macro run <name>                    Run a macro (prompts for params if needed)")
         print("  macro run <name> p1=v1 p2=v2        Run a macro with inline param values")
+        print("  macro chain <n1> <n2> [n3 …]        Run macros in sequence")
+        print_dim('      "my macro", "other macro"          — quoted names (multi-word)')
+        print_dim("      my macro, other macro              — comma-separated (multi-word)")
         print("  macro delete <name>                 Delete a macro")
         print("  macro rename <old> <new>            Rename a macro")
         print("  macro save last as <name>           Save last commands as macro")
@@ -2141,7 +2147,176 @@ class CliaraShell:
 
         # Save to history for "save last" (store template commands, not resolved)
         self.history.set_last_execution(macro.commands)
-    
+
+    def _parse_chain_names(self, args: str) -> List[str]:
+        """Parse a list of (possibly multi-word) macro names for macro chain.
+
+        Two syntaxes are accepted:
+
+        1. Comma-separated  (works for any name, no quoting needed):
+               my name is, greet, deploy to prod
+           Each token between commas is one macro name.
+
+        2. Shell-quoted  (standard approach):
+               "my name is" greet "deploy to prod"
+           ``shlex.split`` handles the quoting.
+
+        If neither a comma nor any quote character is present the raw words are
+        returned as-is (single-word names, backward-compatible).
+        """
+        # ── Comma-separated ───────────────────────────────────────────────────
+        if ',' in args:
+            return [n.strip() for n in args.split(',') if n.strip()]
+
+        # ── Shell-quoted ──────────────────────────────────────────────────────
+        if '"' in args or "'" in args:
+            try:
+                return shlex.split(args)
+            except ValueError:
+                pass  # malformed quotes — fall through to plain split
+
+        # ── Plain split (single-word names, backward-compatible) ──────────────
+        return args.split()
+
+    def macro_chain(self, args: str):
+        """Run multiple macros in sequence.
+
+        Usage:
+          macro chain <name1> <name2> [name3 …]
+
+        Multi-word macro names are supported in two ways:
+          • Quoted:           macro chain "my name is", greet, deploy
+          • Comma-separated:  macro chain my name is, greet, deploy
+
+        All macros are validated and param values are collected up-front before
+        any execution starts.  The chain halts on the first failed command and
+        reports exactly which step caused the failure.
+        """
+        names = self._parse_chain_names(args)
+        if len(names) < 2:
+            print_error("[Error] 'macro chain' requires at least two macro names")
+            print_dim('Usage: macro chain "name one", "name two" [...]')
+            print_dim("   or: macro chain name one, name two, name three")
+            return
+
+        # ── Validate every macro exists before touching anything ──────────────
+        macros: List = []
+        for name in names:
+            macro = self.macros.get(name)
+            if not macro:
+                print_error(f"[Error] Macro '{name}' not found")
+                fuzzy = self.macros.find_fuzzy(name)
+                if fuzzy:
+                    print_dim(f"  Did you mean: {fuzzy}?")
+                return
+            macros.append(macro)
+
+        # ── Collect param values for every macro that needs them ──────────────
+        chain_params: List[Dict[str, str]] = []
+        for macro in macros:
+            effective_params = list(macro.params) if macro.params else []
+            detected = self._extract_param_names(macro.commands)
+            for p in detected:
+                if p not in effective_params:
+                    effective_params.append(p)
+
+            if effective_params:
+                print_info(f"\n[Params for '{macro.name}']")
+                if macro.description:
+                    print_dim(macro.description)
+                collected = self._collect_param_values(effective_params, {})
+                if collected is None:
+                    print_warning("[Cancelled]")
+                    return
+                chain_params.append(collected)
+            else:
+                chain_params.append({})
+
+        # ── Resolve placeholders in every macro ───────────────────────────────
+        chain_resolved: List[List[str]] = []
+        for macro, param_values in zip(macros, chain_params):
+            resolved = [
+                self._substitute_params(cmd, param_values)
+                for cmd in macro.commands
+            ]
+            chain_resolved.append(resolved)
+
+        # ── Show full chain preview ───────────────────────────────────────────
+        total_cmds = sum(len(cmds) for cmds in chain_resolved)
+        print_info(f"\n[Chain] {len(macros)} macros  ·  {total_cmds} commands total\n")
+        for i, (macro, resolved, param_values) in enumerate(
+            zip(macros, chain_resolved, chain_params), 1
+        ):
+            print(f"  Step {i}: {macro.name}")
+            if macro.description:
+                print_dim(f"           {macro.description}")
+            if param_values:
+                kv = "  ".join(f"{k}={v}" for k, v in param_values.items())
+                print_dim(f"           [{kv}]")
+            for j, cmd in enumerate(resolved, 1):
+                print_dim(f"    {j}. {cmd}")
+            print()
+
+        # ── Safety-check across all resolved commands ─────────────────────────
+        all_resolved = [cmd for cmds in chain_resolved for cmd in cmds]
+        level, dangerous = self.safety.check_commands(all_resolved)
+        if level != DangerLevel.SAFE:
+            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            prompt = self.safety.get_confirmation_prompt(level)
+            response = input(prompt).strip()
+            if not self.safety.validate_confirmation(response, level):
+                print_warning("[Cancelled]")
+                return
+        else:
+            confirm = input("Run chain? (y/n): ").strip().lower()
+            if confirm not in ['y', 'yes']:
+                print_warning("[Cancelled]")
+                return
+
+        # ── Execute each macro in sequence ────────────────────────────────────
+        chain_label = " → ".join(m.name for m in macros)
+        print_header("\n" + "=" * 60)
+        print_header(f"CHAIN: {chain_label}")
+        print_header("=" * 60 + "\n")
+
+        for step_idx, (macro, resolved) in enumerate(
+            zip(macros, chain_resolved), 1
+        ):
+            print_info(f"[Step {step_idx}/{len(macros)}] {macro.name}")
+            if macro.description:
+                print_dim(f"  {macro.description}")
+            print("-" * 60)
+
+            step_failed = False
+            for cmd_idx, cmd in enumerate(resolved, 1):
+                print_info(f"  [{cmd_idx}/{len(resolved)}] {cmd}")
+                success = self.execute_shell_command(cmd, capture=False)
+                print()
+                if not success:
+                    print_error(
+                        f"[X] Command {cmd_idx} failed in macro '{macro.name}'"
+                    )
+                    print_error(
+                        f"[X] Chain halted at step {step_idx}/{len(macros)}"
+                    )
+                    self._auto_suggest_fix()
+                    step_failed = True
+                    break
+
+            if step_failed:
+                return
+
+            macro.mark_run()
+            self.macros.storage.add(macro, user_id=self.macros.user_id)
+            print_success(f"[OK] {macro.name} completed")
+            print()
+
+        print_header("=" * 60)
+        print_success(
+            f"[OK] Chain complete — {len(macros)} macros, {total_cmds} commands"
+        )
+        print_header("=" * 60 + "\n")
+
     def _handle_config_command(self, args: str):
         """Built-in config command: get/set/list persistent cliara settings.
 

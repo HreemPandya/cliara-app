@@ -1765,30 +1765,77 @@ class CliaraShell:
         self.macros.add(name, commands, description)
         print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s) from natural language")
     
-    def macro_list(self):
-        """List all macros."""
-        macros = self.macros.list_all()
-        
-        if not macros:
-            print_dim("\nNo macros yet.")
-            print_dim("Create one with: macro add <name>")
-            return
-        
-        print_info(f"\n[Macros] {len(macros)} total\n")
-        for name, macro in sorted(macros.items()):
-            desc = macro.description or "No description"
-            cmd_count = len(macro.commands)
-            # Combine declared + auto-detected params for the hint
+    def _macro_table(self, macros_iter, title: str):
+        """Render a Rich table for a collection of macros.
+
+        Args:
+            macros_iter: iterable of ``(name, Macro)`` pairs, already sorted.
+            title:       header line printed above the table.
+        """
+        from rich.table import Table
+        from rich import box
+        from rich.text import Text
+
+        console = _cliara_console()
+
+        table = Table(
+            box=box.ROUNDED,
+            border_style="dim",
+            header_style="bold dim",
+            show_edge=True,
+            padding=(0, 1),
+        )
+        table.add_column("Macro",       style="bold bright_cyan",  no_wrap=True)
+        table.add_column("Params",      style="yellow",            no_wrap=True)
+        table.add_column("Steps",       justify="right",           style="green")
+        table.add_column("Runs",        justify="right")
+        table.add_column("Description", style="dim")
+
+        rows = 0
+        for name, macro in macros_iter:
+            # Effective params: declared ∪ auto-detected {var} patterns
             eff_params = list(macro.params) if macro.params else []
             for p in self._extract_param_names(macro.commands):
                 if p not in eff_params:
                     eff_params.append(p)
-            param_hint = f"  [{', '.join(eff_params)}]" if eff_params else ""
-            print(f"  • {name}{param_hint}")
-            print(f"    {desc} ({cmd_count} command{'s' if cmd_count != 1 else ''})")
-            if macro.run_count > 0:
-                print(f"    Run {macro.run_count} time{'s' if macro.run_count != 1 else ''}")
-        print()
+            param_str = "  ".join(f"{{{p}}}" for p in eff_params) if eff_params else ""
+
+            run_text = Text()
+            if macro.run_count == 0:
+                run_text.append("—", style="dim")
+            elif macro.run_count >= 10:
+                run_text.append(str(macro.run_count), style="bold green")
+            else:
+                run_text.append(str(macro.run_count), style="cyan")
+
+            table.add_row(
+                name,
+                param_str,
+                str(len(macro.commands)),
+                run_text,
+                macro.description or "",
+            )
+            rows += 1
+
+        console.print()
+        console.print(f"  {title}")
+        console.print()
+        console.print(table)
+        console.print()
+
+    def macro_list(self):
+        """List all macros."""
+        macros = self.macros.list_all()
+
+        if not macros:
+            print_dim("\nNo macros yet.")
+            print_dim("Create one with: macro add <name>")
+            return
+
+        self._macro_table(
+            sorted(macros.items()),
+            f"[cyan][Macros][/cyan]  [bold]{len(macros)}[/bold] total",
+        )
     
     def macro_stats(self):
         """Show macro statistics (total, most used, last used, total commands)."""
@@ -1821,15 +1868,11 @@ class CliaraShell:
             print_dim(f"\nNo macros matching '{keyword.strip()}'.")
             return
         
-        print_info(f"\n[Search: '{keyword.strip()}'] {len(results)} result(s)\n")
-        for macro in sorted(results, key=lambda m: m.name):
-            desc = macro.description or "No description"
-            cmd_count = len(macro.commands)
-            print(f"  • {macro.name}")
-            print(f"    {desc} ({cmd_count} command{'s' if cmd_count != 1 else ''})")
-            if macro.run_count > 0:
-                print(f"    Run {macro.run_count} time{'s' if macro.run_count != 1 else ''}")
-        print()
+        kw = keyword.strip()
+        self._macro_table(
+            [(m.name, m) for m in sorted(results, key=lambda m: m.name)],
+            f"[cyan][Search: '{kw}'][/cyan]  [bold]{len(results)}[/bold] result{'s' if len(results) != 1 else ''}",
+        )
     
     def macro_show(self, name: str):
         """Show details of a macro."""

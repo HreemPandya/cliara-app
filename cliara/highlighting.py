@@ -104,6 +104,8 @@ THEMES = {
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansiwhite",
             "prompt-arrow": "ansibrightblack",
+            "prompt-exit-success": "ansigreen bold",
+            "prompt-exit-fail": "ansired bold",
         },
         # Rich markup used for the instant preview line
         "preview": {
@@ -133,6 +135,8 @@ THEMES = {
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansiwhite",
             "prompt-arrow": "ansibrightblack",
+            "prompt-exit-success": "ansigreen bold",
+            "prompt-exit-fail": "ansired bold",
         },
         "preview": {
             "name":     "[bold magenta]",
@@ -161,6 +165,8 @@ THEMES = {
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansiwhite",
             "prompt-arrow": "ansibrightblack",
+            "prompt-exit-success": "ansigreen bold",
+            "prompt-exit-fail": "ansired bold",
         },
         "preview": {
             "name":     "[bold blue]",
@@ -189,6 +195,8 @@ THEMES = {
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansibrightwhite",
             "prompt-arrow": "ansibrightblack",
+            "prompt-exit-success": "ansigreen bold",
+            "prompt-exit-fail": "ansired bold",
         },
         "preview": {
             "name":     "[bold yellow]",
@@ -217,6 +225,8 @@ THEMES = {
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansiwhite",
             "prompt-arrow": "ansibrightblack",
+            "prompt-exit-success": "ansicyan bold",
+            "prompt-exit-fail": "ansired bold",
         },
         "preview": {
             "name":     "[bold green]",
@@ -246,6 +256,8 @@ THEMES = {
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansiblack",
             "prompt-arrow": "ansired",
+            "prompt-exit-success": "ansigreen bold",
+            "prompt-exit-fail": "ansired bold",
         },
         "preview": {
             "name":     "[bold red]",

@@ -1019,10 +1019,16 @@ class CliaraShell:
 
                 if self._prompt_session is not None:
                     # Coloured, syntax-highlighted prompt (uses current theme from config)
-                    message = [
-                        ("class:prompt-name", "[cliara]"),
-                        ("class:prompt-sep", " "),
-                    ]
+                    message = []
+                    # Exit code indicator: ✓ for success (exit code 0), ✗ N for failure
+                    if self.last_exit_code != 0:
+                        message.append(("class:prompt-exit-fail", f"✗ {self.last_exit_code}"))
+                        message.append(("class:prompt-sep", " "))
+                    elif self.last_command:
+                        message.append(("class:prompt-exit-success", "✓"))
+                        message.append(("class:prompt-sep", " "))
+                    message.append(("class:prompt-name", "[cliara]"))
+                    message.append(("class:prompt-sep", " "))
                     if self.current_session:
                         message.append(("class:prompt-path", f"[{self.current_session.name}]"))
                         message.append(("class:prompt-sep", " "))
@@ -1034,10 +1040,15 @@ class CliaraShell:
                     user_input = self._prompt_session.prompt(message).strip()
                 else:
                     # Plain fallback
+                    exit_indicator = ""
+                    if self.last_exit_code != 0:
+                        exit_indicator = f"X {self.last_exit_code} "
+                    elif self.last_command:
+                        exit_indicator = "OK "
                     if self.current_session:
-                        prompt = f"[cliara] [{self.current_session.name}] {cwd} {prompt_arrow} "
+                        prompt = f"{exit_indicator}[cliara] [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
-                        prompt = f"[cliara] {cwd} {prompt_arrow} "
+                        prompt = f"{exit_indicator}[cliara] {cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:

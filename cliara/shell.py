@@ -924,6 +924,87 @@ class CliaraShell:
                     continue
             return ""
 
+    @staticmethod
+    def _write_system_clipboard(text: str) -> bool:
+        """
+        Write text to the OS clipboard without extra dependencies.
+
+        Windows: ctypes
+        macOS:   pbcopy
+        Linux:   xclip / xsel
+
+        Returns True on success, False on failure.
+        """
+        if platform.system() == "Windows":
+            try:
+                import ctypes
+                import ctypes.wintypes as wt
+
+                CF_UNICODETEXT = 13
+                GMEM_MOVEABLE = 0x0002
+
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+                user32.OpenClipboard.argtypes = [wt.HWND]
+                user32.OpenClipboard.restype = wt.BOOL
+                user32.EmptyClipboard.argtypes = []
+                user32.EmptyClipboard.restype = wt.BOOL
+                user32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+                user32.SetClipboardData.restype = wt.HANDLE
+                user32.CloseClipboard.argtypes = []
+                user32.CloseClipboard.restype = wt.BOOL
+
+                kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+                kernel32.GlobalAlloc.restype = wt.HGLOBAL
+                kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
+                kernel32.GlobalLock.restype = ctypes.c_void_p
+                kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+                kernel32.GlobalUnlock.restype = wt.BOOL
+
+                encoded = text.encode("utf-16-le") + b"\x00\x00"
+                if not user32.OpenClipboard(None):
+                    return False
+                try:
+                    user32.EmptyClipboard()
+                    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                    if not handle:
+                        return False
+                    ptr = kernel32.GlobalLock(handle)
+                    if not ptr:
+                        return False
+                    ctypes.memmove(ptr, encoded, len(encoded))
+                    kernel32.GlobalUnlock(handle)
+                    if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                        return False
+                    return True
+                finally:
+                    user32.CloseClipboard()
+            except Exception:
+                return False
+        elif platform.system() == "Darwin":
+            try:
+                r = subprocess.run(
+                    ["pbcopy"], input=text, text=True, timeout=2,
+                )
+                return r.returncode == 0
+            except Exception:
+                return False
+        else:
+            for tool in (
+                ["xclip", "-selection", "clipboard"],
+                ["xsel", "--clipboard", "--input"],
+            ):
+                try:
+                    r = subprocess.run(
+                        tool, input=text, text=True, timeout=2,
+                    )
+                    if r.returncode == 0:
+                        return True
+                except Exception:
+                    continue
+            return False
+
     def _create_prompt_session(self):
         """
         Build a prompt_toolkit PromptSession with syntax highlighting.
@@ -933,6 +1014,7 @@ class CliaraShell:
         """
         try:
             from prompt_toolkit import PromptSession
+            from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
             from prompt_toolkit.history import InMemoryHistory
             from prompt_toolkit.key_binding import KeyBindings
             from prompt_toolkit.lexers import PygmentsLexer
@@ -993,6 +1075,7 @@ class CliaraShell:
                 style=style,
                 history=pt_history,
                 key_bindings=kb,
+                auto_suggest=AutoSuggestFromHistory(),
             )
         except Exception:
             return None
@@ -1335,19 +1418,28 @@ class CliaraShell:
             print_success(f"[OK] Macro '{save_as_name}' saved with {len(commands)} command(s)")
             return
         
-        # Safety check
+        # Safety check with copy-to-clipboard option
         if danger_level != DangerLevel.SAFE:
             print(self.safety.get_warning_message(commands, danger_level))
-            prompt = self.safety.get_confirmation_prompt(danger_level)
-            response = input(prompt).strip()
-            if not self.safety.validate_confirmation(response, danger_level):
-                print_warning("[Cancelled]")
-                return
-        else:
-            confirm = input("\nRun these commands? (y/n): ").strip().lower()
-            if confirm not in ['y', 'yes']:
-                print_warning("[Cancelled]")
-                return
+        
+        # Show interactive prompt with copy option
+        import sys
+        # Use direct print with ANSI dim code to ensure it displays before prompt_toolkit takes over
+        print("\033[2m[c] copy  [Enter] run  [Esc/n] cancel\033[0m", flush=True)
+        action = self._confirm_with_copy_option(commands, danger_level)
+        
+        if action == "copy":
+            commands_text = "\n".join(commands)
+            if self._write_system_clipboard(commands_text):
+                print_success("[Copied to clipboard]")
+            else:
+                print_warning("[Could not copy to clipboard]")
+                print_dim("Commands:")
+                print(commands_text)
+            return
+        elif action == "cancel":
+            print_warning("[Cancelled]")
+            return
         
         # Execute commands
         print_header("\n" + "="*60)
@@ -2633,6 +2725,74 @@ class CliaraShell:
             print_error(f"[Error] cd: permission denied: {args}")
         except Exception as e:
             print_error(f"[Error] cd: {e}")
+
+    # ------------------------------------------------------------------
+    # NL query confirmation with copy option
+    # ------------------------------------------------------------------
+    def _confirm_with_copy_option(self, commands: list, danger_level) -> str:
+        """
+        Interactive confirmation for NL-generated commands with copy option.
+        
+        Returns:
+            "run" - user wants to execute
+            "copy" - user wants to copy to clipboard
+            "cancel" - user cancelled
+        """
+        try:
+            # Try to use prompt_toolkit for single-key input
+            from prompt_toolkit import prompt
+            from prompt_toolkit.key_binding import KeyBindings
+            from prompt_toolkit.keys import Keys
+            
+            result = {"action": None}
+            kb = KeyBindings()
+            
+            @kb.add("c")
+            def _copy(event):
+                result["action"] = "copy"
+                event.app.exit(result="copy")
+            
+            @kb.add("enter")
+            @kb.add("y")
+            def _run(event):
+                result["action"] = "run"
+                event.app.exit(result="run")
+            
+            @kb.add("escape")
+            @kb.add("n")
+            @kb.add("q")
+            def _cancel(event):
+                result["action"] = "cancel"
+                event.app.exit(result="cancel")
+            
+            @kb.add(Keys.ControlC)
+            def _ctrl_c(event):
+                result["action"] = "cancel"
+                event.app.exit(result="cancel")
+            
+            action = prompt("", key_bindings=kb)
+            return action if action else "cancel"
+        except (ImportError, Exception):
+            # Fallback to simple input
+            if danger_level != DangerLevel.SAFE:
+                confirm_prompt = self.safety.get_confirmation_prompt(danger_level)
+            else:
+                confirm_prompt = "Action (c=copy, y=run, n=cancel): "
+            
+            try:
+                response = input(confirm_prompt).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return "cancel"
+            
+            if response == "c":
+                return "copy"
+            elif response in ("y", "yes"):
+                if danger_level != DangerLevel.SAFE:
+                    if not self.safety.validate_confirmation(response, danger_level):
+                        return "cancel"
+                return "run"
+            else:
+                return "cancel"
 
     # ------------------------------------------------------------------
     # Diff preview — show impact before destructive commands

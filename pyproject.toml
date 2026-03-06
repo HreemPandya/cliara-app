@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliara"
-version = "0.2.0"
+version = "0.2.1"
 description = "An AI-powered shell that understands natural language and macros"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -65,3 +65,6 @@ Issues = "https://github.com/yourusername/cliara/issues"
 where = ["."]
 include = ["cliara*"]
 exclude = ["tests*", "docs*"]
+
+[tool.setuptools.package-data]
+cliara = ["agents/prompts/*.txt"]

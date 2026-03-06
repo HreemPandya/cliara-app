@@ -3441,9 +3441,30 @@ class CliaraShell:
         snap = regression.capture_snapshot(cwd)
         regression.save_success_snapshot(key, snap, store_path)
 
+    def _regression_is_invalid_command(self) -> bool:
+        """Return True when the failure is a bad/unknown subcommand, not an env issue."""
+        stderr = (getattr(self, "last_stderr", "") or "").lower()
+        # Patterns emitted by common tools when the subcommand itself doesn't exist
+        invalid_patterns = [
+            "is not a git command",
+            "is not a npm command",
+            "is not a yarn command",
+            "unknown command",
+            "unrecognized command",
+            "invalid command",
+            "no such subcommand",
+            "command not found",
+            "is not recognized as",
+        ]
+        return any(p in stderr for p in invalid_patterns)
+
     def _regression_check_failure(self, command: str) -> None:
         """On failure: compare to last success, print minimal report, store for ? why."""
         if not self.config.get("regression_snapshots", True):
+            return
+        # Skip when the failure is clearly a typo / bad subcommand — the
+        # environment didn't cause this, so a regression report would be noise.
+        if self._regression_is_invalid_command():
             return
         key = self._regression_workflow_key(command)
         if not key:

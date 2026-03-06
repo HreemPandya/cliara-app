@@ -244,11 +244,11 @@ def rank_causes(
 
 
 def format_minimal_report(ranked_causes: List[Tuple[str, str]]) -> str:
-    """Single line for automatic print after failure."""
+    """Single line for automatic print after failure (displayed inside a titled panel)."""
     if not ranked_causes:
         return ""
     labels = [c[0] for c in ranked_causes]
-    return "Regression: " + ", ".join(labels) + " · ? why"
+    return ", ".join(labels) + " · ? why"
 
 
 def format_expanded_report(

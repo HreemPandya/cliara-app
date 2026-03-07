@@ -9,15 +9,20 @@ import platform
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-# Load .env file if it exists - search in common locations
+# Load .env files if they exist.
+# Priority (highest wins): system env → project .env → ~/.cliara/.env
+# We load lowest-priority first so higher-priority sources can override.
 try:
     from dotenv import load_dotenv, find_dotenv
-    # Try to find .env file starting from current directory
+    # 1. User-level env (~/.cliara/.env) — lowest priority; set only if not already set
+    _user_env_path = Path.home() / ".cliara" / ".env"
+    if _user_env_path.exists():
+        load_dotenv(_user_env_path, override=False)
+    # 2. Project-level .env — overrides user env (but not system env vars already exported)
     dotenv_path = find_dotenv(usecwd=True)
     if dotenv_path:
         load_dotenv(dotenv_path, override=True)
     else:
-        # Fallback: try to load from current directory
         load_dotenv(override=True)
 except ImportError:
     pass  # python-dotenv not installed, skip
@@ -57,6 +62,7 @@ class Config:
         # Ollama (local LLM) settings
         "ollama_base_url": "http://localhost:11434",  # Ollama server URL
         "first_run_complete": False,
+        "llm_wizard_dismissed": False,  # True after user deliberately skips the setup wizard
         "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why
         "stream_llm": True,  # Stream LLM responses token-by-token when enabled
         # Semantic history search (? find / ? when did I ...)
@@ -232,7 +238,23 @@ class Config:
         return Path(macro_path).expanduser()
     
     def _load_env_vars(self):
-        """Load environment variables into config."""
+        """Load environment variables into config.
+
+        Provider priority (first match wins):
+          0. CLIARA_TOKEN — hosted Cliara gateway (future SaaS)
+          1. Ollama  — local, no key needed
+          2. Anthropic
+          3. Groq    — free tier, no credit card
+          4. Gemini  — free tier via Google account
+          5. OpenAI
+        """
+        # Cliara hosted gateway — highest priority when configured
+        cliara_token = os.getenv("CLIARA_TOKEN")
+        if cliara_token:
+            self.settings["llm_provider"] = "cliara"
+            self.settings["llm_api_key"] = cliara_token
+            return
+
         # Ollama takes precedence when OLLAMA_BASE_URL or OLLAMA_HOST is set —
         # no API key required (uses a dummy value so the client initialises).
         ollama_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
@@ -248,6 +270,18 @@ class Config:
             self.settings["llm_api_key"] = anthropic_key
             return
 
+        groq_key = os.getenv("GROQ_API_KEY")
+        if groq_key:
+            self.settings["llm_provider"] = "groq"
+            self.settings["llm_api_key"] = groq_key
+            return
+
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key:
+            self.settings["llm_provider"] = "gemini"
+            self.settings["llm_api_key"] = gemini_key
+            return
+
         openai_key = os.getenv("OPENAI_API_KEY")
         if openai_key:
             self.settings["llm_provider"] = "openai"
@@ -255,21 +289,30 @@ class Config:
     
     def get_llm_api_key(self) -> Optional[str]:
         """Get LLM API key from environment or config."""
+        if os.getenv("CLIARA_TOKEN"):
+            return os.getenv("CLIARA_TOKEN")
         if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
             return "ollama"
-        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            return api_key
+        for env_var in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
+            val = os.getenv(env_var)
+            if val:
+                return val
         return self.settings.get("llm_api_key")
 
     def get_llm_provider(self) -> Optional[str]:
         """Get LLM provider name."""
+        if os.getenv("CLIARA_TOKEN"):
+            return "cliara"
         if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
             return "ollama"
-        if os.getenv("OPENAI_API_KEY"):
-            return "openai"
         if os.getenv("ANTHROPIC_API_KEY"):
             return "anthropic"
+        if os.getenv("GROQ_API_KEY"):
+            return "groq"
+        if os.getenv("GEMINI_API_KEY"):
+            return "gemini"
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
         return self.settings.get("llm_provider")
 
     def get_ollama_base_url(self) -> str:

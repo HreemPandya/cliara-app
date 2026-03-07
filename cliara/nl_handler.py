@@ -21,6 +21,19 @@ _PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
     "openai":    "gpt-4o-mini",
     "anthropic": "claude-3-haiku-20240307",
     "ollama":    "llama3.2",
+    "groq":      "llama-3.3-70b-versatile",
+    "gemini":    "gemini-1.5-flash",
+    "cliara":    "llama-3.3-70b-versatile",  # Gateway picks the best available model
+}
+
+# Providers that use the OpenAI-compatible client (openai SDK with custom base_url)
+_OPENAI_COMPAT_PROVIDERS = frozenset({"openai", "ollama", "groq", "gemini", "cliara"})
+
+# Base URLs for OpenAI-compatible cloud providers (not ollama — that's dynamic)
+_PROVIDER_BASE_URLS: Dict[str, str] = {
+    "groq":   "https://api.groq.com/openai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "cliara": "https://api.cliara.dev/v1",  # Hosted Cliara gateway (future)
 }
 
 # Agents whose output is plain text and can be streamed token-by-token to the
@@ -67,7 +80,7 @@ class NLHandler:
             return False
 
         try:
-            if provider in ("openai", "ollama"):
+            if provider in _OPENAI_COMPAT_PROVIDERS:
                 from openai import OpenAI
                 kwargs: Dict[str, Any] = {"api_key": api_key}
                 if provider == "ollama":
@@ -85,6 +98,8 @@ class NLHandler:
                             "Start Ollama and restart cliara to enable local LLM."
                         )
                         return False
+                elif provider in _PROVIDER_BASE_URLS:
+                    kwargs["base_url"] = _PROVIDER_BASE_URLS[provider]
                 elif base_url:
                     kwargs["base_url"] = base_url
                 self.llm_client = OpenAI(**kwargs)
@@ -337,7 +352,7 @@ class NLHandler:
         # Enforce safety: never stream JSON agents to the console
         safe_cb = stream_callback if agent_type in _STREAMING_SAFE_AGENTS else None
 
-        if self.provider in ("openai", "ollama"):
+        if self.provider in _OPENAI_COMPAT_PROVIDERS:
             return self._call_openai_compat(
                 system, user_message, model, temperature, max_tokens, safe_cb
             )
@@ -611,8 +626,7 @@ Command: {command}"""
             f"  Command: {command}\n"
             f"  Base program: {base}\n"
             f"  {hint}\n\n"
-            f"Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_BASE_URL in your .env "
-            f"file for detailed, AI-powered explanations."
+            f"Run 'setup-llm' to configure a free AI provider (Groq, Gemini, or Ollama)."
         )
 
     def summarize_command_for_history(
@@ -1268,8 +1282,9 @@ Rules:
         else:
             commands = []
             explanation = (
-                "LLM not configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or "
-                "OLLAMA_BASE_URL in your .env file to enable natural language."
+                "LLM not configured. Run 'setup-llm' to set up a free provider, "
+                "or set GROQ_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / "
+                "OLLAMA_BASE_URL in your .env file."
             )
             level = DangerLevel.SAFE
         

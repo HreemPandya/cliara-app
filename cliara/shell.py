@@ -663,6 +663,14 @@ class CliaraShell:
         # Show LLM status after the progress bar (single clean line)
         if self.nl_handler.llm_enabled:
             print_success(f"  LLM: {self.nl_handler.provider.upper()} connected")
+        else:
+            # Auto-detect Ollama first (silent, no prompt)
+            from cliara import setup_wizard as _wiz
+            if not _wiz.auto_detect_ollama(self):
+                # Show setup wizard if LLM has never been configured and user hasn't dismissed
+                wizard_dismissed = self.config.get("llm_wizard_dismissed", False)
+                if not wizard_dismissed:
+                    _wiz.run_wizard(self)
         
         # First-run setup
         if self.config.is_first_run():
@@ -674,6 +682,10 @@ class CliaraShell:
         api_key = self.config.get_llm_api_key()
 
         if provider and api_key:
+            # Clear any cloud model stored from a previous provider when switching to Ollama
+            if provider == "ollama":
+                from cliara.setup_wizard import _clear_incompatible_model
+                _clear_incompatible_model(self)
             base_url = self.config.get_ollama_base_url() if provider == "ollama" else None
             if self.nl_handler.initialize_llm(provider, api_key, base_url=base_url):
                 if not quiet:
@@ -1277,6 +1289,21 @@ class CliaraShell:
         if user_input.lower().strip() == 'setup-ollama':
             self._handle_setup_ollama()
             return
+
+        # LLM setup wizard (multi-provider)
+        if user_input.lower().strip() == 'setup-llm':
+            self._handle_setup_llm()
+            return
+
+        # Cliara hosted gateway login
+        if user_input.lower().strip() == 'cliara-login':
+            self._handle_cliara_login()
+            return
+
+        # Live provider switch: "use openai" / "use ollama" / "use groq" / "use"
+        if user_input.lower().strip() == 'use' or user_input.lower().startswith('use '):
+            self._handle_use_provider(user_input[3:].strip())
+            return
         
         # Check if it's a macro name (exact match)
         if self.macros.exists(user_input):
@@ -1552,7 +1579,8 @@ class CliaraShell:
             print_dim("Use 'history [N]' for a plain list of recent commands.")
             return
         if not self.nl_handler.llm_enabled:
-            print_dim("LLM not configured. Semantic search requires OPENAI_API_KEY.")
+            print_dim("LLM not configured. Semantic search requires an AI provider.")
+            print_dim("Run 'setup-llm' to configure one for free (Groq, Gemini, Ollama).")
             print_dim("Use 'history [N]' for a plain list.")
             return
         use_embeddings = self.config.get("semantic_history_use_embeddings", False)
@@ -1792,7 +1820,7 @@ class CliaraShell:
     def macro_add_nl(self, name: Optional[str] = None):
         """Create a macro using natural language description."""
         if not self.nl_handler.llm_enabled:
-            print_error("[Error] LLM not configured. Set OPENAI_API_KEY in .env file.")
+            print_error("[Error] LLM not configured. Run 'setup-llm' to configure a free AI provider.")
             return
         
         if not name:
@@ -2550,6 +2578,120 @@ class CliaraShell:
         """Delegate to the dedicated setup_ollama module."""
         from cliara import setup_ollama
         setup_ollama.run(self)
+
+    def _handle_setup_llm(self):
+        """Run the multi-provider LLM setup wizard."""
+        from cliara import setup_wizard
+        # Reset dismissed flag so the wizard shows fully
+        self.config.settings["llm_wizard_dismissed"] = False
+        setup_wizard.run_wizard(self)
+
+    def _handle_use_provider(self, provider_arg: str) -> None:
+        """Switch the active LLM provider for this session.
+
+        Usage:
+            use            — show current provider + available options
+            use openai     — switch to OpenAI (requires OPENAI_API_KEY in env/config)
+            use ollama     — switch to Ollama (requires Ollama running)
+            use groq       — switch to Groq (requires GROQ_API_KEY)
+            use gemini     — switch to Gemini (requires GEMINI_API_KEY)
+            use anthropic  — switch to Anthropic (requires ANTHROPIC_API_KEY)
+        """
+        from cliara.nl_handler import _PROVIDER_DEFAULT_MODELS, _PROVIDER_BASE_URLS
+        from cliara.setup_wizard import _clear_incompatible_model
+
+        _ENV_VAR_MAP = {
+            "openai":    "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "groq":      "GROQ_API_KEY",
+            "gemini":    "GEMINI_API_KEY",
+            "ollama":    "OLLAMA_BASE_URL",
+        }
+
+        current = self.nl_handler.provider or "none"
+
+        if not provider_arg:
+            # Show status + available options
+            print()
+            print_info("  Active provider: " + current.upper())
+            print()
+            print_dim("  Available providers:")
+            for pid, evar in _ENV_VAR_MAP.items():
+                val = os.getenv(evar)
+                if pid == "ollama":
+                    from cliara.setup_wizard import _ollama_running
+                    status = "running" if _ollama_running() else "not running"
+                else:
+                    status = "key set" if val else "no key"
+                model = _PROVIDER_DEFAULT_MODELS.get(pid, "")
+                active = "  <- active" if pid == current else ""
+                print(f"    use {pid:<12}  {status:<12}  default model: {model}{active}")
+            print()
+            print_dim("  Example: use groq   or   use ollama")
+            print()
+            return
+
+        target = provider_arg.lower().strip()
+
+        if target not in _ENV_VAR_MAP:
+            print_error(f"[Error] Unknown provider '{target}'. Options: {', '.join(_ENV_VAR_MAP)}")
+            return
+
+        if target == current:
+            print_info(f"  Already using {target.upper()}.")
+            return
+
+        # Resolve credentials for the target provider
+        if target == "ollama":
+            from cliara.setup_wizard import _ollama_running
+            base_url = self.config.get_ollama_base_url()
+            if not _ollama_running(base_url):
+                print_error(f"[Error] Ollama is not running at {base_url}.")
+                print_dim("  Start Ollama, then run 'use ollama' again.")
+                return
+            _clear_incompatible_model(self)
+            ok = self.nl_handler.initialize_llm("ollama", "ollama", base_url=base_url)
+        else:
+            api_key = os.getenv(_ENV_VAR_MAP[target])
+            if not api_key:
+                print_error(f"[Error] {_ENV_VAR_MAP[target]} is not set.")
+                print_dim(f"  Add it to ~/.cliara/.env or run 'setup-llm' to configure {target}.")
+                return
+            # Clear stored model override when switching away from ollama
+            ok = self.nl_handler.initialize_llm(target, api_key)
+
+        if ok:
+            model = self.nl_handler._resolve_model("nl_to_commands")
+            print_success(f"  Switched to {target.upper()}  (model: {model})")
+        else:
+            print_error(f"[Error] Failed to connect to {target}.")
+
+    def _handle_cliara_login(self):
+        """Authenticate with the Cliara hosted gateway using a CLIARA_TOKEN."""
+        print()
+        print_info("  Cliara Login — Hosted AI Gateway")
+        print_dim("  ─────────────────────────────────────")
+        print("  Get your free token at: https://cliara.dev/signup")
+        print()
+        try:
+            import getpass
+            token = getpass.getpass("  Paste your Cliara token: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not token:
+            print_warning("  No token entered.")
+            return
+        from cliara.setup_wizard import _write_env_var, _apply_env_and_reinit, _mask_key
+        env_path = _write_env_var("CLIARA_TOKEN", token)
+        ok = _apply_env_and_reinit(self, "cliara", "CLIARA_TOKEN", token)
+        print()
+        if ok:
+            print_success(f"  [OK] Cliara gateway connected  (token: {_mask_key(token)})")
+            print_success(f"  [OK] Token saved to {env_path}")
+        else:
+            print_error("  [Error] Could not connect to the Cliara gateway.")
+            print_dim("  Check your token at https://cliara.dev or try 'setup-llm' for free local options.")
 
     def _handle_theme_command(self, arg: str):
         """Show scrollable theme picker (up/down to select, Enter to apply) or set theme by name."""
@@ -4514,7 +4656,7 @@ class CliaraShell:
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
         "exit", "quit", "q", "help", "version", "explain", "push", "session", "deploy",
-        "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama",
+        "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm", "cliara-login", "use",
     })
 
     def _check_macro_name_conflict(self, name: str) -> bool:
@@ -4730,6 +4872,15 @@ class CliaraShell:
         print("  If a command doesn't exist on your OS, Cliara suggests")
         print("  the equivalent automatically.")
         print_dim("  Example: grep on Windows → Select-String (PowerShell)\n")
+
+        print_info("  AI Provider Setup")
+        print_dim("  ─────────────────────────────────────")
+        print("  use                        Show active provider and all available options")
+        print("  use <provider>             Switch provider live: use openai / use ollama / use groq")
+        print("  setup-llm                  Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)")
+        print("  setup-ollama               Set up a local Ollama model")
+        print("  cliara-login               Log in to the Cliara hosted AI gateway")
+        print_dim("  Free options: Groq (groq.com) · Gemini (aistudio.google.com) · Ollama (local)\n")
 
         print_info("  Other")
         print_dim("  ─────────────────────────────────────")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliara"
-version = "0.3.0"
+version = "0.3.2"
 description = "An AI-powered shell that understands natural language and macros"
 readme = "README.md"
 requires-python = ">=3.8"

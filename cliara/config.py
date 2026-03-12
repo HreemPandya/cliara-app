@@ -191,10 +191,20 @@ class Config:
     
     def setup_first_run(self):
         """Interactive first-run setup."""
-        print("\n" + "="*60)
-        print("  Welcome to Cliara!")
-        print("  Let's get you set up...")
-        print("="*60 + "\n")
+        try:
+            from cliara.install_logo import print_install_logo
+            try:
+                from importlib.metadata import version as _pkg_version
+                _ver = _pkg_version("cliara")
+            except Exception:
+                _ver = ""
+            print_install_logo(version=_ver)
+        except Exception:
+            print("\n" + "=" * 60)
+            print("  Welcome to Cliara!")
+            print("=" * 60 + "\n")
+
+        print("  Let's get you set up...\n")
         
         # Detect and confirm shell
         detected_shell = self._detect_shell()

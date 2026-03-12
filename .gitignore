@@ -105,3 +105,6 @@ cliara.egg-info/
 build/
 dist/
 *.egg-info/
+
+# Local tools / helpers (not for repo)
+skills-creator/

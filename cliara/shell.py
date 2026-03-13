@@ -260,8 +260,12 @@ class _StartupProgress:
         filled = int(frac * self.BAR_WIDTH)
         empty = self.BAR_WIDTH - filled
 
-        bar_filled = _c("36", "#" * filled) if _COLOR else "#" * filled
-        bar_empty = _c("2", "." * empty) if _COLOR else "." * empty
+        # Use solid/empty block characters for a more polished bar
+        bar_filled_char = "█"
+        bar_empty_char = "░"
+
+        bar_filled = _c("36", bar_filled_char * filled) if _COLOR else bar_filled_char * filled
+        bar_empty = _c("2", bar_empty_char * empty) if _COLOR else bar_empty_char * empty
         pct = f"{int(frac * 100):>3}%"
 
         # Fixed-width prefix:  "  [" + 30-char bar + "] NNN%  " = 41 visible chars

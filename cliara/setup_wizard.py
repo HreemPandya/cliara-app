@@ -25,6 +25,8 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from cliara import icons
+
 if TYPE_CHECKING:
     from cliara.shell import CliaraShell
 
@@ -186,7 +188,7 @@ def auto_detect_ollama(shell: "CliaraShell") -> bool:
                 f"(saved to {env_path})"
             )
         except Exception:
-            print(f"  [OK] Ollama auto-detected at {_OLLAMA_DEFAULT_URL}")
+            print(f"  [{icons.OK}] Ollama auto-detected at {_OLLAMA_DEFAULT_URL}")
     return ok
 
 
@@ -335,8 +337,8 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
     print()
     if ok:
         masked = _mask_key(api_key)
-        print(f"  [OK] {label} connected  (key: {masked})")
-        print(f"  [OK] Key saved to {env_path}  (persists across sessions)")
+        print(f"  [{icons.OK}] {label} connected  (key: {masked})")
+        print(f"  [{icons.OK}] Key saved to {env_path}  (persists across sessions)")
         print()
         print("  Try it now:  ? list python files changed today")
         print("               explain git rebase -i HEAD~3")
@@ -345,7 +347,7 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
         shell.config.settings["llm_wizard_dismissed"] = False
         shell.config.save()
     else:
-        print(f"  [Error] Could not connect to {label}.")
+        print(f"  [{icons.FAIL}] Could not connect to {label}.")
         print("  Double-check your API key and try 'setup-llm' again.")
 
     return ok

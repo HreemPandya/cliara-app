@@ -7,6 +7,8 @@ import re
 from typing import List, Tuple, Dict, Optional
 from enum import Enum
 
+from cliara import icons
+
 
 class DangerLevel(Enum):
     """Classification of command danger levels."""
@@ -154,21 +156,21 @@ class SafetyChecker:
             level, _ = self.check_commands(commands)
         
         if level == DangerLevel.CRITICAL:
-            icon = "[!!!]"
+            icon = icons.DANGER
             title = "CRITICAL WARNING"
             desc = "These commands could DESTROY your system or data!"
         elif level == DangerLevel.DANGEROUS:
-            icon = "[!!]"
+            icon = icons.WARN
             title = "DANGEROUS"
             desc = "These commands could cause data loss or system instability."
         elif level == DangerLevel.CAUTION:
-            icon = "[!]"
+            icon = icons.WARN
             title = "CAUTION"
             desc = "These commands might have unintended side effects."
         else:
             return ""
         
-        msg = f"\n{icon} {title}\n"
+        msg = f"\n[{icon}] {title}\n"
         msg += f"{desc}\n\n"
         msg += "Commands:\n"
         for cmd in commands:

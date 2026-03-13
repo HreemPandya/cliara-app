@@ -50,6 +50,7 @@ from cliara.copilot_gate import (
     RiskEngine,
     CopilotGate,
 )
+from cliara import icons
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ def print_error(msg: str, **kw):
     text = Text(str(msg))
 
     # Highlight common error prefixes lightly so only the important cue is red.
-    prefixes = ["[Error]", "[Cliara]", "[X]"]
+    prefixes = [f"[{icons.FAIL}]", "[Cliara]", "[X]"]
     for p in prefixes:
         idx = text.plain.find(p)
         if idx != -1:
@@ -741,10 +742,10 @@ class CliaraShell:
                 if not quiet:
                     model = self.config.get_llm_model() or ""
                     model_hint = f", model: {model}" if model else ""
-                    print_success(f"[OK] LLM initialized ({provider}{model_hint})")
+                    print_success(f"[{icons.OK}] LLM initialized ({provider}{model_hint})")
             else:
                 if not quiet:
-                    print_warning(f"[Warning] Failed to initialize LLM ({provider})")
+                    print_warning(f"[{icons.WARN}] Failed to initialize LLM ({provider})")
         else:
             pass
 

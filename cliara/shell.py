@@ -133,6 +133,24 @@ def print_dim(msg: str):
     _cliara_console().print(msg, style="dim")
 
 
+def _fmt_path(cwd: str, max_segments: int = 3) -> str:
+    """
+    Format the current working directory for the prompt.
+
+    - Compresses the home directory to "~".
+    - Shows only the last 2–3 segments with an ellipsis when the path is deep.
+    """
+    home = str(Path.home())
+    p = cwd.replace(home, "~")
+    parts = Path(p).parts
+    # Only apply the smart truncation when we're under home (starts with "~")
+    if parts and parts[0] == "~" and len(parts) > max_segments:
+        # Keep "~", insert an ellipsis, then the last (max_segments - 1) parts
+        tail = "/".join(parts[-(max_segments - 1):]) if max_segments > 1 else ""
+        return "~/…/" + tail if tail else "~"
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Typo-tolerant "fix" detection
 # ---------------------------------------------------------------------------
@@ -652,6 +670,9 @@ class CliaraShell:
                 )
                 self._semantic_history_thread.start()
 
+        # Elapsed time for the last executed command (for prompt duration display)
+        self._last_command_elapsed: Optional[float] = None
+
         progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
         self._initialize_llm(quiet=True)
@@ -675,6 +696,31 @@ class CliaraShell:
         # First-run setup
         if self.config.is_first_run():
             self.config.setup_first_run()
+
+    def _get_right_prompt(self):
+        """
+        Build a right-side prompt showing the last command duration when it was slow.
+        Returns formatted text for prompt_toolkit or None when nothing should be shown.
+        """
+        elapsed = self._last_command_elapsed
+        if elapsed is None:
+            return None
+        try:
+            threshold = float(self.config.get("prompt_duration_threshold", 2.0))
+        except Exception:
+            threshold = 2.0
+        if elapsed <= max(threshold, 0.0):
+            return None
+
+        # Format seconds with one decimal for sub-minute commands, mm:ss for longer ones
+        if elapsed < 60:
+            text = f"[{elapsed:.1f}s]"
+        else:
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            text = f"[{minutes}m{seconds:02d}s]"
+
+        return [("class:prompt-duration", text)]
     
     def _initialize_llm(self, quiet: bool = False):
         """Initialize LLM if API key is configured."""
@@ -1105,12 +1151,13 @@ class CliaraShell:
             # prompt_toolkit unavailable — use readline instead
             self.history.setup_readline()
 
-        # Use safe prompt character for Windows
-        prompt_arrow = ">" if platform.system() == "Windows" else ">"
+        # Prompt arrow glyph (kept simple and readable across terminals)
+        prompt_arrow = "❯"
 
         while self.running:
             try:
-                cwd = str(Path.cwd())
+                raw_cwd = str(Path.cwd())
+                cwd = _fmt_path(raw_cwd)
 
                 if self._prompt_session is not None:
                     # Coloured, syntax-highlighted prompt (uses current theme from config)
@@ -1122,7 +1169,7 @@ class CliaraShell:
                     elif self.last_command:
                         message.append(("class:prompt-exit-success", "✓"))
                         message.append(("class:prompt-sep", " "))
-                    message.append(("class:prompt-name", "[cliara]"))
+                    message.append(("class:prompt-name", "cliara"))
                     message.append(("class:prompt-sep", " "))
                     if self.current_session:
                         message.append(("class:prompt-path", f"[{self.current_session.name}]"))
@@ -1132,7 +1179,10 @@ class CliaraShell:
                         ("", " "),
                         ("class:prompt-arrow", f"{prompt_arrow} "),
                     ])
-                    user_input = self._prompt_session.prompt(message).strip()
+                    user_input = self._prompt_session.prompt(
+                        message,
+                        rprompt=self._get_right_prompt(),
+                    ).strip()
                 else:
                     # Plain fallback
                     exit_indicator = ""
@@ -1140,10 +1190,26 @@ class CliaraShell:
                         exit_indicator = f"X {self.last_exit_code} "
                     elif self.last_command:
                         exit_indicator = "OK "
+
+                    # Inline duration hint in plain mode (no right-aligned prompt available)
+                    duration_hint = ""
+                    if self._last_command_elapsed is not None:
+                        try:
+                            threshold = float(self.config.get("prompt_duration_threshold", 2.0))
+                        except Exception:
+                            threshold = 2.0
+                        if self._last_command_elapsed > max(threshold, 0.0):
+                            if self._last_command_elapsed < 60:
+                                duration_hint = f" [{self._last_command_elapsed:.1f}s]"
+                            else:
+                                minutes = int(self._last_command_elapsed // 60)
+                                seconds = int(self._last_command_elapsed % 60)
+                                duration_hint = f" [{minutes}m{seconds:02d}s]"
+
                     if self.current_session:
-                        prompt = f"{exit_indicator}[cliara] [{self.current_session.name}] {cwd} {prompt_arrow} "
+                        prompt = f"{exit_indicator}cliara [{self.current_session.name}] {cwd} {prompt_arrow}{duration_hint} "
                     else:
-                        prompt = f"{exit_indicator}[cliara] {cwd} {prompt_arrow} "
+                        prompt = f"{exit_indicator}cliara {cwd} {prompt_arrow}{duration_hint} "
                     user_input = input(prompt).strip()
 
                 if not user_input:
@@ -3347,6 +3413,7 @@ class CliaraShell:
         self.last_stderr = ""
         self.last_exit_code = 0
         self.last_command = command
+        self._last_command_elapsed = None
 
         start_time = time.time()
 
@@ -3405,6 +3472,7 @@ class CliaraShell:
                 self.last_exit_code = result.returncode
                 success = result.returncode == 0
                 elapsed = time.time() - start_time
+                self._last_command_elapsed = elapsed
                 self._notify_completion(command, elapsed, success)
                 self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
@@ -3504,7 +3572,9 @@ class CliaraShell:
                 if timed_out:
                     print_error("[Error] Command timed out (5 minutes)")
                     self.last_exit_code = -1
-                    self._notify_completion(command, time.time() - start_time, False)
+                    elapsed = time.time() - start_time
+                    self._last_command_elapsed = elapsed
+                    self._notify_completion(command, elapsed, False)
                     self._session_record_command(command, False)
                     return False
 
@@ -3512,6 +3582,7 @@ class CliaraShell:
                 self.last_exit_code = proc.returncode
                 success = proc.returncode == 0
                 elapsed = time.time() - start_time
+                self._last_command_elapsed = elapsed
                 self._notify_completion(command, elapsed, success)
                 self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
@@ -3526,6 +3597,8 @@ class CliaraShell:
                 pass
             print_error(f"[Error] {e}")
             self.last_exit_code = -1
+            elapsed = time.time() - start_time
+            self._last_command_elapsed = elapsed
             self._session_record_command(command, False)
             return False
 

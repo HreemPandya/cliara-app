@@ -46,7 +46,7 @@ class Config:
         "spinner_delay_seconds": 3,  # Show inline spinner after this many seconds (0 to disable)
         "clear_show_header": True,  # After clear/cls, show a minimal "Cliara ready" line
         "prompt_style": "cliara",
-        "theme": "monokai",  # monokai | dracula | nord | solarized | catppuccin
+        "theme": "dracula",  # dracula | monokai | nord | solarized | catppuccin | light
         "llm_provider": None,  # "openai" | "anthropic" | "ollama"
         "llm_api_key": None,  # Never persisted to disk — comes from env
         "llm_model": None,    # Global model override; None = provider default

@@ -134,6 +134,34 @@ def print_dim(msg: str):
     _cliara_console().print(msg, style="dim")
 
 
+def _print_safety_panel(safety, commands, level):
+    """Render safety warning as a Rich Panel (CRITICAL=red, DANGEROUS=orange, CAUTION=yellow)."""
+    from rich.panel import Panel
+
+    data = safety.get_warning_panel_data(commands, level)
+    if not data:
+        return
+    lvl, title, desc, prompt = data
+    reason = commands[0] if commands else ""
+    body = f"{desc}\n  Reason: {reason}" if reason else desc
+    body += "\n\nCommands:\n"
+    for cmd in commands:
+        body += f"  * {cmd}\n"
+    body += f"\n{prompt}"
+    if lvl == DangerLevel.CRITICAL:
+        border_style = "bold red"
+        title_str = f"{icons.DANGER}  {title}"
+    elif lvl == DangerLevel.DANGEROUS:
+        border_style = "bold orange1"
+        title_str = f"{icons.WARN}  {title}"
+    else:
+        border_style = "bold yellow"
+        title_str = f"{icons.WARN}  {title}"
+    _cliara_console().print(
+        Panel(body, title=title_str, border_style=border_style, padding=(0, 1))
+    )
+
+
 def _fmt_path(cwd: str, max_segments: int = 3) -> str:
     """
     Format the current working directory for the prompt.
@@ -342,7 +370,7 @@ class _LiveTimer:
     output.
     """
 
-    FRAMES = ("|", "/", "-", "\\")
+    FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
     def __init__(self, command: str, delay: float = 3.0, inline: bool = True):
         short = command if len(command) <= 30 else command[:27] + "..."
@@ -1083,7 +1111,12 @@ class CliaraShell:
             from prompt_toolkit.lexers import PygmentsLexer
             from prompt_toolkit.styles import merge_styles, Style as PTStyle
             from prompt_toolkit.styles.pygments import style_from_pygments_cls
-            from cliara.highlighting import ShellLexer, get_style_for_theme
+            from cliara.highlighting import ShellLexer, get_style_for_theme, list_themes
+
+            # ── Theme: always use a valid one (user's choice or default dracula) ──
+            theme_name = (self.config.get("theme") or "dracula").strip().lower()
+            if theme_name not in list_themes():
+                theme_name = "dracula"
 
             # ── Custom key bindings ──
             kb = KeyBindings()
@@ -1126,7 +1159,6 @@ class CliaraShell:
             for cmd in self.history.history:
                 pt_history.store_string(cmd)
 
-            theme_name = self.config.get("theme", "monokai")
             style_cls, prompt_style = get_style_for_theme(theme_name)
             style = merge_styles([
                 style_from_pygments_cls(style_cls),
@@ -1189,7 +1221,9 @@ class CliaraShell:
                         rprompt=self._get_right_prompt(),
                     ).strip()
                 else:
-                    # Plain fallback
+                    # Plain fallback: still apply theme to "cliara" via ANSI so a theme is always visible
+                    from cliara.highlighting import get_prompt_name_ansi
+                    pfx, suf = get_prompt_name_ansi(self.config.get("theme") or "dracula")
                     exit_indicator = ""
                     if self.last_exit_code != 0:
                         exit_indicator = f"X {self.last_exit_code} "
@@ -1212,9 +1246,9 @@ class CliaraShell:
                                 duration_hint = f" [{minutes}m{seconds:02d}s]"
 
                     if self.current_session:
-                        prompt = f"{exit_indicator}cliara [{self.current_session.name}] {cwd} {prompt_arrow}{duration_hint} "
+                        prompt = f"{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow}{duration_hint} "
                     else:
-                        prompt = f"{exit_indicator}cliara {cwd} {prompt_arrow}{duration_hint} "
+                        prompt = f"{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow}{duration_hint} "
                     user_input = input(prompt).strip()
 
                 if not user_input:
@@ -1479,18 +1513,15 @@ class CliaraShell:
                 print_error("[Error] Please provide a query before --save-as")
                 return
         
-        print_info(f"\n[Processing] {query}")
-        print_dim("Generating commands...\n")
-        
         # Build context
         context = {
             "cwd": str(Path.cwd()),
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash")
         }
-        
-        # Process with LLM (no streaming for ? queries — we show only the parsed explanation and commands)
-        commands, explanation, danger_level = self.nl_handler.process_query(query, context, stream_callback=None)
+        from rich.status import Status
+        with Status(f"[dim]Thinking about:[/dim] {query}", spinner="dots", console=_cliara_console()):
+            commands, explanation, danger_level = self.nl_handler.process_query(query, context, stream_callback=None)
         
         if not commands:
             print_error(f"[Error] {explanation}")
@@ -1518,7 +1549,7 @@ class CliaraShell:
         
         # Safety check with copy-to-clipboard option
         if danger_level != DangerLevel.SAFE:
-            print(self.safety.get_warning_message(commands, danger_level))
+            _print_safety_panel(self.safety, commands, danger_level)
         
         # Show interactive prompt with copy option
         import sys
@@ -1875,7 +1906,7 @@ class CliaraShell:
         # Safety check
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
-            print_warning(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
                 print_warning("[Cancelled]")
@@ -1953,7 +1984,7 @@ class CliaraShell:
         # Safety check
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
-            print_warning(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
                 print_warning("[Cancelled]")
@@ -2168,7 +2199,7 @@ class CliaraShell:
         # Safety check on the (possibly new) commands
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
-            print_warning(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
             if confirm not in ['yes', 'y']:
                 print_warning("[Cancelled]")
@@ -2356,7 +2387,7 @@ class CliaraShell:
         # ── Safety check (on resolved commands) ──────────────────────────
         level, dangerous = self.safety.check_commands(resolved_commands)
         if level != DangerLevel.SAFE:
-            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             prompt = self.safety.get_confirmation_prompt(level)
             response = input(prompt).strip()
             if not self.safety.validate_confirmation(response, level):
@@ -2506,7 +2537,7 @@ class CliaraShell:
         all_resolved = [cmd for cmds in chain_resolved for cmd in cmds]
         level, dangerous = self.safety.check_commands(all_resolved)
         if level != DangerLevel.SAFE:
-            print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+            _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             prompt = self.safety.get_confirmation_prompt(level)
             response = input(prompt).strip()
             if not self.safety.validate_confirmation(response, level):
@@ -2768,7 +2799,7 @@ class CliaraShell:
         """Show scrollable theme picker (up/down to select, Enter to apply) or set theme by name."""
         from cliara.highlighting import list_themes, get_style_for_theme
         themes = list_themes()
-        current = self.config.get("theme", "monokai")
+        current = self.config.get("theme") or "dracula"
         # If they passed a name, set directly
         if arg:
             name = arg.strip().lower()
@@ -2845,7 +2876,7 @@ class CliaraShell:
 
         def _fg(theme_name: str) -> str:
             """Return the plain ANSI fg color for a theme (strips 'bold')."""
-            ps = _THEMES.get(theme_name, _THEMES["monokai"])["prompt_style"]
+            ps = _THEMES.get(theme_name, _THEMES["dracula"])["prompt_style"]
             return ps["prompt-name"].replace("bold", "").strip()
 
         # ── Live list renderer ─────────────────────────────────────────
@@ -3296,9 +3327,7 @@ class CliaraShell:
                 # Safety check on the fix commands
                 level, dangerous = self.safety.check_commands(fix_commands)
                 if level != DangerLevel.SAFE:
-                    print(self.safety.get_warning_message(
-                        [cmd for cmd, _ in dangerous], level
-                    ))
+                    _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
                     prompt = self.safety.get_confirmation_prompt(level)
                     confirm = input(prompt).strip()
                     if not self.safety.validate_confirmation(confirm, level):
@@ -4850,7 +4879,7 @@ class CliaraShell:
             # Safety check first
             level, dangerous = self.safety.check_commands([command])
             if level != DangerLevel.SAFE:
-                print(self.safety.get_warning_message([cmd for cmd, _ in dangerous], level))
+                _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
                 prompt = self.safety.get_confirmation_prompt(level)
                 response = input(prompt).strip()
                 if not self.safety.validate_confirmation(response, level):
@@ -4870,102 +4899,102 @@ class CliaraShell:
 
         print_info("\n  Normal Commands")
         print_dim("  ─────────────────────────────────────")
-        print("  Just type any command — it passes through to your shell")
-        print("  Examples: ls, cd, git status, npm install\n")
+        print_dim("  Just type any command — it passes through to your shell")
+        print_dim("  Examples: ls, cd, git status, npm install\n")
 
         print_info("  Natural Language")
         print_dim("  ─────────────────────────────────────")
         if self.nl_handler.llm_enabled:
-            print(f"  {nl} <query>                Use natural language")
+            print_dim(f"  {nl} <query>                Use natural language")
         else:
-            print(f"  {nl} <query>                Use natural language (requires API key)")
-        print(f"  {nl} <query> --save-as <n>  Generate & save as macro")
+            print_dim(f"  {nl} <query>                Use natural language (requires API key)")
+        print_dim(f"  {nl} <query> --save-as <n>  Generate & save as macro")
         print_dim(f"  Example: {nl} kill process on port 3000\n")
 
         print_info("  Explain")
         print_dim("  ─────────────────────────────────────")
-        print("  explain <command>          Plain-English explanation of any command")
+        print_dim("  explain <command>          Plain-English explanation of any command")
         print_dim("  Example: explain git rebase -i HEAD~3\n")
 
         print_info("  Semantic History Search")
         print_dim("  ─────────────────────────────────────")
-        print(f"  {nl} find <what>             Search past commands by meaning")
-        print(f"  {nl} when did I ...          e.g. when did I fix the login bug")
-        print(f"  {nl} what did I run ...      e.g. what did I run to deploy last time")
+        print_dim(f"  {nl} find <what>             Search past commands by meaning")
+        print_dim(f"  {nl} when did I ...          e.g. when did I fix the login bug")
+        print_dim(f"  {nl} what did I run ...      e.g. what did I run to deploy last time")
         print_dim("  Requires LLM; uses stored summaries of your commands.\n")
 
         print_info("  Macros")
         print_dim("  ─────────────────────────────────────")
-        print("  macro add <name>           Create a macro")
-        print("  macro add <name> --nl      Create macro from plain English")
-        print("  macro edit <name>          Edit an existing macro")
-        print("  macro list                 List all macros")
-        print("  macro search <word>        Search macros")
-        print("  <macro-name>               Run a saved macro\n")
+        print_dim("  macro add <name>           Create a macro")
+        print_dim("  macro add <name> --nl      Create macro from plain English")
+        print_dim("  macro edit <name>          Edit an existing macro")
+        print_dim("  macro list                 List all macros")
+        print_dim("  macro search <word>        Search macros")
+        print_dim("  <macro-name>               Run a saved macro\n")
 
         print_info("  Quick Fix")
         print_dim("  ─────────────────────────────────────")
-        print("  When a command fails, Cliara automatically shows a fix hint:")
+        print_dim("  When a command fails, Cliara automatically shows a fix hint:")
         print_dim("    hint: try 'python3 script.py' (Tab to use)")
-        print("  Press Tab on an empty prompt to fill in the fix, then Enter.")
-        print(f"  {nl} fix                    Full interactive diagnosis\n")
+        print_dim("  Press Tab on an empty prompt to fill in the fix, then Enter.")
+        print_dim(f"  {nl} fix                    Full interactive diagnosis\n")
 
         print_info("  Smart Push")
         print_dim("  ─────────────────────────────────────")
-        print("  push                       Stage, auto-commit, and push")
-        print("  Detects branch, generates a conventional commit message")
-        print("  (feat:, fix:, docs:, …) from the diff. Accept, edit, or cancel.\n")
+        print_dim("  push                       Stage, auto-commit, and push")
+        print_dim("  Detects branch, generates a conventional commit message")
+        print_dim("  (feat:, fix:, docs:, …) from the diff. Accept, edit, or cancel.\n")
 
         print_info("  Task Sessions")
         print_dim("  ─────────────────────────────────────")
-        print("  session start <name> [ -- <intent>]   Start a task (name can be multi-word)")
-        print("  session resume <name>            Resume and see summary + next step")
-        print("  session end [note]               End current session")
-        print("  session list / show / note        List, show, or add notes")
+        print_dim("  session start <name> [ -- <intent>]   Start a task (name can be multi-word)")
+        print_dim("  session resume <name>            Resume and see summary + next step")
+        print_dim("  session end [note]               End current session")
+        print_dim("  session list / show / note        List, show, or add notes")
         print_dim("  Sessions persist across terminal closes — resume anytime.\n")
 
         print_info("  Smart Deploy")
         print_dim("  ─────────────────────────────────────")
-        print("  deploy                     Auto-detect project and deploy")
-        print("  deploy config              Show saved deploy config")
-        print("  deploy history             Show deploy history")
-        print("  deploy reset               Re-detect deploy target")
-        print("  Detects Vercel, Netlify, Fly.io, Docker, npm, PyPI, and more.")
-        print("  Remembers your config — second deploy is just 'deploy' + 'y'.\n")
+        print_dim("  deploy                     Auto-detect project and deploy")
+        print_dim("  deploy config              Show saved deploy config")
+        print_dim("  deploy history             Show deploy history")
+        print_dim("  deploy reset               Re-detect deploy target")
+        print_dim("  Detects Vercel, Netlify, Fly.io, Docker, npm, PyPI, and more.")
+        print_dim("  Remembers your config — second deploy is just 'deploy' + 'y'.\n")
 
         print_info("  Theme")
         print_dim("  ─────────────────────────────────────")
-        print("  theme                      List color themes and show current")
-        print("  theme <name>               Set theme (monokai, dracula, nord, solarized, catppuccin, light)")
-        print("  Stored in ~/.cliara/config.json — applies immediately.\n")
+        print_dim("  theme                      List color themes and show current")
+        print_dim("  theme <name>               Set theme (monokai, dracula, nord, solarized, catppuccin, light)")
+        print_dim("  Stored in ~/.cliara/config.json — applies immediately.\n")
 
         print_info("  Diff Preview")
         print_dim("  ─────────────────────────────────────")
-        print("  Destructive commands (rm, git checkout, git clean,")
-        print("  git reset) show exactly what will be affected first.")
+        print_dim("  Destructive commands (rm, git checkout, git clean,")
+        print_dim("  git reset) show exactly what will be affected first.")
         print_dim("  Example: rm *.log → shows each file and total size\n")
 
         print_info("  Cross-Platform Translation")
         print_dim("  ─────────────────────────────────────")
-        print("  If a command doesn't exist on your OS, Cliara suggests")
-        print("  the equivalent automatically.")
+        print_dim("  If a command doesn't exist on your OS, Cliara suggests")
+        print_dim("  the equivalent automatically.")
         print_dim("  Example: grep on Windows → Select-String (PowerShell)\n")
 
         print_info("  AI Provider Setup")
         print_dim("  ─────────────────────────────────────")
-        print("  use                        Show active provider and all available options")
-        print("  use <provider>             Switch provider live: use openai / use ollama / use groq")
-        print("  setup-llm                  Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)")
-        print("  setup-ollama               Set up a local Ollama model")
-        print("  cliara-login               Log in to the Cliara hosted AI gateway")
+        print_dim("  use                        Show active provider and all available options")
+        print_dim("  use <provider>             Switch provider live: use openai / use ollama / use groq")
+        print_dim("  setup-llm                  Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)")
+        print_dim("  setup-ollama               Set up a local Ollama model")
+        print_dim("  cliara-login               Log in to the Cliara hosted AI gateway")
         print_dim("  Free options: Groq (groq.com) · Gemini (aistudio.google.com) · Ollama (local)\n")
 
         print_info("  Other")
         print_dim("  ─────────────────────────────────────")
-        print("  help                       Show this help")
-        print("  history [N]                Show last N commands (default 20)")
-        print(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
-        print("  version                    Show Cliara version")
-        print("  exit / Ctrl+C              Quit Cliara")
+        print_dim("  help                       Show this help")
+        print_dim("  history [N]                Show last N commands (default 20)")
+        print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
+        print_dim("  version                    Show Cliara version")
+        print_dim("  exit / Ctrl+C              Quit Cliara")
 
         print_header("\n" + "=" * 60 + "\n")

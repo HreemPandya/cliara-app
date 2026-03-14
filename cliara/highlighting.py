@@ -178,20 +178,21 @@ THEMES = {
         },
     },
     "solarized": {
+        # Dark background: bright ANSI colors (widely supported)
         "styles": {
             Token.Text:        "",
-            Comment.Single:    "#586e75 italic",
-            String.Double:     "#859900",
-            String.Single:     "#859900",
-            String.Backtick:   "#859900",
-            Name.Variable:     "#b58900",
-            Name.Tag:          "#839496",
-            Operator:          "#2aa198",
-            Punctuation:       "#2aa198",
-            Number.Integer:    "#d33682",
+            Comment.Single:    "ansicyan italic",
+            String.Double:     "ansigreen",
+            String.Single:     "ansigreen",
+            String.Backtick:   "ansigreen",
+            Name.Variable:     "ansiyellow",
+            Name.Tag:          "ansibrightblack",
+            Operator:          "ansicyan",
+            Punctuation:       "ansicyan",
+            Number.Integer:    "ansimagenta",
         },
         "prompt_style": {
-            "prompt-name":  "ansiyellow bold",
+            "prompt-name":  "ansibrightred bold",   # Solarized orange
             "prompt-sep":   "ansibrightblack",
             "prompt-path":  "ansibrightwhite",
             "prompt-arrow": "ansibrightblack",
@@ -199,12 +200,12 @@ THEMES = {
             "prompt-exit-fail": "ansired bold",
         },
         "preview": {
-            "name":     "[bold yellow]",
+            "name":     "[bold bright_red]",
             "string":   "[green]",
             "flag":     "[bright_black]",
             "var":      "[yellow]",
             "op":       "[cyan]",
-            "num":      "[bright_magenta]",
+            "num":      "[magenta]",
         },
     },
     "catppuccin": {
@@ -238,52 +239,55 @@ THEMES = {
         },
     },
     "light": {
-        # Light mode: dark text for use on light terminal background.
+        # Light background: dark ANSI colors so text is readable (clearly different from solarized).
         "styles": {
             Token.Text:        "",
-            Comment.Single:    "#657b83 italic",
-            String.Double:     "#859900",
-            String.Single:     "#859900",
-            String.Backtick:   "#859900",
-            Name.Variable:     "#b58900",
-            Name.Tag:          "#586e75",
-            Operator:          "#268bd2",
-            Punctuation:       "#268bd2",
-            Number.Integer:    "#d33682",
+            Comment.Single:    "ansiblue italic",
+            String.Double:     "ansigreen",
+            String.Single:     "ansigreen",
+            String.Backtick:   "ansigreen",
+            Name.Variable:     "ansiyellow",
+            Name.Tag:          "ansiblue",
+            Operator:          "ansiblue",
+            Punctuation:       "ansiblue",
+            Number.Integer:    "ansimagenta",
         },
         "prompt_style": {
-            "prompt-name":  "ansired bold",
-            "prompt-sep":   "ansibrightblack",
+            "prompt-name":  "ansiblue bold",       # Dark blue on light (not red/orange)
+            "prompt-sep":   "ansiblack",
             "prompt-path":  "ansiblack",
-            "prompt-arrow": "ansired",
+            "prompt-arrow": "ansiblack",
             "prompt-exit-success": "ansigreen bold",
             "prompt-exit-fail": "ansired bold",
         },
         "preview": {
-            "name":     "[bold red]",
+            "name":     "[bold blue]",
             "string":   "[green]",
-            "flag":     "[bright_black]",
+            "flag":     "[blue]",
             "var":      "[yellow]",
             "op":       "[blue]",
-            "num":      "[bright_magenta]",
+            "num":      "[magenta]",
         },
     },
 }
 
 # Default prompt style (used when theme unknown)
-PROMPT_STYLE = THEMES["monokai"]["prompt_style"]
+PROMPT_STYLE = THEMES["dracula"]["prompt_style"]
+
+# Default theme when none set or invalid (always apply a theme)
+DEFAULT_THEME = "dracula"
 
 
 def get_style_for_theme(theme_name: str):
     """
     Return (PygmentsStyleClass, prompt_style_dict) for the given theme.
 
-    theme_name: one of monokai, dracula, nord, solarized, catppuccin, light.
-    Unknown names fall back to monokai.
+    theme_name: one of dracula, monokai, nord, solarized, catppuccin, light.
+    Unknown or missing names fall back to DEFAULT_THEME (dracula).
     """
     name = (theme_name or "").strip().lower()
     if name not in THEMES:
-        name = "monokai"
+        name = DEFAULT_THEME
     data = THEMES[name]
     style_cls = type(
         "CliaraThemeStyle",
@@ -300,7 +304,7 @@ def get_theme_preview_markup(theme_name: str) -> str:
     """
     name = (theme_name or "").strip().lower()
     if name not in THEMES:
-        name = "monokai"
+        name = DEFAULT_THEME
     p = THEMES[name]["preview"]
     reset = "[/]"
 
@@ -321,6 +325,33 @@ def get_theme_preview_markup(theme_name: str) -> str:
 def list_themes():
     """Return list of available theme names."""
     return list(THEMES.keys())
+
+
+def get_prompt_name_ansi(theme_name: str) -> tuple:
+    """
+    Return (prefix, suffix) ANSI escape sequences for the prompt name (e.g. 'cliara').
+    Used when prompt_toolkit is unavailable so the prompt name is still themed.
+    """
+    name = (theme_name or "").strip().lower()
+    if name not in THEMES:
+        name = DEFAULT_THEME
+    # Map theme prompt-name style to raw ANSI: (bold, fg_code). 31=red, 32=green, 33=yellow, 34=blue, 35=magenta, 36=cyan.
+    # ANSI fg: 31 red, 32 green, 33 yellow, 34 blue, 35 magenta, 36 cyan, 91 bright red (orange)
+    _prompt_ansi = {
+        "monokai": (True, 36),    # cyan bold
+        "dracula": (True, 35),    # magenta bold
+        "nord": (True, 34),       # blue bold
+        "solarized": (True, 91),  # bright red / orange
+        "catppuccin": (True, 32), # green bold
+        "light": (True, 34),      # blue bold (dark on light bg; distinct from solarized)
+    }
+    bold, fg = _prompt_ansi.get(name, (True, 35))
+    # Standard ANSI: 30-37 normal, 90-97 bright. 256-color: 0-255 via 38;5;n
+    if (30 <= fg <= 37) or (90 <= fg <= 97):
+        prefix = f"\033[1;{fg}m" if bold else f"\033[{fg}m"
+    else:
+        prefix = f"\033[1;38;5;{fg}m" if bold else f"\033[38;5;{fg}m"
+    return (prefix, "\033[0m")
 
 
 # Backward compatibility: default style class (Monokai)

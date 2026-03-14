@@ -178,13 +178,38 @@ class SafetyChecker:
         
         return msg
     
+    def get_warning_panel_data(
+        self, commands: List[str], level: Optional[DangerLevel] = None
+    ) -> Optional[Tuple[DangerLevel, str, str, str]]:
+        """
+        Return (level, title, description, confirmation_prompt) for Rich Panel rendering.
+        Returns None if level is SAFE.
+        """
+        if not level:
+            level, _ = self.check_commands(commands)
+        if level == DangerLevel.CRITICAL:
+            title = "CRITICAL"
+            desc = "These commands could DESTROY your system or data!"
+            prompt = "Type  I UNDERSTAND  to proceed, or press Enter to cancel."
+        elif level == DangerLevel.DANGEROUS:
+            title = "DANGEROUS"
+            desc = "These commands could cause data loss or system instability."
+            prompt = "Type  RUN  to proceed, or press Enter to cancel."
+        elif level == DangerLevel.CAUTION:
+            title = "CAUTION"
+            desc = "These commands might have unintended side effects."
+            prompt = "Continue? (y/n) or press Enter to cancel."
+        else:
+            return None
+        return (level, title, desc, prompt)
+
     def get_confirmation_prompt(self, level: DangerLevel) -> str:
         """
         Get appropriate confirmation prompt for danger level.
-        
+
         Args:
             level: Danger level
-        
+
         Returns:
             Confirmation prompt string
         """

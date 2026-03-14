@@ -254,14 +254,20 @@ class Config:
         """Load environment variables into config.
 
         Provider priority (first match wins):
-          0. CLIARA_TOKEN — hosted Cliara gateway (future SaaS)
+          0. CLIARA_TOKEN env var — explicit override to force the gateway
           1. Ollama  — local, no key needed
-          2. Anthropic
-          3. Groq    — free tier, no credit card
-          4. Gemini  — free tier via Google account
-          5. OpenAI
+          2. Anthropic  (BYOK)
+          3. Groq        (BYOK)
+          4. Gemini      (BYOK)
+          5. OpenAI      (BYOK)
+          6. ~/.cliara/token.json — set by `cliara login`; used when no BYOK key
+             is configured so logged-in users get the gateway automatically
+
+        BYOK keys (2-5) intentionally rank above the token file so that a
+        power user who sets OPENAI_API_KEY bypasses the cloud proxy without
+        any extra configuration.
         """
-        # Cliara hosted gateway — highest priority when configured
+        # Explicit env var override always wins — useful for CI or forcing the gateway
         cliara_token = os.getenv("CLIARA_TOKEN")
         if cliara_token:
             self.settings["llm_provider"] = "cliara"
@@ -299,9 +305,32 @@ class Config:
         if openai_key:
             self.settings["llm_provider"] = "openai"
             self.settings["llm_api_key"] = openai_key
+            return
+
+        # No BYOK key found — check whether the user has logged in via
+        # `cliara login`.  This is intentionally last so BYOK always wins.
+        self._try_load_cliara_token()
+
+    def _try_load_cliara_token(self) -> None:
+        """
+        Attempt to load a stored Cliara Cloud token from ~/.cliara/token.json.
+
+        On success, sets provider to "cliara" with the token as the API key.
+        Silently does nothing on any failure so startup is never blocked.
+        """
+        try:
+            from cliara.auth import get_valid_token
+            token = get_valid_token()
+            if token:
+                self.settings["llm_provider"] = "cliara"
+                self.settings["llm_api_key"] = token
+        except Exception:
+            # Import error, file corruption, network error during refresh, etc.
+            # Never crash startup over a missing/bad token file.
+            pass
     
     def get_llm_api_key(self) -> Optional[str]:
-        """Get LLM API key from environment or config."""
+        """Get LLM API key from environment or config (including token file)."""
         if os.getenv("CLIARA_TOKEN"):
             return os.getenv("CLIARA_TOKEN")
         if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
@@ -310,10 +339,11 @@ class Config:
             val = os.getenv(env_var)
             if val:
                 return val
+        # Fall back to what _load_env_vars resolved (may be a Cliara token)
         return self.settings.get("llm_api_key")
 
     def get_llm_provider(self) -> Optional[str]:
-        """Get LLM provider name."""
+        """Get LLM provider name (including Cliara Cloud from token file)."""
         if os.getenv("CLIARA_TOKEN"):
             return "cliara"
         if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
@@ -326,6 +356,7 @@ class Config:
             return "gemini"
         if os.getenv("OPENAI_API_KEY"):
             return "openai"
+        # Fall back to what _load_env_vars resolved (may be "cliara" from token file)
         return self.settings.get("llm_provider")
 
     def get_ollama_base_url(self) -> str:

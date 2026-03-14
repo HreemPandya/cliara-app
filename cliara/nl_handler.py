@@ -30,10 +30,11 @@ _PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
 _OPENAI_COMPAT_PROVIDERS = frozenset({"openai", "ollama", "groq", "gemini", "cliara"})
 
 # Base URLs for OpenAI-compatible cloud providers (not ollama — that's dynamic)
+# The "cliara" URL is overridable via CLIARA_GATEWAY_URL for dev/staging environments.
 _PROVIDER_BASE_URLS: Dict[str, str] = {
     "groq":   "https://api.groq.com/openai/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "cliara": "https://api.cliara.dev/v1",  # Hosted Cliara gateway (future)
+    "cliara": os.getenv("CLIARA_GATEWAY_URL", "https://api.cliara.dev/v1"),
 }
 
 # Agents whose output is plain text and can be streamed token-by-token to the

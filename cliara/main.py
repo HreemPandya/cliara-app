@@ -12,6 +12,56 @@ from cliara.config import Config
 from cliara.shell import CliaraShell
 
 
+def _run_login():
+    """Run OAuth login flow (standalone, no REPL)."""
+    from cliara.auth import login
+    from cliara.shell import print_success, print_error, print_warning, print_dim
+
+    print()
+    print_dim("  Cliara Login — Zero-Friction Cloud Access")
+    print_dim("  ─────────────────────────────────────────")
+    print_dim("  Free tier: 150 queries/month · no credit card · GPT-4o-mini")
+    print()
+
+    try:
+        token, email = login()
+        print()
+        user_label = f" ({email})" if email else ""
+        print_success(f"  Logged in to Cliara Cloud{user_label}")
+        print_success("  Free tier · 150 queries/month · resets monthly")
+        print_dim("  Token saved to ~/.cliara/token.json — auto-loaded on every startup.")
+        print_dim("  Run 'cliara' to start the shell, or 'cliara logout' to sign out.")
+    except KeyboardInterrupt:
+        print()
+        print_warning("  Login cancelled.")
+    except RuntimeError as exc:
+        print()
+        print_error(f"  [Error] {exc}")
+        print_dim("  Try 'setup-llm' inside cliara for BYOK options (Groq/Gemini are free).")
+        sys.exit(1)
+
+
+def _run_logout():
+    """Clear stored token (standalone, no REPL)."""
+    from cliara.auth import logout, load_token
+    from cliara.icons import print_success, print_warning, print_dim
+
+    token_data = load_token()
+    if token_data is None:
+        print()
+        print_warning("  Not currently logged in to Cliara Cloud.")
+        print_dim("  Run 'cliara login' to sign in.")
+        return
+
+    email = token_data.get("email", "")
+    logout()
+    print()
+    label = f" ({email})" if email else ""
+    print_success(f"  Logged out of Cliara Cloud{label}.")
+    print_dim("  Token deleted from ~/.cliara/token.json.")
+    print_dim("  Run 'cliara login' to sign in again.")
+
+
 def main():
     """Main entry point for Cliara."""
     parser = argparse.ArgumentParser(
@@ -20,6 +70,8 @@ def main():
         epilog="""
 Examples:
   cliara                    Start interactive Cliara shell
+  cliara login              Log in to Cliara Cloud (GitHub OAuth, no API key needed)
+  cliara logout             Sign out and clear stored token
   cliara -c "git status"    Run a single command through Cliara's gate
   cliara -c "rm -rf dist"   Risky commands still require approval
   cliara --config-dir ~/my-config  Use custom config directory
@@ -69,8 +121,20 @@ Once in the shell:
         action='store_true',
         help='Always show full startup banner (quick tips)'
     )
+
+    subparsers = parser.add_subparsers(dest='command', help='Subcommands')
+    subparsers.add_parser('login', help='Log in to Cliara Cloud (GitHub OAuth)')
+    subparsers.add_parser('logout', help='Sign out and clear stored Cliara Cloud token')
     
     args = parser.parse_args()
+
+    # Standalone login/logout — run OAuth or clear token, then exit (no REPL)
+    if args.command == 'login':
+        _run_login()
+        sys.exit(0)
+    if args.command == 'logout':
+        _run_logout()
+        sys.exit(0)
     
     # Set debug mode
     if args.debug:

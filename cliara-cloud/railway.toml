@@ -1,0 +1,11 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Must run via shell so $PORT is expanded; Railway runs startCommand without a shell otherwise
+startCommand = "sh -c \"uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}\""
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

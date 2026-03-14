@@ -41,6 +41,9 @@ Thumbs.db
 ~/.cliara/
 data/macros.json
 
+# Documentation
+docs/
+
 # Old documentation (archived)
 ARCHITECTURE.md
 CHANGELOG.md
@@ -88,6 +91,7 @@ PHASE2_COMPLETE.md
 CLIARA_UPGRADE_ROADMAP.md
 CLIARA_NEXT_FRONTIER.md
 CLIARA_POLISH.md
+CLIARA_CLOUD_DEPLOYMENT.md
 PUBLISH.md
 
 # Temporary files

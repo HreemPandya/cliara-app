@@ -1552,9 +1552,13 @@ class CliaraShell:
             self._handle_setup_llm()
             return
 
-        # Cliara hosted gateway login
-        if user_input.lower().strip() == 'cliara-login':
+        # Cliara Cloud login / logout
+        if user_input.lower().strip() in ('cliara-login', 'cliara login'):
             self._handle_cliara_login()
+            return
+
+        if user_input.lower().strip() in ('cliara-logout', 'cliara logout'):
+            self._handle_cliara_logout()
             return
 
         # Live provider switch: "use openai" / "use ollama" / "use groq" / "use"
@@ -2923,31 +2927,79 @@ class CliaraShell:
             print_error(f"[Error] Failed to connect to {target}.")
 
     def _handle_cliara_login(self):
-        """Authenticate with the Cliara hosted gateway using a CLIARA_TOKEN."""
+        """Authenticate with the Cliara Cloud gateway via GitHub OAuth (PKCE)."""
         print()
-        print_info("  Cliara Login — Hosted AI Gateway")
-        print_dim("  ─────────────────────────────────────")
-        print("  Get your free token at: https://cliara.dev/signup")
+        print_info("  Cliara Login — Zero-Friction Cloud Access")
+        print_dim("  ─────────────────────────────────────────")
+        print_dim("  Free tier: 150 queries/month · no credit card · GPT-4o-mini")
         print()
+
+        from cliara import auth as _auth
         try:
-            import getpass
-            token = getpass.getpass("  Paste your Cliara token: ").strip()
-        except (EOFError, KeyboardInterrupt):
+            result = _auth.login()
+        except KeyboardInterrupt:
             print()
+            print_warning("  Login cancelled.")
             return
-        if not token:
-            print_warning("  No token entered.")
+        except RuntimeError as exc:
+            print()
+            print_error(f"  [Error] {exc}")
+            print_dim("  Try 'setup-llm' for BYOK options (Groq/Gemini are free).")
             return
-        from cliara.setup_wizard import _write_env_var, _apply_env_and_reinit, _mask_key
-        env_path = _write_env_var("CLIARA_TOKEN", token)
-        ok = _apply_env_and_reinit(self, "cliara", "CLIARA_TOKEN", token)
+
+        # login() returns (access_token, email)
+        if isinstance(result, tuple):
+            token, email = result
+        else:
+            token, email = result, ""
+
+        # Hot-swap the LLM client to start using the gateway immediately,
+        # without requiring the user to restart Cliara.
+        ok = self.nl_handler.initialize_llm("cliara", token)
+        if ok:
+            self.config.settings["llm_provider"] = "cliara"
+            self.config.settings["llm_api_key"] = token
+
         print()
         if ok:
-            print_success(f"  [OK] Cliara gateway connected  (token: {_mask_key(token)})")
-            print_success(f"  [OK] Token saved to {env_path}")
+            user_label = f"  ({email})" if email else ""
+            print_success(f"  Logged in to Cliara Cloud{user_label}")
+            print_success("  Free tier · 150 queries/month · resets monthly")
+            print_dim("  Token saved to ~/.cliara/token.json — auto-loaded on every startup.")
+            print_dim("  Run 'cliara logout' to sign out.")
         else:
-            print_error("  [Error] Could not connect to the Cliara gateway.")
-            print_dim("  Check your token at https://cliara.dev or try 'setup-llm' for free local options.")
+            print_warning("  Logged in but could not connect to the gateway right now.")
+            print_dim("  Your token is saved — it will be used automatically on the next start.")
+
+    def _handle_cliara_logout(self):
+        """Sign out of Cliara Cloud and clear the stored token."""
+        from cliara import auth as _auth
+
+        token_data = _auth.load_token()
+        if token_data is None:
+            print()
+            print_warning("  Not currently logged in to Cliara Cloud.")
+            print_dim("  Run 'cliara login' to sign in.")
+            return
+
+        email = token_data.get("email", "")
+        _auth.logout()
+
+        print()
+        label = f" ({email})" if email else ""
+        print_success(f"  Logged out of Cliara Cloud{label}.")
+        print_dim("  Token deleted from ~/.cliara/token.json.")
+        print_dim("  Run 'cliara login' to sign in again, or 'setup-llm' to configure a BYOK provider.")
+
+        # If we were using the cliara gateway, clear it out so the REPL
+        # doesn't keep trying to call a gateway with no valid credentials.
+        if self.nl_handler.provider == "cliara":
+            self.nl_handler.llm_enabled = False
+            self.nl_handler.llm_client = None
+            self.nl_handler.provider = None
+            self.config.settings["llm_provider"] = None
+            self.config.settings["llm_api_key"] = None
+            print_dim("  LLM disabled. Run 'setup-llm' to configure a provider.")
 
     def _handle_theme_command(self, arg: str):
         """Show scrollable theme picker (up/down to select, Enter to apply) or set theme by name."""
@@ -4977,7 +5029,8 @@ class CliaraShell:
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
         "exit", "quit", "q", "help", "version", "last", "doctor", "explain", "lint", "push", "session", "deploy",
-        "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm", "cliara-login", "use",
+        "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm",
+        "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",
     })
 
     def _check_macro_name_conflict(self, name: str) -> bool:
@@ -5338,7 +5391,8 @@ class CliaraShell:
         print_dim("  use <provider>             Switch provider live: use openai / use ollama / use groq")
         print_dim("  setup-llm                  Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)")
         print_dim("  setup-ollama               Set up a local Ollama model")
-        print_dim("  cliara-login               Log in to the Cliara hosted AI gateway")
+        print_dim("  cliara login               Log in to Cliara Cloud (GitHub OAuth, free tier)")
+        print_dim("  cliara logout              Sign out and clear stored token")
         print_dim("  Free options: Groq (groq.com) · Gemini (aistudio.google.com) · Ollama (local)\n")
 
         print_info("  Other")

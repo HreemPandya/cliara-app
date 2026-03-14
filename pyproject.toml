@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliara"
-version = "0.3.2"
+version = "0.4.0"
 description = "An AI-powered shell that understands natural language and macros"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -44,6 +44,7 @@ dev = [
 ai = [
     "openai>=1.0.0",
     "anthropic>=0.8.0",
+    "httpx>=0.25,<0.28",  # Pin: httpx 0.28+ breaks openai (proxies API change)
 ]
 postgres = [
     "psycopg2-binary>=2.9.0",

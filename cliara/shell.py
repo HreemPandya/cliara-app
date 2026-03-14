@@ -2803,8 +2803,10 @@ class CliaraShell:
                     except ValueError:
                         val = raw_val
 
+            old_val = self.config.get(key)
             self.config.set(key, val)
-            print_success(f"[Cliara] {key} = {val!r}  (saved)")
+            old_str = repr(old_val) if old_val is not None else "(not set)"
+            print_success(f"  {key}: {old_str} → {val!r}  {icons.OK}")
 
             # Live-apply a small set of settings without restart
             if key == "llm_model" and self.nl_handler.llm_enabled:

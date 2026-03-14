@@ -14,6 +14,7 @@ import shlex
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List, Tuple, Union
 from pathlib import Path
 
@@ -482,14 +483,21 @@ class _LiveTimer:
 
 class CommandHistory:
     """Track command history with on-disk persistence and readline support."""
-    
+
+    # Type for (exit_code, timestamp) per entry; None means unknown (e.g. before meta was added)
+    _Meta = Tuple[Optional[int], Optional[float]]
+
     def __init__(self, max_size: int = 1000, history_file: Optional[Path] = None):
         self.history: List[str] = []
+        self.exit_meta: List["CommandHistory._Meta"] = []  # (exit_code, timestamp) per entry
         self.max_size = max_size
         self.last_commands: List[str] = []  # Commands from last execution
         self.history_file: Optional[Path] = history_file
+        self._meta_file: Optional[Path] = (
+            (history_file.parent / "history_meta.json") if history_file else None
+        )
         self._readline = None  # Will be set during setup_readline()
-        
+
         # Load persisted history from disk
         if self.history_file:
             self._load_from_file()
@@ -543,6 +551,48 @@ class CommandHistory:
         except Exception:
             # Corrupt / unreadable file – start fresh
             self.history = []
+        self._load_meta()
+
+    def _load_meta(self):
+        """Load exit code and timestamp meta; must match length of history."""
+        self.exit_meta = [(None, None)] * len(self.history)
+        if not self._meta_file or not self._meta_file.exists():
+            return
+        try:
+            import json
+            with open(self._meta_file, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, list):
+                return
+            # Meta is stored same order as history (oldest first); take last len(history)
+            loaded = []
+            for item in raw[-len(self.history):]:
+                if isinstance(item, dict):
+                    e, t = item.get("e"), item.get("t")
+                    loaded.append((
+                        int(e) if e is not None else None,
+                        float(t) if t is not None else None,
+                    ))
+                else:
+                    loaded.append((None, None))
+            # Align: pad at front if we have fewer meta than history
+            pad = len(self.history) - len(loaded)
+            self.exit_meta = [(None, None)] * max(0, pad) + loaded
+        except Exception:
+            self.exit_meta = [(None, None)] * len(self.history)
+
+    def _save_meta(self):
+        """Persist exit_meta to history_meta.json (last max_size entries)."""
+        if not self._meta_file or len(self.exit_meta) != len(self.history):
+            return
+        try:
+            self._meta_file.parent.mkdir(parents=True, exist_ok=True)
+            data = [{"e": e, "t": t} for e, t in self.exit_meta]
+            import json
+            with open(self._meta_file, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
     
     def _append_to_file(self, command: str):
         """Append a single command to the on-disk history file."""
@@ -575,20 +625,43 @@ class CommandHistory:
     def add(self, command: str):
         """Add command to history (memory + disk + readline)."""
         self.history.append(command)
+        self.exit_meta.append((None, None))
         if len(self.history) > self.max_size:
             self.history.pop(0)
-        
+            self.exit_meta.pop(0)
+
         # Persist to disk
         self._append_to_file(command)
         self._trim_file()
-        
+        self._save_meta()
+
         # Push into readline buffer so arrow-up sees it immediately
         if self._readline:
             try:
                 self._readline.add_history(command)
             except Exception:
                 pass
-    
+
+    def set_last_exit_ts(self, exit_code: int, timestamp: float):
+        """Set exit code and timestamp for the most recently added command."""
+        if not self.exit_meta:
+            return
+        self.exit_meta[-1] = (exit_code, timestamp)
+        self._save_meta()
+
+    def get_recent_with_meta(
+        self, n: int
+    ) -> List[Tuple[str, Optional[int], Optional[float]]]:
+        """Get last n commands with (exit_code, timestamp); (None, None) if unknown."""
+        commands = self.history[-n:] if n < len(self.history) else self.history.copy()
+        start = len(self.history) - len(commands)
+        result = []
+        for i, cmd in enumerate(commands):
+            idx = start + i
+            meta = self.exit_meta[idx] if idx < len(self.exit_meta) else (None, None)
+            result.append((cmd, meta[0], meta[1]))
+        return result
+
     def set_last_execution(self, commands: List[str]):
         """Store commands from last execution."""
         self.last_commands = commands.copy()
@@ -600,6 +673,10 @@ class CommandHistory:
     def get_recent(self, n: int = 10) -> List[str]:
         """Get n most recent commands."""
         return self.history[-n:] if n < len(self.history) else self.history.copy()
+
+    def __len__(self) -> int:
+        """Number of commands in history (so len(shell.history) works)."""
+        return len(self.history)
 
 
 class CliaraShell:
@@ -1341,6 +1418,10 @@ class CliaraShell:
         """
         # Any new input clears a pending fix suggestion
         self._pending_fix = None
+
+        # Record every command (built-in and shell) so history shows push, doctor, macros, etc.
+        if user_input.strip():
+            self.history.add(user_input.strip())
 
         # --- @run bypass: skip the Copilot Gate for this command ---
         if user_input.startswith("@run "):
@@ -3577,8 +3658,7 @@ class CliaraShell:
         timer = None
 
         try:
-            # Add to history
-            self.history.add(command)
+            # History already added in handle_input; only track execution for macros/session
             self.history.set_last_execution([command])
             self._enqueue_semantic_add(command, str(Path.cwd()), None)
 
@@ -3629,6 +3709,7 @@ class CliaraShell:
                 self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
                     self._regression_save_success(command, elapsed)
+                self.history.set_last_exit_ts(self.last_exit_code, start_time)
                 return success
             else:
                 # ── Streaming mode: stdout AND stderr piped ──
@@ -3728,6 +3809,7 @@ class CliaraShell:
                     self._last_command_elapsed = elapsed
                     self._notify_completion(command, elapsed, False)
                     self._session_record_command(command, False)
+                    self.history.set_last_exit_ts(self.last_exit_code, start_time)
                     return False
 
                 self.last_stderr = "".join(stderr_lines)
@@ -3739,6 +3821,7 @@ class CliaraShell:
                 self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
                     self._regression_save_success(command, elapsed)
+                self.history.set_last_exit_ts(self.last_exit_code, start_time)
                 return success
 
         except Exception as e:
@@ -3752,6 +3835,7 @@ class CliaraShell:
             elapsed = time.time() - start_time
             self._last_command_elapsed = elapsed
             self._session_record_command(command, False)
+            self.history.set_last_exit_ts(self.last_exit_code, start_time)
             return False
 
     def _session_record_command(self, command: str, success: bool):
@@ -4920,10 +5004,26 @@ class CliaraShell:
             sys.stdout.flush()
         return callback
 
+    def _format_history_ts(self, ts: Optional[float]) -> str:
+        """Format timestamp for history: 'today 14:32', 'yesterday 14:32', or 'M/D HH:MM'."""
+        if ts is None:
+            return ""
+        try:
+            dt = datetime.fromtimestamp(ts)
+            now = datetime.now()
+            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if dt >= today:
+                return dt.strftime("today %H:%M")
+            if dt >= today - timedelta(days=1):
+                return dt.strftime("yesterday %H:%M")
+            return dt.strftime("%-m/%-d %H:%M") if platform.system() != "Windows" else dt.strftime("%#m/%#d %H:%M")
+        except Exception:
+            return ""
+
     def handle_history(self, arg: str = ""):
         """
-        Show recent command history. Usage: history [N]
-        Default: last 20 commands.
+        Show recent command history with exit codes, timestamps, and syntax highlighting.
+        Usage: history [N]. Default: last 20 commands.
         """
         default_n = 20
         max_n = min(500, self.config.get("history_size", 1000))
@@ -4936,13 +5036,47 @@ class CliaraShell:
                 print_error("[Error] history expects an optional number")
                 print_dim("Usage: history   or   history 10")
                 return
-        commands = self.history.get_recent(n)
-        if not commands:
+        rows = self.history.get_recent_with_meta(n)
+        if not rows:
             print_dim("No command history yet.")
             return
-        print_info(f"\nLast {len(commands)} command(s):\n")
-        for i, cmd in enumerate(reversed(commands), 1):
-            print(f"  {i:4}  {cmd}")
+        # Build colorized table: index, ✓/✗, command (syntax-highlighted), timestamp, [exit N]
+        from rich.table import Table
+        from rich.syntax import Syntax
+        from cliara.highlighting import ShellLexer
+
+        # Use Pygments theme by name so Rich gets a full Style (with style_for_token)
+        theme_name = (self.config.get("theme") or "dracula").strip().lower()
+        _pygments_theme_map = {
+            "solarized": "solarized-dark",
+            "light": "solarized-light",
+            "nord": "dracula",
+            "catppuccin": "dracula",
+        }
+        pygments_theme = _pygments_theme_map.get(theme_name, theme_name)
+        console = _cliara_console()
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column(style="dim", width=5)   # index
+        table.add_column(style="dim", width=2)   # ✓/✗
+        table.add_column(min_width=20)           # command
+        table.add_column(style="dim", justify="right", width=18)  # timestamp
+        table.add_column(style="dim", width=10) # [exit N] for failures
+
+        # Show 1 = most recent, 2 = second most recent, ... (clearer than global index)
+        for i, (cmd, exit_code, ts) in enumerate(reversed(rows), 1):
+            num_str = f"  {i}"
+            if exit_code == 0:
+                icon = f"[dim green]{icons.OK}[/]"
+            elif exit_code is not None:
+                icon = f"[dim red]{icons.FAIL}[/]"
+            else:
+                icon = " "
+            syntax = Syntax(cmd, lexer=ShellLexer(), theme=pygments_theme)
+            ts_str = self._format_history_ts(ts)
+            exit_str = f"[red][exit {exit_code}][/]" if (exit_code is not None and exit_code != 0) else ""
+            table.add_row(num_str, icon, syntax, ts_str, exit_str)
+        print_info(f"\nLast {len(rows)} command(s):\n")
+        console.print(table)
         print()
 
     def handle_explain(self, command: str):

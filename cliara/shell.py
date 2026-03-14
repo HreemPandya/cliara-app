@@ -1376,10 +1376,10 @@ class CliaraShell:
                 self.handle_input(user_input)
 
             except KeyboardInterrupt:
-                print("\nGoodbye!")
+                self._print_exit_message()
                 break
             except EOFError:
-                print("\nGoodbye!")
+                self._print_exit_message()
                 break
             except Exception as e:
                 print_error(f"[Error] {e}")
@@ -1446,7 +1446,7 @@ class CliaraShell:
 
         # Check for exit commands
         if user_input.lower() in ['exit', 'quit', 'q']:
-            print("Goodbye!")
+            self._print_exit_message()
             self.running = False
             return
         
@@ -1585,7 +1585,7 @@ class CliaraShell:
         if user_input.lower() in ('clear', 'cls'):
             os.system('cls' if platform.system() == 'Windows' else 'clear')
             if self.config.get('clear_show_header', True):
-                print_dim("Cliara ready. Type 'help' for commands.")
+                self._print_clear_status_line()
             return
 
         # Diff preview: show exactly what destructive commands will affect
@@ -5019,6 +5019,39 @@ class CliaraShell:
             return dt.strftime("%-m/%-d %H:%M") if platform.system() != "Windows" else dt.strftime("%#m/%#d %H:%M")
         except Exception:
             return ""
+
+    def _print_clear_status_line(self):
+        """After clear/cls, show a contextual one-liner: version, LLM, path, session or macros + hint."""
+        from cliara import __version__
+        parts = [f"{icons.INFO} cliara {__version__}"]
+        if self.nl_handler.llm_enabled:
+            parts.append(f"{self.nl_handler.provider} ready")
+        else:
+            parts.append("no LLM")
+        cwd = _fmt_path(str(Path.cwd()))
+        parts.append(cwd)
+        if self.current_session:
+            parts.append(f"session: {self.current_session.name}")
+        else:
+            try:
+                n = self.macros.count()
+                parts.append(f"{n} macros")
+            except Exception:
+                parts.append("macros")
+            nl = self.config.get("nl_prefix", "?")
+            parts.append(f"{nl} to ask, help for all commands")
+        print_dim("  " + "  ·  ".join(parts))
+
+    def _print_exit_message(self):
+        """Styled exit message: 2 lines, plus session resume hint if a session is active."""
+        console = _cliara_console()
+        console.print()
+        console.print("[dim]Session ended. See you next time.[/dim]")
+        if self.current_session:
+            console.print(
+                f"[dim]Session '{self.current_session.name}' is saved — "
+                f"resume with 'session resume {self.current_session.name}'[/dim]"
+            )
 
     def handle_history(self, arg: str = ""):
         """

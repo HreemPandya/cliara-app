@@ -892,8 +892,8 @@ class CliaraShell:
         tip = random.choice(self._STARTUP_TIPS)
         return tip.replace("{nl}", nl)
 
-    def print_banner(self):
-        """Print welcome banner as a Rich Panel."""
+    def _print_full_banner(self):
+        """Print the full quick-tips banner (Rich Panel). Used at startup when appropriate and by the 'tips' command."""
         from cliara import __version__
         from rich.panel import Panel
         nl = self.config.get('nl_prefix', '?')
@@ -923,6 +923,7 @@ class CliaraShell:
             "  • help                    Show all commands",
             "  • version                 Show Cliara version",
             "  • theme [name]            List or set color theme (e.g. dracula, nord)",
+            "  • tips                    Show this quick-tips panel anytime",
             "  • exit                    Quit Cliara",
         ])
         lines.extend([
@@ -933,6 +934,38 @@ class CliaraShell:
         panel = Panel(content, title=f"Cliara {__version__} — AI-Powered Shell", border_style="cyan")
         _cliara_console().print(panel)
         _cliara_console().print()
+
+    def print_banner(self, force_full: bool = False):
+        """
+        Print welcome: full quick-tips panel or a compact one-liner.
+        After launch #3, show compact unless full was shown today or --verbose.
+        """
+        from datetime import date
+        launch_count = int(self.config.get("launch_count") or 0) + 1
+        self.config.settings["launch_count"] = launch_count
+        today = date.today().isoformat()
+        last_banner = self.config.get("last_banner_date")
+
+        if force_full or launch_count <= 3 or last_banner != today:
+            self._print_full_banner()
+            self.config.settings["last_banner_date"] = today
+            self.config.save()
+            return
+        # Compact one-liner
+        from cliara import __version__
+        parts = [f"cliara {__version__}"]
+        if self.nl_handler.llm_enabled:
+            parts.append(f" {self.nl_handler.provider} (ready)")
+        else:
+            parts.append(" LLM not configured")
+        n_macros = len(self.macros.list_all()) if hasattr(self.macros, "list_all") else 0
+        parts.append(f" · {n_macros} macros")
+        if self.current_session:
+            parts.append(f" · session: {self.current_session.name}")
+        parts.append("Type help or tips")
+        print_dim("  " + " · ".join(parts))
+        print_dim("")
+        self.config.save()
     
     # ------------------------------------------------------------------
     # Highlighted prompt (prompt_toolkit + Pygments)
@@ -1178,9 +1211,9 @@ class CliaraShell:
     # ------------------------------------------------------------------
     # Main REPL
     # ------------------------------------------------------------------
-    def run(self):
-        """Main shell loop."""
-        self.print_banner()
+    def run(self, verbose_banner: bool = False):
+        """Main shell loop. Set verbose_banner=True to always show full quick-tips panel (e.g. cliara --verbose)."""
+        self.print_banner(force_full=verbose_banner)
 
         # Try to set up the highlighted prompt; fall back to plain input
         self._prompt_session = self._create_prompt_session()
@@ -1336,6 +1369,11 @@ class CliaraShell:
         if user_input.lower() == 'version':
             from cliara import __version__
             print_info(f"Cliara {__version__}")
+            return
+
+        # Quick tips — show full banner anytime (built-in "macro")
+        if user_input.strip().lower() in ('tips', 'quick-tips', 'quicktips'):
+            self._print_full_banner()
             return
 
         # Command history — history [N]
@@ -4992,6 +5030,7 @@ class CliaraShell:
         print_info("  Other")
         print_dim("  ─────────────────────────────────────")
         print_dim("  help                       Show this help")
+        print_dim("  tips                       Show quick-tips panel (startup banner)")
         print_dim("  history [N]                Show last N commands (default 20)")
         print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
         print_dim("  version                    Show Cliara version")

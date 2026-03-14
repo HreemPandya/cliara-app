@@ -64,6 +64,12 @@ Once in the shell:
         help='Override shell path'
     )
     
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Always show full startup banner (quick tips)'
+    )
+    
     args = parser.parse_args()
     
     # Set debug mode
@@ -87,7 +93,7 @@ Once in the shell:
         
         # Interactive mode
         shell = CliaraShell(config)
-        shell.run()
+        shell.run(verbose_banner=args.verbose)
     
     except KeyboardInterrupt:
         print("\n\nInterrupted. Goodbye!")

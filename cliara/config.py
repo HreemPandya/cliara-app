@@ -83,6 +83,9 @@ class Config:
             "password": "",  # Should be in environment variable
         },
         "connection_string": None,  # Alternative: full connection string
+        # Startup banner: compact after a few launches, full once per day (see CLIARA_POLISH §3)
+        "launch_count": 0,
+        "last_banner_date": None,  # "YYYY-MM-DD" when full banner was last shown
     }
     
     def __init__(self, config_dir: Optional[str] = None):

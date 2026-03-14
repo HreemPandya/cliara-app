@@ -1490,6 +1490,16 @@ class CliaraShell:
             self.handle_explain(user_input[8:].strip())
             return
 
+        # Lint: explain + diff preview, then confirm before running
+        if user_input.strip().lower() == "lint" or user_input.lower().startswith("lint "):
+            cmd = user_input[5:].strip() if len(user_input) > 5 else ""
+            if not cmd:
+                print_error("[Error] Usage: lint <command>")
+                print_dim("Example: lint find . -name '*.py' -exec rm {} \\;")
+                return
+            self._handle_lint(cmd)
+            return
+
         # Smart push — auto-commit-message + branch detection
         if user_input.lower() == 'push':
             self.handle_push()
@@ -4966,7 +4976,7 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "version", "last", "doctor", "explain", "push", "session", "deploy",
+        "exit", "quit", "q", "help", "version", "last", "doctor", "explain", "lint", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm", "cliara-login", "use",
     })
 
@@ -5137,6 +5147,36 @@ class CliaraShell:
         console.print(table)
         print()
 
+    def _handle_lint(self, command: str):
+        """
+        Lint a command: show AI explanation + diff preview (if any), then ask to run.
+        Like a dry run — explain before running.
+        """
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+        explanation = self.nl_handler.explain_command(command, context, stream_callback=None)
+        one_line = (explanation or "").strip().split("\n")[0].strip()
+        if len(one_line) > 200:
+            one_line = one_line[:197] + "..."
+        print_warning(f"→ {icons.WARN}  {one_line}")
+        preview = self.diff_preview.generate_preview(command)
+        if preview:
+            for line in preview.strip().split("\n"):
+                print_dim(f"→ {line.strip()}")
+        try:
+            response = input("→ Run it anyway? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print_warning("  [Cancelled]")
+            return
+        if response in ("y", "yes"):
+            self.execute_shell_command(command, capture=False)
+        else:
+            print_warning("  [Cancelled]")
+
     def handle_explain(self, command: str):
         """
         Explain a shell command in plain English using the LLM.
@@ -5221,10 +5261,12 @@ class CliaraShell:
         print_dim(f"  {nl} <query> --save-as <n>  Generate & save as macro")
         print_dim(f"  Example: {nl} kill process on port 3000\n")
 
-        print_info("  Explain")
+        print_info("  Explain & Lint")
         print_dim("  ─────────────────────────────────────")
         print_dim("  explain <command>          Plain-English explanation of any command")
-        print_dim("  Example: explain git rebase -i HEAD~3\n")
+        print_dim("  lint <command>             Explain + show impact, then ask to run (dry run)")
+        print_dim("  Example: explain git rebase -i HEAD~3")
+        print_dim("  Example: lint find . -name '*.py' -exec rm {} \\;\n")
 
         print_info("  Semantic History Search")
         print_dim("  ─────────────────────────────────────")

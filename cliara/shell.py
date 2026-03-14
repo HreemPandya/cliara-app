@@ -1512,7 +1512,7 @@ class CliaraShell:
         if user_input.startswith(nl_prefix):
             query_rest = user_input[len(nl_prefix):].strip()
             if not query_rest:
-                print_dim(f"Type {nl_prefix} <question> for natural language (e.g. {nl_prefix} kill process on port 3000).")
+                self._print_empty_nl_suggestions(nl_prefix)
                 return
             self.handle_nl_query(query_rest)
             return
@@ -5052,6 +5052,29 @@ class CliaraShell:
                 f"[dim]Session '{self.current_session.name}' is saved — "
                 f"resume with 'session resume {self.current_session.name}'[/dim]"
             )
+
+    def _print_empty_nl_suggestions(self, nl_prefix: str):
+        """When user types ? with no query, show three context-aware prompt suggestions."""
+        suggestions = []
+        if self.last_command and self.last_exit_code != 0:
+            suggestions.append(f"{nl_prefix} explain the last error")
+        elif self.last_command:
+            short = self.last_command if len(self.last_command) <= 45 else self.last_command[:42] + "..."
+            suggestions.append(f"{nl_prefix} explain {short}")
+        if self.current_session:
+            suggestions.append(f"{nl_prefix} what was I doing with git last session")
+        static_tips = [
+            f"{nl_prefix} kill whatever is on port 8080",
+            f"{nl_prefix} list all python files modified today",
+            f"{nl_prefix} find when I last ran tests",
+        ]
+        while len(suggestions) < 3:
+            pick = random.choice(static_tips)
+            if pick not in suggestions:
+                suggestions.append(pick)
+        print_dim("Try:")
+        for s in suggestions[:3]:
+            print_dim(f"      {s}")
 
     def handle_history(self, arg: str = ""):
         """

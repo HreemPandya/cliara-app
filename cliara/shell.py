@@ -669,6 +669,15 @@ class CliaraShell:
         self.last_stderr: str = ""
         self.last_exit_code: int = 0
         self.last_command: str = ""  # Last shell command that was executed
+        self._prev_cwd: Optional[str] = None  # Previous directory for "cd -"
+        # Load persisted last command so "last" works after restart
+        _last_cmd_file = self.config.config_dir / "last_command.txt"
+        if _last_cmd_file.exists():
+            try:
+                with open(_last_cmd_file, "r", encoding="utf-8") as f:
+                    self.last_command = f.read().strip()
+            except Exception:
+                pass
 
         # Prompt session reference — set in run().
         self._prompt_session = None
@@ -1263,8 +1272,7 @@ class CliaraShell:
                     elif self.last_command:
                         exit_indicator = "OK "
 
-                    # Inline duration hint in plain mode (no right-aligned prompt available)
-                    duration_hint = ""
+                    # Duration in plain mode: show on its own line (we can't right-align without prompt_toolkit)
                     if self._last_command_elapsed is not None:
                         try:
                             threshold = float(self.config.get("prompt_duration_threshold", 2.0))
@@ -1272,16 +1280,17 @@ class CliaraShell:
                             threshold = 2.0
                         if self._last_command_elapsed > max(threshold, 0.0):
                             if self._last_command_elapsed < 60:
-                                duration_hint = f" [{self._last_command_elapsed:.1f}s]"
+                                duration_str = f"[{self._last_command_elapsed:.1f}s]"
                             else:
                                 minutes = int(self._last_command_elapsed // 60)
                                 seconds = int(self._last_command_elapsed % 60)
-                                duration_hint = f" [{minutes}m{seconds:02d}s]"
-
+                                duration_str = f"[{minutes}m{seconds:02d}s]"
+                            print_dim(f"  {duration_str}")
+                    # Prompt line stays clean so cursor is right after "> "
                     if self.current_session:
-                        prompt = f"{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow}{duration_hint} "
+                        prompt = f"{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
-                        prompt = f"{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow}{duration_hint} "
+                        prompt = f"{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:
@@ -1369,6 +1378,20 @@ class CliaraShell:
         if user_input.lower() == 'version':
             from cliara import __version__
             print_info(f"Cliara {__version__}")
+            return
+
+        # Repeat last command
+        if user_input.strip().lower() == 'last':
+            if not self.last_command:
+                print_error("[Cliara] No previous command to repeat.")
+                return
+            print_dim(f"→ reruns: {self.last_command}")
+            self.handle_input(self.last_command)
+            return
+
+        # Setup health check
+        if user_input.strip().lower() == 'doctor':
+            self._handle_doctor()
             return
 
         # Quick tips — show full banner anytime (built-in "macro")
@@ -2986,18 +3009,21 @@ class CliaraShell:
         subprocess.run spawns a child shell, so cd in a subprocess has no
         effect on the parent process. We intercept it here and use os.chdir()
         so the prompt reflects the real working directory.
+        "cd -" switches to the previous working directory (bash/zsh style).
         """
-        # Parse target directory
         args = user_input[2:].strip()
-        if not args:
-            # Bare "cd" goes to home directory
-            target = Path.home()
-        elif args == '-':
-            # "cd -" is not supported without tracking OLDPWD
-            print_error("[Error] cd - is not supported")
-            return
+        if args == '-':
+            if self._prev_cwd is None:
+                print_error("[Error] cd -: no previous directory")
+                return
+            target = Path(self._prev_cwd)
+            self._prev_cwd = str(Path.cwd())
         else:
-            target = Path(args).expanduser()
+            if not args:
+                target = Path.home()
+            else:
+                target = Path(args).expanduser()
+            self._prev_cwd = str(Path.cwd())
 
         try:
             os.chdir(target)
@@ -3007,6 +3033,59 @@ class CliaraShell:
             print_error(f"[Error] cd: permission denied: {args}")
         except Exception as e:
             print_error(f"[Error] cd: {e}")
+
+    def _handle_doctor(self):
+        """Run setup health check: shell, LLM, macros, history, semantic history, config."""
+        console = _cliara_console()
+        print_info("\n  System check:")
+        # Shell
+        shell_path = self.shell_path or (os.environ.get("SHELL") if platform.system() != "Windows" else os.environ.get("COMSPEC", "?"))
+        if shell_path:
+            print_success(f"  {icons.OK} Shell: {shell_path}")
+        else:
+            console.print(f"  {icons.FAIL} Shell: not detected", style="red")
+        # LLM
+        if self.nl_handler.llm_enabled:
+            key = self.config.get_llm_api_key()
+            masked = f" (...{key[-4:]})" if key and len(key) >= 4 else " (configured)"
+            print_success(f"  {icons.OK} LLM: {self.nl_handler.provider or '?'}{masked}")
+        else:
+            console.print(f"  {icons.FAIL} LLM: not configured (run setup-llm)", style="red")
+        # Macros
+        macro_path = Path(self.config.get("macro_storage", "~/.cliara/macros.json")).expanduser()
+        try:
+            n = self.macros.count()
+            print_success(f"  {icons.OK} Macros: {n} loaded  ({macro_path})")
+        except Exception:
+            console.print(f"  {icons.FAIL} Macros: error loading ({macro_path})", style="red")
+        # History
+        count = len(self.history.history)
+        print_success(f"  {icons.OK} History: {count} entries")
+        # Semantic history embeddings
+        use_emb = self.config.get("semantic_history_use_embeddings", False)
+        if use_emb:
+            print_success(f"  {icons.OK} Semantic history: embeddings enabled")
+        else:
+            console.print(f"  {icons.FAIL} Semantic history: embeddings disabled (set semantic_history_use_embeddings: true)", style="red")
+        # Config
+        cfg_path = self.config.config_file
+        if cfg_path and cfg_path.exists():
+            print_success(f"  {icons.OK} Config: {cfg_path}")
+        else:
+            print_success(f"  {icons.OK} Config: {cfg_path} (defaults)")
+        print()
+
+    def _persist_last_command(self):
+        """Write last executed command to disk so 'last' works after restart."""
+        if not self.last_command:
+            return
+        path = self.config.config_dir / "last_command.txt"
+        try:
+            self.config.config_dir.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.last_command)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # NL query confirmation with copy option
@@ -3486,6 +3565,7 @@ class CliaraShell:
         self.last_exit_code = 0
         self.last_command = command
         self._last_command_elapsed = None
+        self._persist_last_command()
 
         start_time = time.time()
 
@@ -4800,7 +4880,7 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "version", "explain", "push", "session", "deploy",
+        "exit", "quit", "q", "help", "version", "last", "doctor", "explain", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm", "cliara-login", "use",
     })
 
@@ -5031,6 +5111,8 @@ class CliaraShell:
         print_dim("  ─────────────────────────────────────")
         print_dim("  help                       Show this help")
         print_dim("  tips                       Show quick-tips panel (startup banner)")
+        print_dim("  last                       Repeat the last command")
+        print_dim("  doctor                     Setup health check (shell, LLM, macros, config)")
         print_dim("  history [N]                Show last N commands (default 20)")
         print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
         print_dim("  version                    Show Cliara version")

@@ -39,20 +39,25 @@ from typing import Optional
 
 _SUPABASE_URL: str = os.getenv(
     "CLIARA_SUPABASE_URL",
-    "https://placeholder.supabase.co",  # replaced at publish time
+    "https://rzkfebrsfvhyfmfcfhin.supabase.co",  # replaced at publish time
 )
 _SUPABASE_ANON_KEY: str = os.getenv(
     "CLIARA_SUPABASE_ANON_KEY",
-    "",  # replaced at publish time — safe to embed (anon/public key)
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ6a2ZlYnJzZnZoeWZtZmNmaGluIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MjM1ODEsImV4cCI6MjA4OTA5OTU4MX0.6sf8uYZK5Ca8ZDtdy46JL0_-vqixL7IOfyBA60lf-Fk",  # pragma: allowlist secret — Supabase anon key is public, safe to embed
 )
 _CLIARA_GATEWAY_URL: str = os.getenv(
     "CLIARA_GATEWAY_URL",
-    "https://api.cliara.dev/v1",
+    "https://cliara-cloud-production.up.railway.app/v1",
 )
 
 _TOKEN_FILE = Path.home() / ".cliara" / "token.json"
 _CALLBACK_TIMEOUT = 120   # seconds to wait for the browser callback
 _TOKEN_REFRESH_BUFFER = 60  # refresh token when < 60 seconds until expiry
+
+
+def get_gateway_url() -> str:
+    """Return the Cliara Cloud gateway URL (single source of truth for API calls)."""
+    return _CLIARA_GATEWAY_URL
 
 
 # ---------------------------------------------------------------------------

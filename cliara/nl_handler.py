@@ -13,6 +13,7 @@ from typing import List, Tuple, Optional, Dict, Any, Callable
 
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.agents import AGENT_REGISTRY
+from cliara.auth import get_gateway_url
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 
@@ -30,11 +31,11 @@ _PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
 _OPENAI_COMPAT_PROVIDERS = frozenset({"openai", "ollama", "groq", "gemini", "cliara"})
 
 # Base URLs for OpenAI-compatible cloud providers (not ollama — that's dynamic)
-# The "cliara" URL is overridable via CLIARA_GATEWAY_URL for dev/staging environments.
+# Cliara URL comes from auth.py (single source of truth; respects CLIARA_GATEWAY_URL env).
 _PROVIDER_BASE_URLS: Dict[str, str] = {
     "groq":   "https://api.groq.com/openai/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "cliara": os.getenv("CLIARA_GATEWAY_URL", "https://api.cliara.dev/v1"),
+    "cliara": get_gateway_url(),
 }
 
 # Agents whose output is plain text and can be streamed token-by-token to the

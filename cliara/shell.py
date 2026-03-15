@@ -810,7 +810,15 @@ class CliaraShell:
                 # Show setup wizard if LLM has never been configured and user hasn't dismissed
                 wizard_dismissed = self.config.get("llm_wizard_dismissed", False)
                 if not wizard_dismissed:
-                    _wiz.run_wizard(self)
+                    # Zero-friction: if no provider at all, auto-run Cliara Cloud login
+                    provider = self.config.get_llm_provider()
+                    api_key = self.config.get_llm_api_key()
+                    if provider is None and api_key is None:
+                        login_ok = self._handle_cliara_login(auto_run=True)
+                        if not login_ok:
+                            _wiz.run_wizard(self)
+                    else:
+                        _wiz.run_wizard(self)
         
         # First-run setup
         if self.config.is_first_run():
@@ -2926,12 +2934,19 @@ class CliaraShell:
         else:
             print_error(f"[Error] Failed to connect to {target}.")
 
-    def _handle_cliara_login(self):
-        """Authenticate with the Cliara Cloud gateway via GitHub OAuth (PKCE)."""
+    def _handle_cliara_login(self, auto_run: bool = False) -> bool:
+        """Authenticate with the Cliara Cloud gateway via GitHub OAuth (PKCE).
+
+        When auto_run is True (startup with no provider), uses a shorter prompt.
+        Returns True if login succeeded and LLM is ready, False otherwise.
+        """
         print()
-        print_info("  Cliara Login — Zero-Friction Cloud Access")
-        print_dim("  ─────────────────────────────────────────")
-        print_dim("  Free tier: 150 queries/month · no credit card · GPT-4o-mini")
+        if auto_run:
+            print_dim("  No AI provider configured. Opening browser to sign in with GitHub...")
+        else:
+            print_info("  Cliara Login — Zero-Friction Cloud Access")
+            print_dim("  ─────────────────────────────────────────")
+            print_dim("  Free tier: 150 queries/month · no credit card · GPT-4o-mini")
         print()
 
         from cliara import auth as _auth
@@ -2940,12 +2955,12 @@ class CliaraShell:
         except KeyboardInterrupt:
             print()
             print_warning("  Login cancelled.")
-            return
+            return False
         except RuntimeError as exc:
             print()
             print_error(f"  [Error] {exc}")
             print_dim("  Try 'setup-llm' for BYOK options (Groq/Gemini are free).")
-            return
+            return False
 
         # login() returns (access_token, email)
         if isinstance(result, tuple):
@@ -2964,12 +2979,14 @@ class CliaraShell:
         if ok:
             user_label = f"  ({email})" if email else ""
             print_success(f"  Logged in to Cliara Cloud{user_label}")
-            print_success("  Free tier · 150 queries/month · resets monthly")
-            print_dim("  Token saved to ~/.cliara/token.json — auto-loaded on every startup.")
-            print_dim("  Run 'cliara logout' to sign out.")
+            if not auto_run:
+                print_success("  Free tier · 150 queries/month · resets monthly")
+                print_dim("  Token saved to ~/.cliara/token.json — auto-loaded on every startup.")
+                print_dim("  Run 'cliara logout' to sign out.")
         else:
             print_warning("  Logged in but could not connect to the gateway right now.")
             print_dim("  Your token is saved — it will be used automatically on the next start.")
+        return ok
 
     def _handle_cliara_logout(self):
         """Sign out of Cliara Cloud and clear the stored token."""

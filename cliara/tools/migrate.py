@@ -85,7 +85,7 @@ def main():
     )
     parser.add_argument(
         "--connection-string",
-        help="PostgreSQL connection string (postgresql://user:pass@host:port/db)"
+        help="PostgreSQL connection string (postgresql://user:pass@host:port/db)"  # pragma: allowlist secret
     )
     parser.add_argument(
         "--host",

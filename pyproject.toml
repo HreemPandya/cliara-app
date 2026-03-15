@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliara"
-version = "0.4.0"
+version = "0.4.3"
 description = "An AI-powered shell that understands natural language and macros"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -28,11 +28,19 @@ classifiers = [
 ]
 
 dependencies = [
+    # Core shell & UI
     "prompt-toolkit>=3.0.0",
     "pygments>=2.0.0",
-    "thefuzz>=0.20.0",
-    "python-dotenv>=1.0.0",
     "rich>=13.0.0",
+    # Config & env
+    "python-dotenv>=1.0.0",
+    # Macros (fuzzy matching)
+    "thefuzz>=0.20.0",
+    # AI: Cliara Cloud, Groq, Gemini, Ollama, OpenAI (OpenAI-compatible client)
+    "openai>=1.0.0",
+    "httpx>=0.25,<0.28",  # Pin: httpx 0.28+ breaks openai (proxies API change)
+    # AI: BYOK Claude (setup wizard option)
+    "anthropic>=0.8.0",
 ]
 
 [project.optional-dependencies]
@@ -41,16 +49,11 @@ dev = [
     "black>=23.0.0",
     "flake8>=6.0.0",
 ]
-ai = [
-    "openai>=1.0.0",
-    "anthropic>=0.8.0",
-    "httpx>=0.25,<0.28",  # Pin: httpx 0.28+ breaks openai (proxies API change)
-]
 postgres = [
     "psycopg2-binary>=2.9.0",
 ]
 all = [
-    "cliara[ai,postgres]",
+    "cliara[postgres]",
 ]
 
 [project.scripts]

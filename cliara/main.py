@@ -62,6 +62,34 @@ def _run_logout():
     print_dim("  Run 'cliara login' to sign in again.")
 
 
+def _run_status(config_dir=None):
+    """Show auth and LLM status (standalone, no REPL)."""
+    from cliara.auth import load_token, get_valid_token
+    from cliara.shell import print_success, print_warning, print_dim
+
+    print()
+    print_dim("  Cliara Status")
+    print_dim("  ------------")
+    print()
+
+    token_data = load_token()
+    if token_data and get_valid_token():
+        email = token_data.get("email", "unknown")
+        print_success(f"  Cliara Cloud: logged in ({email})")
+        print_dim("  Free tier · 150 queries/month · resets monthly")
+    else:
+        # Check if BYOK is configured via config
+        config = Config(config_dir=config_dir)
+        provider = config.get("llm_provider")
+        if provider:
+            print_success(f"  BYOK: {provider}")
+            print_dim("  Using your own API key")
+        else:
+            print_warning("  Not configured")
+            print_dim("  Run 'cliara login' for Cloud, or 'setup-llm' inside cliara for BYOK")
+    print()
+
+
 def main():
     """Main entry point for Cliara."""
     parser = argparse.ArgumentParser(
@@ -72,6 +100,7 @@ Examples:
   cliara                    Start interactive Cliara shell
   cliara login              Log in to Cliara Cloud (GitHub OAuth, no API key needed)
   cliara logout             Sign out and clear stored token
+  cliara status             Show auth and LLM status
   cliara -c "git status"    Run a single command through Cliara's gate
   cliara -c "rm -rf dist"   Risky commands still require approval
   cliara --config-dir ~/my-config  Use custom config directory
@@ -125,15 +154,19 @@ Once in the shell:
     subparsers = parser.add_subparsers(dest='command', help='Subcommands')
     subparsers.add_parser('login', help='Log in to Cliara Cloud (GitHub OAuth)')
     subparsers.add_parser('logout', help='Sign out and clear stored Cliara Cloud token')
+    subparsers.add_parser('status', help='Show auth and LLM status')
     
     args = parser.parse_args()
 
-    # Standalone login/logout — run OAuth or clear token, then exit (no REPL)
+    # Standalone login/logout/status — run OAuth, clear token, or show status, then exit (no REPL)
     if args.command == 'login':
         _run_login()
         sys.exit(0)
     if args.command == 'logout':
         _run_logout()
+        sys.exit(0)
+    if args.command == 'status':
+        _run_status(config_dir=args.config_dir)
         sys.exit(0)
     
     # Set debug mode

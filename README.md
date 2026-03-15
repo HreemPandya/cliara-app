@@ -1,141 +1,161 @@
-# Cliara - AI-Powered Shell
+# Cliara
 
-An intelligent shell wrapper that understands natural language and macros.
+**An AI-powered shell that understands natural language and macros.**
+
+[![PyPI version](https://badge.fury.io/py/cliara.svg)](https://pypi.org/project/cliara/)
+[![Python 3.8+](https://img.shields.io/pypi/pyversions/cliara)](https://pypi.org/project/cliara/)
+
+---
 
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# Install (recommended: pipx for automatic PATH setup)
+pipx install cliara
 
-# Setup environment
-cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Or with pip
+pip install cliara
 
-# Run
+# Run — no API key needed
 cliara
 ```
 
-## Documentation
+On first run, Cliara opens your browser to sign in with GitHub. Once authenticated, you get 150 free AI queries per month — no credit card, no API keys.
 
-- **[Complete Guide](docs/README.md)** - Full documentation
-- **[Quick Start](docs/QUICKSTART.md)** - Get started in 5 minutes
+```bash
+cliara ~/my-project > ? list files in this directory
+# → ls -la
+
+cliara ~/my-project > ? kill the process on port 3000
+# → Suggests the right command for your OS
+```
+
+---
 
 ## What is Cliara?
 
 Cliara wraps your existing shell and adds:
-- 🗣️ Natural language commands with `?` prefix (Phase 2)
-- 📦 Powerful macro system (create, edit, delete, run)
-- 🔍 Semantic history search: `? find when I fixed the login` or `? what did I run to deploy`
-- 🛡️ Safety checks for dangerous operations
-- 💾 Save last command as macro instantly
-- 🔄 Persistent command history with arrow-key recall across sessions
-- ✏️ Rename macros without recreating them
-- 📂 Proper `cd` handling (changes Cliara's own working directory)
-- 🚀 Normal commands work unchanged
+
+| Feature | Description |
+|---------|-------------|
+| **Natural language** | `? <query>` — describe what you want, get shell commands |
+| **Cliara Cloud** | Sign in with GitHub, 150 free queries/month, no API key |
+| **Macros** | Create, edit, run reusable command sequences |
+| **Semantic history** | `? find when I fixed the login` — search past commands by meaning |
+| **Smart push** | `push` — auto-commit message, branch detection, one command |
+| **Smart deploy** | `deploy` — auto-detect Vercel, Netlify, Docker, PyPI, and deploy |
+| **Safety checks** | Destructive commands show a diff preview before running |
+| **Fix failed commands** | `? fix` — AI suggests corrections after a command fails |
+
+All your normal commands work unchanged. Cliara is a thin layer on top of your shell.
+
+---
 
 ## Installation
 
+### Option 1: pipx (recommended)
+
+Best for CLI tools — installs in an isolated environment and adds to PATH automatically.
+
 ```bash
-# 1. Clone the repo
-git clone https://github.com/yourusername/cliara.git
-cd cliara
-
-# 2. Install dependencies
-pip install -e .
-
-# 3. Setup environment
-cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
-
-# 4. Run
-cliara
+pip install pipx
+pipx ensurepath   # Add pipx bin to PATH (restart terminal if needed)
+pipx install cliara
 ```
+
+### Option 2: pip
+
+```bash
+pip install cliara
+```
+
+If `cliara` isn't recognized, use:
+
+```bash
+python -m cliara.main
+```
+
+Or add Python's `Scripts` folder to your PATH.
+
+### Option 3: From source (development)
+
+```bash
+git clone https://github.com/HreemPandya/cliara-app.git
+cd cliara-app
+pip install -e .
+```
+
+---
+
+## First Run
+
+1. **Start Cliara:** `cliara`
+2. **First time?** A browser opens for GitHub login. Authorize once.
+3. **Done.** Your token is saved to `~/.cliara/token.json` and loads automatically on every start.
+
+### Alternative: Bring your own API key
+
+Prefer Groq, Gemini, Ollama, or OpenAI? Run `setup-llm` inside Cliara to configure. Free options include [Groq](https://console.groq.com) and [Google AI Studio](https://aistudio.google.com).
+
+---
 
 ## Usage
 
 ```bash
-# Start Cliara
+# Start the shell
 cliara
 
-# Normal commands work
-cliara:proj > ls -la
-cliara:proj > git status
+# Natural language (prefix with ?)
+? list files in this directory
+? kill process on port 3000
+? find when I ran the deploy
+? fix                    # Fix the last failed command
 
-# Natural language (requires OPENAI_API_KEY)
-cliara:proj > ? kill process on port 3000
+# Macros
+macro add build          # Create a macro
+build                    # Run it
+macro save last as test  # Save last command as macro
 
-# Create a macro
-cliara:proj > macro add test
-  > echo Step 1
-  > echo Step 2
-  > 
+# Smart push (auto-commit message + branch)
+push
 
-# Edit an existing macro
-cliara:proj > macro edit test
-  > echo Updated Step 1
-  > echo Updated Step 2
-  > 
+# Smart deploy (auto-detect project type)
+deploy
 
-# Run it
-cliara:proj > test
-
-# Rename a macro
-cliara:proj > macro rename old-name new-name
-
-# Save last command
-cliara:proj > echo "hello"
-cliara:proj > macro save last as hello
-
-# cd works correctly (changes Cliara's own directory)
-cliara:proj > cd src
-cliara:src >
+# Other
+use                      # Show/switch AI provider
+theme                    # Change color theme
+help                     # Full command reference
 ```
 
-## Features
-
-### Phase 1 ✅ (Complete)
-- Shell wrapper with pass-through
-- Interactive macro system (add, edit, delete, rename, show, run, search)
-- Save last command as macro
-- Persistent command history (`~/.cliara/history.txt`) with arrow-key recall
-- Multi-tier safety checks
-- Auto-configuration
-
-### Phase 2 ✅ (Complete)
-- LLM integration (OpenAI)
-- Natural language → commands
-- Context-aware suggestions
-- **Semantic history search**: `? find ...` / `? when did I ...` / `? what did I run ...` — search past commands by intent (stored in `~/.cliara/semantic_history.json`)
-
-### Storage Backends
-- **JSON** (default) - Simple file-based storage
-- **PostgreSQL** - Scalable database backend for millions of macros
-  - See [PostgreSQL Setup Guide](docs/POSTGRES_SETUP.md)
+---
 
 ## Requirements
 
-- Python 3.8+
-- Windows, macOS, or Linux
+- **Python 3.8+**
+- **Windows, macOS, or Linux**
 
-### Windows Users
-After installation, you may need to add Python Scripts to your PATH:
-```
-C:\Users\<YourName>\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\LocalCache\local-packages\Python312\Scripts
-```
-Or restart your computer for PATH changes to take effect.
+---
 
-## Version
+## Documentation
 
-**v0.2.0** - Phase 2 Complete
-- ✅ Natural language support
-- ✅ Windows compatibility fixes
-- ✅ PostgreSQL backend support
+- [Complete Guide](docs/README.md) — Full documentation
+- [Quick Start](docs/QUICKSTART.md) — Get started in 5 minutes
+- [Cliara Cloud Deployment](docs/CLIARA_CLOUD_DEPLOYMENT.md) — Self-host the backend
+- [PostgreSQL Setup](docs/POSTGRES_SETUP.md) — Scalable macro storage
+
+---
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `cliara` not recognized | Use `python -m cliara.main` or install with `pipx install cliara` |
+| Connection error | Check network/firewall; try `$env:CLIARA_GATEWAY_URL = "https://cliara-cloud-production.up.railway.app/v1"` |
+| Want BYOK instead | Run `setup-llm` inside Cliara for Groq, Gemini, Ollama, OpenAI |
+
+---
 
 ## License
 
 MIT
-
----
-
-**See [docs/README.md](docs/README.md) for complete documentation.**

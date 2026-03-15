@@ -7,6 +7,8 @@ import json
 import os
 import platform
 from pathlib import Path
+
+from cliara.file_lock import with_file_lock
 from typing import Dict, Any, Optional
 
 # Load .env files if they exist.
@@ -133,12 +135,13 @@ class Config:
         """Load configuration from file or create default."""
         if self.config_file.exists():
             try:
-                with open(self.config_file, 'r') as f:
-                    loaded = json.load(f)
-                    # Merge with defaults (in case new keys added)
-                    config = self.DEFAULT_CONFIG.copy()
-                    config.update(loaded)
-                    return config
+                with with_file_lock(self.config_file):
+                    with open(self.config_file, 'r') as f:
+                        loaded = json.load(f)
+                # Merge with defaults (in case new keys added)
+                config = self.DEFAULT_CONFIG.copy()
+                config.update(loaded)
+                return config
             except json.JSONDecodeError:
                 print("[Warning] Config file corrupted, using defaults")
                 return self.DEFAULT_CONFIG.copy()
@@ -172,8 +175,9 @@ class Config:
                         f"{user}:{auth_part.split(':')[1]}", user
                     )
         
-        with open(self.config_file, 'w') as f:
-            json.dump(settings_to_save, f, indent=2)
+        with with_file_lock(self.config_file):
+            with open(self.config_file, 'w') as f:
+                json.dump(settings_to_save, f, indent=2)
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration value."""

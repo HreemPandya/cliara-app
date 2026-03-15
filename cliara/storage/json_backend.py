@@ -6,6 +6,8 @@ Maintained for backward compatibility and as fallback.
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
+
+from cliara.file_lock import with_file_lock
 from cliara.storage import StorageBackend
 
 if TYPE_CHECKING:
@@ -36,20 +38,22 @@ class JSONStorage(StorageBackend):
         """Load macros from JSON file."""
         from cliara.macros import Macro  # Import here to avoid circular import
         try:
-            with open(self.storage_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return {
-                    name: Macro.from_dict(name, macro_data)
-                    for name, macro_data in data.items()
-                }
+            with with_file_lock(self.storage_path):
+                with open(self.storage_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            return {
+                name: Macro.from_dict(name, macro_data)
+                for name, macro_data in data.items()
+            }
         except (json.JSONDecodeError, FileNotFoundError):
             return {}
     
     def _save_macros(self):
         """Save macros to JSON file."""
         data = {name: macro.to_dict() for name, macro in self.macros.items()}
-        with open(self.storage_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        with with_file_lock(self.storage_path):
+            with open(self.storage_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
     
     def get(self, name: str, user_id: Optional[str] = None) -> Optional['Macro']:
         """Get a macro by name."""

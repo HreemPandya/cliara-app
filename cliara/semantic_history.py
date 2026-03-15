@@ -7,6 +7,8 @@ to ~/.cliara/semantic_history.json so users can search by intent via ? find / ? 
 
 import json
 import threading
+
+from cliara.file_lock import with_file_lock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -44,7 +46,8 @@ class SemanticHistoryStore:
                 self._entries = []
                 return
             try:
-                raw = self._path.read_text(encoding="utf-8")
+                with with_file_lock(self._path):
+                    raw = self._path.read_text(encoding="utf-8")
                 data = json.loads(raw)
                 entries = data.get("entries", data) if isinstance(data, dict) else data
                 if not isinstance(entries, list):
@@ -78,10 +81,11 @@ class SemanticHistoryStore:
         """Persist to disk. Caller must hold _lock."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"entries": self._entries}
-        self._path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        with with_file_lock(self._path):
+            self._path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
 
     def add(
         self,

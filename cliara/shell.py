@@ -37,6 +37,7 @@ from cliara.execution_graph import (
     render_execution_tree,
     export_tree_json,
 )
+from cliara.file_lock import with_file_lock
 from cliara.cross_platform import (
     get_base_command,
     command_exists,
@@ -544,10 +545,11 @@ class CommandHistory:
         if not self.history_file or not self.history_file.exists():
             return
         try:
-            with open(self.history_file, "r", encoding="utf-8") as f:
-                lines = [line.rstrip("\n") for line in f if line.strip()]
-            # Keep only the last max_size entries
-            self.history = lines[-self.max_size:]
+            with with_file_lock(self.history_file):
+                with open(self.history_file, "r", encoding="utf-8") as f:
+                    lines = [line.rstrip("\n") for line in f if line.strip()]
+                # Keep only the last max_size entries
+                self.history = lines[-self.max_size:]
         except Exception:
             # Corrupt / unreadable file – start fresh
             self.history = []
@@ -560,8 +562,9 @@ class CommandHistory:
             return
         try:
             import json
-            with open(self._meta_file, "r", encoding="utf-8") as f:
-                raw = json.load(f)
+            with with_file_lock(self._meta_file):
+                with open(self._meta_file, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
             if not isinstance(raw, list):
                 return
             # Meta is stored same order as history (oldest first); take last len(history)
@@ -589,8 +592,9 @@ class CommandHistory:
             self._meta_file.parent.mkdir(parents=True, exist_ok=True)
             data = [{"e": e, "t": t} for e, t in self.exit_meta]
             import json
-            with open(self._meta_file, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+            with with_file_lock(self._meta_file):
+                with open(self._meta_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
         except Exception:
             pass
     
@@ -600,8 +604,9 @@ class CommandHistory:
             return
         try:
             self.history_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.history_file, "a", encoding="utf-8") as f:
-                f.write(command + "\n")
+            with with_file_lock(self.history_file):
+                with open(self.history_file, "a", encoding="utf-8") as f:
+                    f.write(command + "\n")
         except Exception:
             pass  # Non-critical – don't crash the shell
     
@@ -610,12 +615,13 @@ class CommandHistory:
         if not self.history_file or not self.history_file.exists():
             return
         try:
-            with open(self.history_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if len(lines) > self.max_size * 2:
-                # Only trim when the file is significantly over limit
-                with open(self.history_file, "w", encoding="utf-8") as f:
-                    f.writelines(lines[-self.max_size:])
+            with with_file_lock(self.history_file):
+                with open(self.history_file, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                if len(lines) > self.max_size * 2:
+                    # Only trim when the file is significantly over limit
+                    with open(self.history_file, "w", encoding="utf-8") as f:
+                        f.writelines(lines[-self.max_size:])
         except Exception:
             pass
     
@@ -751,8 +757,9 @@ class CliaraShell:
         _last_cmd_file = self.config.config_dir / "last_command.txt"
         if _last_cmd_file.exists():
             try:
-                with open(_last_cmd_file, "r", encoding="utf-8") as f:
-                    self.last_command = f.read().strip()
+                with with_file_lock(_last_cmd_file):
+                    with open(_last_cmd_file, "r", encoding="utf-8") as f:
+                        self.last_command = f.read().strip()
             except Exception:
                 pass
 
@@ -1016,6 +1023,7 @@ class CliaraShell:
             "  • <macro-name>            Run a saved macro",
             "  • help                    Show all commands",
             "  • version                 Show Cliara version",
+            "  • status                  Show auth and LLM status",
             "  • theme [name]            List or set color theme (e.g. dracula, nord)",
             "  • tips                    Show this quick-tips panel anytime",
             "  • exit                    Quit Cliara",
@@ -1567,6 +1575,11 @@ class CliaraShell:
 
         if user_input.lower().strip() in ('cliara-logout', 'cliara logout'):
             self._handle_cliara_logout()
+            return
+
+        # Status: show auth and LLM state
+        if user_input.lower().strip() == 'status':
+            self._handle_status()
             return
 
         # Live provider switch: "use openai" / "use ollama" / "use groq" / "use"
@@ -2988,6 +3001,28 @@ class CliaraShell:
             print_dim("  Your token is saved — it will be used automatically on the next start.")
         return ok
 
+    def _handle_status(self):
+        """Show auth and LLM status."""
+        from cliara.auth import load_token, get_valid_token
+
+        print()
+        print_dim("  Cliara Status")
+        print_dim("  ------------")
+        print()
+
+        token_data = load_token()
+        if token_data and get_valid_token():
+            email = token_data.get("email", "unknown")
+            print_success(f"  Cliara Cloud: logged in ({email})")
+            print_dim("  Free tier · 150 queries/month · resets monthly")
+        elif self.nl_handler.llm_enabled and self.nl_handler.provider:
+            print_success(f"  BYOK: {self.nl_handler.provider}")
+            print_dim("  Using your own API key")
+        else:
+            print_warning("  Not configured")
+            print_dim("  Run 'cliara login' for Cloud, or 'setup-llm' for BYOK")
+        print()
+
     def _handle_cliara_logout(self):
         """Sign out of Cliara Cloud and clear the stored token."""
         from cliara import auth as _auth
@@ -3244,8 +3279,9 @@ class CliaraShell:
         path = self.config.config_dir / "last_command.txt"
         try:
             self.config.config_dir.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.last_command)
+            with with_file_lock(path):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self.last_command)
         except Exception:
             pass
 
@@ -5045,7 +5081,7 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "version", "last", "doctor", "explain", "lint", "push", "session", "deploy",
+        "exit", "quit", "q", "help", "version", "status", "last", "doctor", "explain", "lint", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm",
         "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",
     })
@@ -5420,7 +5456,7 @@ class CliaraShell:
         print_dim("  doctor                     Setup health check (shell, LLM, macros, config)")
         print_dim("  history [N]                Show last N commands (default 20)")
         print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
-        print_dim("  version                    Show Cliara version")
+        print_dim("  version / status           Show version or auth status")
         print_dim("  exit / Ctrl+C              Quit Cliara")
 
         print_header("\n" + "=" * 60 + "\n")

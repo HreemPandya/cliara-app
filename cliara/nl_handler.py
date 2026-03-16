@@ -45,6 +45,7 @@ _STREAMING_SAFE_AGENTS = frozenset({
     "explain",
     "commit_message",
     "copilot_explain",
+    "readme",
 })
 
 
@@ -998,6 +999,36 @@ Context:
 Return ONLY valid JSON in this format: {"commands": ["step1", "step2", ...]}
 Each step is a single shell command. Be concise and project-appropriate."""
         return prompt
+
+    # ------------------------------------------------------------------
+    # README generation
+    # ------------------------------------------------------------------
+
+    def generate_readme(
+        self,
+        cwd: Optional[Path] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> Optional[str]:
+        """
+        Generate a README.md for the project at *cwd* using thorough context
+        gathering and the readme agent.
+
+        Returns:
+            Generated README markdown, or None if LLM disabled/failed.
+        """
+        if not self.llm_enabled:
+            return None
+        try:
+            from cliara.readme_context import gather_context, format_context_for_prompt
+            root = (cwd or Path.cwd()).resolve()
+            context = gather_context(root)
+            if context.get("error"):
+                return None
+            prompt = format_context_for_prompt(context)
+            response = self._call_llm_stream("readme", prompt, stream_callback)
+            return (response or "").strip()
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Error Translation (intercept stderr → plain-English explanation)

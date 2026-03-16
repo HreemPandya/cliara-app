@@ -3,6 +3,7 @@ Shell wrapper/proxy for Cliara.
 Handles command pass-through, NL routing, and macro execution.
 """
 
+import shutil
 import subprocess
 import sys
 import os
@@ -1024,6 +1025,7 @@ class CliaraShell:
             "  • help                    Show all commands",
             "  • version                 Show Cliara version",
             "  • status                  Show auth and LLM status",
+            "  • readme                  Generate README from project context",
             "  • theme [name]            List or set color theme (e.g. dracula, nord)",
             "  • tips                    Show this quick-tips panel anytime",
             "  • exit                    Quit Cliara",
@@ -1580,6 +1582,11 @@ class CliaraShell:
         # Status: show auth and LLM state
         if user_input.lower().strip() == 'status':
             self._handle_status()
+            return
+
+        # Readme: generate README from project context
+        if user_input.lower().strip() == 'readme':
+            self._handle_readme()
             return
 
         # Live provider switch: "use openai" / "use ollama" / "use groq" / "use"
@@ -3022,6 +3029,76 @@ class CliaraShell:
             print_warning("  Not configured")
             print_dim("  Run 'cliara login' for Cloud, or 'setup-llm' for BYOK")
         print()
+
+    def _handle_readme(self):
+        """Generate README from project context, save to file for review, optionally apply."""
+        if not self.nl_handler.llm_enabled:
+            print_warning("  LLM not configured. Run 'cliara login' or 'setup-llm' to enable readme generation.")
+            return
+
+        cwd = Path.cwd()
+        readme_path = cwd / "README.md"
+        preview_path = cwd / "README.generated.md"
+
+        print()
+        print_dim("  Analyzing project...")
+        generated = self.nl_handler.generate_readme(cwd=cwd)
+        if not generated:
+            print_error("  Could not generate README. Check LLM connection.")
+            return
+
+        existing = readme_path.read_text(encoding="utf-8", errors="replace") if readme_path.exists() else ""
+        if existing.strip() == generated.strip():
+            print_success("  README is already up to date.")
+            return
+
+        # Write generated README to .md file for review
+        preview_path.write_text(generated, encoding="utf-8")
+        print_success(f"  Preview saved to {preview_path.name}")
+
+        # Open in current IDE window via URL protocol (opens in same window)
+        abs_path = str(preview_path.resolve())
+        path_url = abs_path.replace("\\", "/")
+        opened = False
+        for protocol in ("cursor", "vscode"):
+            try:
+                url = f"{protocol}://file/{path_url}"
+                if platform.system() == "Windows":
+                    os.startfile(url)
+                elif platform.system() == "Darwin":
+                    subprocess.run(["open", url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.run(["xdg-open", url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                opened = True
+                break
+            except Exception:
+                continue
+        if not opened:
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(abs_path)
+                elif platform.system() == "Darwin":
+                    subprocess.run(["open", abs_path], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.run(["xdg-open", abs_path], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+        print_dim("  Review the file, then apply to replace README.md")
+        print()
+        try:
+            resp = input("  Apply? (y/n): ").strip().lower()
+        except EOFError:
+            resp = "n"
+        if resp in ("y", "yes"):
+            readme_path.write_text(generated, encoding="utf-8")
+            print_success(f"  Wrote {readme_path}")
+            try:
+                preview_path.unlink()
+            except OSError:
+                pass
+        else:
+            print_dim("  Cancelled. Preview remains at " + str(preview_path.name))
 
     def _handle_cliara_logout(self):
         """Sign out of Cliara Cloud and clear the stored token."""
@@ -5081,7 +5158,7 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "version", "status", "last", "doctor", "explain", "lint", "push", "session", "deploy",
+        "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "explain", "lint", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm",
         "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",
     })
@@ -5456,7 +5533,7 @@ class CliaraShell:
         print_dim("  doctor                     Setup health check (shell, LLM, macros, config)")
         print_dim("  history [N]                Show last N commands (default 20)")
         print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
-        print_dim("  version / status           Show version or auth status")
+        print_dim("  version / status / readme  Show version, auth, or generate README")
         print_dim("  exit / Ctrl+C              Quit Cliara")
 
         print_header("\n" + "=" * 60 + "\n")

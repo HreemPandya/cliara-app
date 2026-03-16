@@ -36,6 +36,7 @@ Thumbs.db
 
 # Project specific
 *.log
+README.generated.md
 
 # User data
 ~/.cliara/

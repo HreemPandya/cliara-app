@@ -7,34 +7,9 @@
 
 ---
 
-## Quick Start
-
-```bash
-# Install (recommended: pipx for automatic PATH setup)
-pipx install cliara
-
-# Or with pip
-pip install cliara
-
-# Run — no API key needed
-cliara
-```
-
-On first run, Cliara opens your browser to sign in with GitHub. Once authenticated, you get 150 free AI queries per month — no credit card, no API keys.
-
-```bash
-cliara ~/my-project > ? list files in this directory
-# → ls -la
-
-cliara ~/my-project > ? kill the process on port 3000
-# → Suggests the right command for your OS
-```
-
----
-
 ## What is Cliara?
 
-Cliara wraps your existing shell and adds:
+Cliara wraps your existing shell (bash, zsh, PowerShell, cmd) and adds:
 
 | Feature | Description |
 |---------|-------------|
@@ -75,8 +50,6 @@ If `cliara` isn't recognized, use:
 python -m cliara.main
 ```
 
-Or add Python's `Scripts` folder to your PATH.
-
 ### Option 3: From source (development)
 
 ```bash
@@ -85,15 +58,28 @@ cd cliara-app
 pip install -e .
 ```
 
+### Optional Dependencies
+
+To enable PostgreSQL support, install with:
+
+```bash
+pip install cliara[postgres]
+```
+
 ---
 
-## First Run
+## First Run / Setup
 
 1. **Start Cliara:** `cliara`
 2. **First time?** A browser opens for GitHub login. Authorize once.
 3. **Done.** Your token is saved to `~/.cliara/token.json` and loads automatically on every start.
 
-### Alternative: Bring your own API key
+### Authentication / Cloud Login Flow
+
+- The OAuth login flow opens your browser to sign in with GitHub.
+- Once authenticated, your token is stored at `~/.cliara/token.json`.
+
+### Alternative: Bring Your Own API Key
 
 Prefer Groq, Gemini, Ollama, or OpenAI? Run `setup-llm` inside Cliara to configure. Free options include [Groq](https://console.groq.com) and [Google AI Studio](https://aistudio.google.com).
 
@@ -101,39 +87,113 @@ Prefer Groq, Gemini, Ollama, or OpenAI? Run `setup-llm` inside Cliara to configu
 
 ## Usage
 
+### Normal Commands (Pass-Through)
+
+Just type commands as usual - they go straight to your shell:
+
 ```bash
-# Start the shell
-cliara
+cliara:proj ❯ ls -la
+cliara:proj ❯ cd myproject
+cliara:proj ❯ git status
+cliara:proj ❯ npm install
+```
 
-# Natural language (prefix with ?)
-? list files in this directory
-? kill process on port 3000
-? find when I ran the deploy
-? fix                    # Fix the last failed command
+### Natural Language Commands
 
-# Macros
-macro add build          # Create a macro
-build                    # Run it
-macro save last as test  # Save last command as macro
+Use `?` prefix for natural language:
 
-# Smart push (auto-commit message + branch)
-push
+```bash
+cliara:proj ❯ ? list files in this directory
+cliara:proj ❯ ? kill process on port 3000
+cliara:proj ❯ ? find when I ran the deploy
+cliara:proj ❯ ? fix                    # Fix the last failed command
+```
 
-# Smart deploy (auto-detect project type)
-deploy
+### Macros
 
-# Other
-use                      # Show/switch AI provider
-theme                    # Change color theme
-help                     # Full command reference
+```bash
+cliara:proj ❯ macro add build          # Create a macro
+cliara:proj ❯ build                    # Run it
+cliara:proj ❯ macro save last as test  # Save last command as macro
+```
+
+### Smart Commands
+
+```bash
+cliara:proj ❯ push                     # Smart push (auto-commit message + branch)
+cliara:proj ❯ deploy                   # Smart deploy (auto-detect project type)
+```
+
+### Help
+
+```bash
+cliara:proj ❯ help                     # Full command reference
 ```
 
 ---
 
-## Requirements
+## Database Setup and Migration
 
-- **Python 3.8+**
-- **Windows, macOS, or Linux**
+If using PostgreSQL as your backend, follow these steps:
+
+1. **Install PostgreSQL** (see [PostgreSQL Setup Guide](docs/POSTGRES_SETUP.md)).
+2. **Create Database and User:**
+
+```bash
+# Connect to PostgreSQL
+psql postgres
+
+# Create database
+CREATE DATABASE cliara;
+
+# Create user
+CREATE USER cliara WITH PASSWORD 'your_password_here';
+
+# Grant privileges
+GRANT ALL PRIVILEGES ON DATABASE cliara TO cliara;
+
+# Exit
+\q
+```
+
+3. **Install Python Dependencies:**
+
+```bash
+pip install psycopg2-binary
+```
+
+4. **Configure Cliara:**
+
+Edit `~/.cliara/config.json`:
+
+```json
+{
+  "storage_backend": "postgres",
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "cliara",
+    "user": "cliara"
+  }
+}
+```
+
+---
+
+## Required Environment Variables
+
+Copy `.env.example` to `.env` and fill in the values for your chosen provider. Only ONE LLM provider should be active at a time.
+
+```plaintext
+# ── Option A: OpenAI (cloud, requires API key) ────────────────────────────────
+OPENAI_API_KEY=sk-proj-your-key-here
+
+# ── Option B: Anthropic Claude (cloud, requires API key) ─────────────────────
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# ── Option C: Ollama (local, free, no key needed) ────────────────────────────
+OLLAMA_BASE_URL=http://localhost:11434
+```
 
 ---
 

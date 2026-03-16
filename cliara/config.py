@@ -59,6 +59,7 @@ class Config:
         "model_explain": None,  # explain <command>
         "model_commit": None,   # smart push commit message
         "model_deploy": None,   # deploy step generation
+        "model_readme": None,   # readme generation
         "model_history": None,  # history summarisation & search
         "model_copilot": None,  # CopilotGate explain
         # Ollama (local LLM) settings
@@ -386,6 +387,7 @@ class Config:
             "history_search": "model_history",
             "commit_message": "model_commit",
             "deploy":         "model_deploy",
+            "readme":         "model_readme",
             "copilot_explain":"model_copilot",
         }
         if agent_type:

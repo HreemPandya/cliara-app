@@ -1281,13 +1281,17 @@ class CliaraShell:
 
             @kb.add("tab", eager=True)
             def _accept_fix(event):
-                """Tab on empty prompt → fill in the pending fix suggestion."""
+                """Tab: accept ghost text (like Right arrow), or pending fix, or completion."""
                 buf = event.current_buffer
+                # Ghost text: accept auto-suggestion if available (same as Right arrow)
+                suggestion = getattr(buf, "suggestion", None)
+                if suggestion and suggestion.text and buf.document.is_cursor_at_the_end:
+                    buf.insert_text(suggestion.text)
+                    return
                 if buf.text == "" and self._pending_fix:
                     buf.insert_text(self._pending_fix)
                     self._pending_fix = None
                 else:
-                    # Default Tab behaviour (completion)
                     buf.complete_next()
 
             # Seed prompt history from existing command history so

@@ -62,6 +62,7 @@ class Config:
         "model_readme": None,   # readme generation
         "model_history": None,  # history summarisation & search
         "model_copilot": None,  # CopilotGate explain
+        "model_session_reflect": None,  # session end --reflect reflection plan
         # Ollama (local LLM) settings
         "ollama_base_url": "http://localhost:11434",  # Ollama server URL
         "first_run_complete": False,
@@ -389,6 +390,7 @@ class Config:
             "deploy":         "model_deploy",
             "readme":         "model_readme",
             "copilot_explain":"model_copilot",
+            "session_reflect": "model_session_reflect",
         }
         if agent_type:
             key = _AGENT_CONFIG_KEYS.get(agent_type)

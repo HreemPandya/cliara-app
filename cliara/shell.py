@@ -32,8 +32,6 @@ from cliara.session_store import (
     TaskSession,
     _get_project_root,
     _get_branch,
-    _normalize_closeout,
-    _normalize_closeout_prompts,
     CLOSEOUT_KEYS,
 )
 from cliara.execution_graph import (
@@ -4470,6 +4468,7 @@ class CliaraShell:
             session.end_note = None
             session.closeout = None
             session.closeout_prompts = None
+            session.reflection = None
             self.session_store.update(session)
             self.current_session = self.session_store.get_by_id(session.id)
         self._session_print_resume_summary(self.current_session)
@@ -4515,7 +4514,25 @@ class CliaraShell:
                 print_dim(f"    {n.text[:70]}{'...' if len(n.text) > 70 else ''}")
         if s.end_note:
             print_dim(f"  End note: {s.end_note[:70]}{'...' if len(s.end_note) > 70 else ''}")
-        if s.closeout or s.closeout_prompts:
+        if s.reflection:
+            print_dim("  Reflection (session_reflect):")
+            for i, ent in enumerate(s.reflection, 1):
+                kind = ent.get("kind", "?")
+                q = ent.get("question", "")
+                ql = q[:100] + "…" if len(q) > 100 else q
+                print_dim(f"    [{i}] ({kind}) {ql}")
+                hint = ent.get("hint")
+                if hint:
+                    print_dim(f"        hint: {hint[:80]}{'…' if len(hint) > 80 else ''}")
+                if kind == "choice" and ent.get("selected_label"):
+                    print_dim(f"        → {ent['selected_label']}")
+                elif ent.get("answer"):
+                    ans = ent["answer"]
+                    for line in str(ans).split("\n")[:12]:
+                        print_dim(f"        {line[:120]}{'…' if len(line) > 120 else ''}")
+                    if str(ans).count("\n") > 11:
+                        print_dim("        …")
+        elif s.closeout or s.closeout_prompts:
             print_dim("  Closeout:")
             _fallback = {"blocked": "Blocked", "decided": "Decided", "next": "Next"}
             for key in CLOSEOUT_KEYS:
@@ -4571,12 +4588,46 @@ class CliaraShell:
                 lines.append(f"  - {(n.text or '')[:300]}")
         return "\n".join(lines)
 
-    def _session_prompt_closeout(
+    def _reflect_read_choice(self, options: List[str], console) -> Tuple[Optional[int], Optional[str], str]:
+        """Return (index, label, raw_input) for a choice; index None if skipped."""
+        for i, opt in enumerate(options, 1):
+            console.print(f"  [cyan]{i}.[/cyan] {opt}")
+        print_dim("  Enter a number, part of an option, or leave empty to skip.")
+        try:
+            line = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise
+        if not line:
+            return None, None, ""
+        if line.isdigit():
+            idx = int(line) - 1
+            if 0 <= idx < len(options):
+                return idx, options[idx], line
+        low = line.lower()
+        for i, opt in enumerate(options):
+            if low in opt.lower():
+                return i, opt, line
+        return None, None, line
+
+    def _reflect_read_long_text(self, console) -> str:
+        print_dim("  Long answer — type lines; finish with a line containing only END")
+        lines: List[str] = []
+        while True:
+            try:
+                line = input()
+            except (EOFError, KeyboardInterrupt):
+                raise
+            if line.strip() == "END":
+                break
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _session_run_reflect(
         self,
-    ) -> Tuple[bool, Optional[Dict[str, str]], Optional[Dict[str, str]]]:
+    ) -> Tuple[bool, Optional[List[Dict[str, Any]]]]:
         """
-        Prompt for structured closeout. Returns (aborted, closeout_answers, closeout_prompts).
-        Questions are tailored by the LLM when available; otherwise defaults.
+        Run session_reflect skill: multi-step reflection (choice / text / long_text).
+        Returns (aborted, reflection_log).
         """
         from rich.panel import Panel
         from rich.rule import Rule
@@ -4584,30 +4635,18 @@ class CliaraShell:
         from rich.text import Text
 
         if not self.current_session:
-            return (True, None, None)
+            return (True, None)
         s = self.current_session
         briefing = self._build_session_closeout_briefing(s)
-        defaults = {
-            "blocked": "What's blocked? (Enter to skip)",
-            "decided": "What did you decide? (Enter to skip)",
-            "next": "What's the next step? (Enter to skip)",
-        }
         console = _cliara_console()
-        questions: Dict[str, str] = dict(defaults)
-        used_llm = False
-        if self.nl_handler.llm_enabled:
-            try:
-                with Status(
-                    "[dim]Tailoring questions from your session…[/dim]",
-                    spinner="dots",
-                    console=console,
-                ):
-                    q = self.nl_handler.session_closeout_questions(briefing)
-                if q:
-                    questions.update(q)
-                    used_llm = True
-            except Exception:
-                pass
+        plan: List[Dict[str, Any]] = []
+        with Status(
+            "[dim]Running session_reflect skill…[/dim]",
+            spinner="dots",
+            console=console,
+        ):
+            plan = self.nl_handler.session_reflect_plan(briefing)
+        offline = not self.nl_handler.llm_enabled
 
         summary_body = Text()
         summary_body.append(f"Session “{s.name}”", style="bold")
@@ -4626,7 +4665,7 @@ class CliaraShell:
                 summary_body.append(cmd + "\n", style="dim")
 
         console.print()
-        console.print(Rule("[bold cyan]Session closeout[/bold cyan]", style="cyan"))
+        console.print(Rule("[bold cyan]Session reflection[/bold cyan]", style="cyan"))
         console.print(
             Panel(
                 summary_body,
@@ -4635,55 +4674,77 @@ class CliaraShell:
                 padding=(0, 1),
             )
         )
-        print_dim(
-            "  Questions: "
-            + ("tailored by LLM" if used_llm else "defaults (configure LLM for tailored prompts)")
-        )
+        src = "session_reflect (offline defaults)" if offline else "session_reflect skill (LLM)"
+        print_dim(f"  Plan: {src}")
 
-        order = [("blocked", "1/3"), ("decided", "2/3"), ("next", "3/3")]
-        raw: Dict[str, str] = {}
-        for key, step in order:
-            qtext = questions.get(key, defaults[key])
+        log: List[Dict[str, Any]] = []
+        n = len(plan)
+        for si, step in enumerate(plan, 1):
+            kind = step.get("kind")
+            q = step.get("question", "")
+            hint = step.get("hint")
+            entry: Dict[str, Any] = {
+                "id": step.get("id", "step_%d" % si),
+                "kind": kind,
+                "question": q,
+            }
+            if hint:
+                entry["hint"] = hint
             console.print()
-            console.print(f"[bold]{step}[/bold] [cyan]{qtext}[/cyan]")
+            console.print(f"[bold]{si}/{n}[/bold] [cyan]{kind}[/cyan]")
+            console.print(f"[bold]{q}[/bold]")
+            if hint:
+                print_dim(f"  {hint}")
             try:
-                line = input("> ")
+                if kind == "choice":
+                    opts = step.get("options") or []
+                    entry["options"] = list(opts)
+                    idx, label, raw_in = self._reflect_read_choice(opts, console)
+                    entry["answer"] = raw_in
+                    if idx is not None and label is not None:
+                        entry["selected_index"] = idx
+                        entry["selected_label"] = label
+                elif kind == "long_text":
+                    ans = self._reflect_read_long_text(console)
+                    entry["answer"] = ans
+                else:
+                    line = input("> ")
+                    entry["answer"] = (line or "").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
-                print_dim("  Closeout cancelled — session still active.")
-                return (True, None, None)
-            raw[key] = (line or "").strip()
-        co = _normalize_closeout(raw)
-        prompts_saved = _normalize_closeout_prompts(questions)
-        return (False, co, prompts_saved)
+                print_dim("  Reflection cancelled — session still active.")
+                return (True, None)
+            log.append(entry)
+
+        return (False, log)
 
     def _session_end(self, rest: str):
-        """End the current session with optional note, or --reflect for closeout prompts."""
+        """End the current session with optional note, or --reflect for reflection."""
         if not self.current_session:
             print_info("[Cliara] No active session to end.")
             return
         name = self.current_session.name
         rest_stripped = (rest or "").strip()
         if rest_stripped == "--reflect" or rest_stripped.startswith("--reflect "):
-            aborted, co, prompts = self._session_prompt_closeout()
+            aborted, refl = self._session_run_reflect()
             if aborted:
                 return
             self.session_store.end_session(
                 self.current_session.id,
                 end_note=None,
-                closeout=co,
-                closeout_prompts=prompts,
+                reflection=refl,
             )
             self.current_session = None
             print_success(f"[Cliara] Session '{name}' ended.")
-            if co:
-                print_dim("  Closeout saved (session show / list to review).")
+            if refl:
+                print_dim("  Reflection saved (session show / list to review).")
             return
         self.session_store.end_session(
             self.current_session.id,
             end_note=rest_stripped or None,
             closeout=None,
             closeout_prompts=None,
+            reflection=None,
         )
         self.current_session = None
         print_success(f"[Cliara] Session '{name}' ended.")

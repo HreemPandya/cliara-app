@@ -49,6 +49,45 @@ def _normalize_closeout_prompts(raw: Optional[Dict[str, str]]) -> Optional[Dict[
     return out if out else None
 
 
+def _normalize_reflection_log(raw: Any) -> Optional[List[Dict[str, Any]]]:
+    """Sanitize reflection entries from session end --reflect (session_reflect skill)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return None
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        eid = item.get("id")
+        kind = item.get("kind")
+        q = item.get("question")
+        ans = item.get("answer")
+        if not isinstance(eid, str) or not isinstance(kind, str):
+            continue
+        if not isinstance(q, str) or not q.strip():
+            continue
+        entry: Dict[str, Any] = {
+            "id": eid.strip()[:80],
+            "kind": kind,
+            "question": q.strip()[:1200],
+            "answer": str(ans).strip()[:8000] if ans is not None else "",
+        }
+        if isinstance(item.get("hint"), str) and item["hint"].strip():
+            entry["hint"] = item["hint"].strip()[:400]
+        if isinstance(item.get("options"), list):
+            entry["options"] = [str(o)[:500] for o in item["options"]][:8]
+        if item.get("selected_index") is not None:
+            try:
+                entry["selected_index"] = int(item["selected_index"])
+            except (TypeError, ValueError):
+                pass
+        if isinstance(item.get("selected_label"), str) and item["selected_label"].strip():
+            entry["selected_label"] = item["selected_label"].strip()[:500]
+        out.append(entry)
+    return out if out else None
+
+
 @dataclass
 class CommandEntry:
     """A single command executed during a session."""
@@ -122,6 +161,8 @@ class TaskSession:
     closeout: Optional[Dict[str, str]] = None
     # Questions asked at reflect (LLM-tailored or defaults); for display in session show
     closeout_prompts: Optional[Dict[str, str]] = None
+    # session_reflect skill: list of {id, kind, question, answer, ...}
+    reflection: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -141,6 +182,7 @@ class TaskSession:
             "closeout_prompts": dict(self.closeout_prompts)
             if self.closeout_prompts
             else None,
+            "reflection": list(self.reflection) if self.reflection else None,
         }
 
     @classmethod
@@ -170,6 +212,7 @@ class TaskSession:
                 if isinstance((raw_p := data.get("closeout_prompts")), dict)
                 else None
             ),
+            reflection=_normalize_reflection_log(data.get("reflection")),
         )
 
     @property
@@ -288,6 +331,7 @@ class SessionStore:
             end_note=None,
             closeout=None,
             closeout_prompts=None,
+            reflection=None,
         )
         self._data[key] = session.to_dict()
         self._save()
@@ -359,8 +403,9 @@ class SessionStore:
         end_note: Optional[str] = None,
         closeout: Optional[Dict[str, str]] = None,
         closeout_prompts: Optional[Dict[str, str]] = None,
+        reflection: Optional[List[Dict[str, Any]]] = None,
     ):
-        """Mark session as ended with optional note, closeout answers, and optional prompt texts."""
+        """Mark session ended. Use reflection= for session_reflect; else legacy closeout fields."""
         session = self.get_by_id(session_id)
         if session is None:
             return
@@ -368,8 +413,14 @@ class SessionStore:
         session.updated = session.ended_at
         if end_note is not None:
             session.end_note = end_note
-        session.closeout = _normalize_closeout(closeout)
-        session.closeout_prompts = _normalize_closeout_prompts(closeout_prompts)
+        if reflection is not None:
+            session.reflection = _normalize_reflection_log(reflection)
+            session.closeout = None
+            session.closeout_prompts = None
+        else:
+            session.reflection = None
+            session.closeout = _normalize_closeout(closeout)
+            session.closeout_prompts = _normalize_closeout_prompts(closeout_prompts)
         self.update(session)
 
     def list_all(self) -> List[TaskSession]:

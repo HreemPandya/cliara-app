@@ -32,6 +32,9 @@ from cliara.session_store import (
     TaskSession,
     _get_project_root,
     _get_branch,
+    _normalize_closeout,
+    _normalize_closeout_prompts,
+    CLOSEOUT_KEYS,
 )
 from cliara.execution_graph import (
     build_execution_tree,
@@ -976,8 +979,7 @@ class CliaraShell:
         "Type just a macro name to run it — no prefix needed.",
         "Risky commands (rm -rf, format …) always pause for approval, even when piped.",
         "'push' automatically writes your commit message and selects the right branch.",
-        "'session start <name>' groups your work so you can review what you shipped later.",
-        "'session end' closes the session; 'session list' shows all past ones.",
+        "'ss <name>' (or session start) groups your work; 'se' / 'session end' closes; 'se --reflect' saves optional closeout; 'session list' shows past ones.",
         "Run 'theme <name>' to switch colour themes — try dracula, nord, or catppuccin.",
         "'history' shows recent commands; '{nl} when did I <phrase>' finds them by meaning.",
         "Cliara watches long-running commands and notifies you when they finish.",
@@ -1014,8 +1016,8 @@ class CliaraShell:
             f"  • {nl} fix                 Diagnose & fix the last failed command",
             f"  • {nl} why                 Regression deep-dive after a failure",
             f"  • {nl} find / when did I   Search history by meaning",
-            "  • session start <name>   Start a task session",
-            "  • session end [note]     End session — session help for more",
+            "  • ss <name> / session start   Start a task session",
+            "  • se [note] / session end     End session — add --reflect for closeout",
             "  • session help           More session commands (notes, list, show)",
             "  • push                    Smart git push — auto-commit message & branch",
             "  • explain <cmd>           Understand any command  (e.g. explain git rebase)",
@@ -1525,6 +1527,12 @@ class CliaraShell:
         # Smart push — auto-commit-message + branch detection
         if user_input.lower() == 'push':
             self.handle_push()
+            return
+
+        # Task sessions — shortcuts: ss = session start, se = session end
+        _sess_expanded = self._expand_session_shortcut(user_input)
+        if _sess_expanded is not None:
+            self.handle_session(_sess_expanded)
             return
 
         # Task sessions — start, resume, end, list, show, note
@@ -4252,11 +4260,10 @@ class CliaraShell:
             return
 
         # ── 8. Show message and confirm ──
-        if stream_cb is None:
-            print_info("[Cliara] Commit message:")
-            print(f"\n  {commit_msg}\n")
-        else:
-            print()  # newline after streamed output
+        # Always print the commit message so it's visible even when streaming
+        # output was buffered or didn't display (e.g. rapid successive runs)
+        print_info("[Cliara] Commit message:")
+        print(f"\n  {commit_msg}\n")
         print_dim(f"  Branch: {branch}")
         print_dim(f"  Files:  {len(files)} changed")
         print()
@@ -4320,9 +4327,33 @@ class CliaraShell:
     # Task sessions — named, resumable workflow context
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _expand_session_shortcut(user_input: str) -> Optional[str]:
+        """
+        Map ss -> session start, se -> session end.
+        Returns session subcommand string, or None to run input as a normal shell command.
+        System ``ss`` with flags (e.g. ``ss -tuln``) is not hijacked.
+        """
+        s = user_input.strip()
+        if not s:
+            return None
+        low = s.lower()
+        if low == "se" or low.startswith("se "):
+            rest = s[2:].strip()
+            return ("end " + rest).strip() if rest else "end"
+        if low == "ss" or low.startswith("ss "):
+            if low == "ss":
+                return "start"
+            tail = s[2:].strip()
+            first = tail.split(None, 1)[0] if tail else ""
+            if first.startswith("-"):
+                return None
+            return ("start " + tail).strip() if tail else "start"
+        return None
+
     def handle_session(self, subcommand: str = ""):
         """
-        Task session subcommands: start, resume, end, list, show, note, help.
+        Task session subcommands: start, resume, end (optional --reflect), list, show, note, help.
         """
         parts = subcommand.split(maxsplit=1)
         sub = (parts[0].lower() if parts else "").strip()
@@ -4353,9 +4384,10 @@ class CliaraShell:
             self._session_help()
             return
         print_error(f"[Cliara] Unknown session subcommand: '{sub}'")
-        print_dim("  session start <name> [ -- <intent>]   Name can be multi-word")
+        print_dim("  ss <name> / session start …     Start a task (ss = shortcut)")
         print_dim("  session resume <name>          Resume a session and show summary")
-        print_dim("  session end [note]              End current session")
+        print_dim("  se [note] / session end …       End session (se = shortcut)")
+        print_dim("  se --reflect / session end --reflect   Closeout prompts (LLM-tailored if configured)")
         print_dim("  session list                    List sessions")
         print_dim("  session show <name>             Show session summary (no resume)")
         print_dim("  session graph [name]            Show execution graph (tree)")
@@ -4436,6 +4468,8 @@ class CliaraShell:
             # Re-open for more work
             session.ended_at = None
             session.end_note = None
+            session.closeout = None
+            session.closeout_prompts = None
             self.session_store.update(session)
             self.current_session = self.session_store.get_by_id(session.id)
         self._session_print_resume_summary(self.current_session)
@@ -4481,6 +4515,23 @@ class CliaraShell:
                 print_dim(f"    {n.text[:70]}{'...' if len(n.text) > 70 else ''}")
         if s.end_note:
             print_dim(f"  End note: {s.end_note[:70]}{'...' if len(s.end_note) > 70 else ''}")
+        if s.closeout or s.closeout_prompts:
+            print_dim("  Closeout:")
+            _fallback = {"blocked": "Blocked", "decided": "Decided", "next": "Next"}
+            for key in CLOSEOUT_KEYS:
+                q = (s.closeout_prompts or {}).get(key) if s.closeout_prompts else None
+                ans = (s.closeout or {}).get(key) if s.closeout else None
+                if q:
+                    ql = q[:120] + "…" if len(q) > 120 else q
+                    print_dim(f"    Q: {ql}")
+                    if ans:
+                        al = ans[:200] + "…" if len(ans) > 200 else ans
+                        print_dim(f"       {al}")
+                    else:
+                        print_dim("       (skipped)")
+                elif ans:
+                    short = ans[:200] + "…" if len(ans) > 200 else ans
+                    print_dim(f"    {_fallback[key]}: {short}")
 
         next_step = self._session_suggest_next_step(s)
         if next_step:
@@ -4499,17 +4550,147 @@ class CliaraShell:
             return "Last command failed (exit %d). Re-run or debug, then continue." % last.exit_code
         return "Last command succeeded. Continue from here or add a note: session note <text>."
 
-    def _session_end(self, end_note: str):
-        """End the current session with optional note."""
+    def _build_session_closeout_briefing(self, s: TaskSession) -> str:
+        """Compact text for LLM to tailor closeout questions."""
+        lines = [
+            f"Session name: {s.name}",
+            f"Intent: {s.intent or '(none)'}",
+            f"Git branch: {s.branch or '(none)'}",
+            f"Command count: {len(s.commands)}",
+            "",
+        ]
+        if s.commands:
+            lines.append("Recent commands (newest last):")
+            for c in s.commands[-25:]:
+                st = "ok" if c.exit_code == 0 else f"exit {c.exit_code}"
+                cmd = c.command[:160] + "..." if len(c.command) > 160 else c.command
+                lines.append(f"  [{st}] {cmd}")
+        if s.notes:
+            lines.append("User notes:")
+            for n in s.notes[-10:]:
+                lines.append(f"  - {(n.text or '')[:300]}")
+        return "\n".join(lines)
+
+    def _session_prompt_closeout(
+        self,
+    ) -> Tuple[bool, Optional[Dict[str, str]], Optional[Dict[str, str]]]:
+        """
+        Prompt for structured closeout. Returns (aborted, closeout_answers, closeout_prompts).
+        Questions are tailored by the LLM when available; otherwise defaults.
+        """
+        from rich.panel import Panel
+        from rich.rule import Rule
+        from rich.status import Status
+        from rich.text import Text
+
+        if not self.current_session:
+            return (True, None, None)
+        s = self.current_session
+        briefing = self._build_session_closeout_briefing(s)
+        defaults = {
+            "blocked": "What's blocked? (Enter to skip)",
+            "decided": "What did you decide? (Enter to skip)",
+            "next": "What's the next step? (Enter to skip)",
+        }
+        console = _cliara_console()
+        questions: Dict[str, str] = dict(defaults)
+        used_llm = False
+        if self.nl_handler.llm_enabled:
+            try:
+                with Status(
+                    "[dim]Tailoring questions from your session…[/dim]",
+                    spinner="dots",
+                    console=console,
+                ):
+                    q = self.nl_handler.session_closeout_questions(briefing)
+                if q:
+                    questions.update(q)
+                    used_llm = True
+            except Exception:
+                pass
+
+        summary_body = Text()
+        summary_body.append(f"Session “{s.name}”", style="bold")
+        summary_body.append(f" · {len(s.commands)} commands")
+        if s.branch:
+            summary_body.append(f" · {s.branch}", style="dim")
+        summary_body.append("\n")
+        if s.intent:
+            summary_body.append(f"Intent: {s.intent[:120]}\n", style="dim")
+        if s.commands:
+            summary_body.append("\nLast commands:\n", style="dim")
+            for c in s.commands[-5:]:
+                mark = "✓ " if c.exit_code == 0 else "✗ "
+                cmd = c.command[:76] + "…" if len(c.command) > 76 else c.command
+                summary_body.append(mark, style="green" if c.exit_code == 0 else "yellow")
+                summary_body.append(cmd + "\n", style="dim")
+
+        console.print()
+        console.print(Rule("[bold cyan]Session closeout[/bold cyan]", style="cyan"))
+        console.print(
+            Panel(
+                summary_body,
+                title="Context",
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
+        print_dim(
+            "  Questions: "
+            + ("tailored by LLM" if used_llm else "defaults (configure LLM for tailored prompts)")
+        )
+
+        order = [("blocked", "1/3"), ("decided", "2/3"), ("next", "3/3")]
+        raw: Dict[str, str] = {}
+        for key, step in order:
+            qtext = questions.get(key, defaults[key])
+            console.print()
+            console.print(f"[bold]{step}[/bold] [cyan]{qtext}[/cyan]")
+            try:
+                line = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                print_dim("  Closeout cancelled — session still active.")
+                return (True, None, None)
+            raw[key] = (line or "").strip()
+        co = _normalize_closeout(raw)
+        prompts_saved = _normalize_closeout_prompts(questions)
+        return (False, co, prompts_saved)
+
+    def _session_end(self, rest: str):
+        """End the current session with optional note, or --reflect for closeout prompts."""
         if not self.current_session:
             print_info("[Cliara] No active session to end.")
             return
         name = self.current_session.name
-        self.session_store.end_session(self.current_session.id, end_note=end_note or None)
+        rest_stripped = (rest or "").strip()
+        if rest_stripped == "--reflect" or rest_stripped.startswith("--reflect "):
+            aborted, co, prompts = self._session_prompt_closeout()
+            if aborted:
+                return
+            self.session_store.end_session(
+                self.current_session.id,
+                end_note=None,
+                closeout=co,
+                closeout_prompts=prompts,
+            )
+            self.current_session = None
+            print_success(f"[Cliara] Session '{name}' ended.")
+            if co:
+                print_dim("  Closeout saved (session show / list to review).")
+            return
+        self.session_store.end_session(
+            self.current_session.id,
+            end_note=rest_stripped or None,
+            closeout=None,
+            closeout_prompts=None,
+        )
         self.current_session = None
         print_success(f"[Cliara] Session '{name}' ended.")
-        if end_note:
-            print_dim(f"  Note: {end_note[:80]}{'...' if len(end_note) > 80 else ''}")
+        if rest_stripped:
+            print_dim(
+                f"  Note: {rest_stripped[:80]}{'...' if len(rest_stripped) > 80 else ''}"
+            )
 
     def _session_list(self):
         """List all sessions, or for current project only."""
@@ -4518,7 +4699,7 @@ class CliaraShell:
         sessions = self.session_store.list_by_project(project_root)
         if not sessions:
             print_info("[Cliara] No task sessions yet.")
-            print_dim("  session start <name> [intent]   to start one")
+            print_dim("  ss <name> or session start …   to start one")
             return
         print_info(f"\n[Cliara] Task sessions ({len(sessions)}):\n")
         for s in sessions:
@@ -4546,7 +4727,7 @@ class CliaraShell:
     def _session_note(self, text: str):
         """Add a note to the current session."""
         if not self.current_session:
-            print_error("[Cliara] No active session. Start one with 'session start <name>'.")
+            print_error("[Cliara] No active session. Start one with 'ss <name>' or 'session start <name>'.")
             return
         if not text:
             print_error("[Cliara] Usage: session note <text>")
@@ -4560,9 +4741,13 @@ class CliaraShell:
     def _session_help(self):
         """Show session command help."""
         print_info("\n[Cliara] Task sessions — persistent, resumable workflow context\n")
-        print("  session start <name> [ -- <intent>]   Name can be multi-word (e.g. fix login bug)")
+        print("  ss <name> [ -- <intent>]       Short for session start (name can be multi-word)")
+        print("  session start <name> [ -- <intent>]   Same as ss")
         print("  session resume <name>          Resume and see summary + suggested next step")
-        print("  session end [note]             End current session (optional closing note)")
+        print("  se [note]                      Short for session end (optional closing note)")
+        print("  se --reflect                   Short for session end --reflect")
+        print("  session end [note]             Same as se")
+        print("  session end --reflect          Closeout prompts (blocked / decided / next; LLM-tailored if configured)")
         print("  session list                   List sessions for this project")
         print("  session show <name>             Show session summary without resuming")
         print("  session graph [name]            Show execution graph (tree); optional: export [file], export --json <file>")
@@ -4612,7 +4797,7 @@ class CliaraShell:
         else:
             session = self.current_session
             if session is None:
-                print_error("[Cliara] No active session. Start one with 'session start <name>' or use 'session graph <name>'.")
+                print_error("[Cliara] No active session. Start one with 'ss <name>' or use 'session graph <name>'.")
                 return
 
         if not session.commands:
@@ -5486,9 +5671,10 @@ class CliaraShell:
 
         print_info("  Task Sessions")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  session start <name> [ -- <intent>]   Start a task (name can be multi-word)")
+        print_dim("  ss <name> [ -- <intent>]         Start a task (shortcut for session start)")
         print_dim("  session resume <name>            Resume and see summary + next step")
-        print_dim("  session end [note]               End current session")
+        print_dim("  se [note]                        End session (shortcut)")
+        print_dim("  se --reflect                     End with closeout prompts")
         print_dim("  session list / show / note        List, show, or add notes")
         print_dim("  Sessions persist across terminal closes — resume anytime.\n")
 

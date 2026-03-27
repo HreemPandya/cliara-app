@@ -13,6 +13,7 @@ from cliara.agents import history_search as _history_search
 from cliara.agents import commit_and_deploy as _commit_deploy
 from cliara.agents import copilot_explain as _copilot_explain
 from cliara.agents import readme_generator as _readme
+from cliara.agents import session_closeout as _session_closeout
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -33,6 +34,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
         |         _commit_deploy.AGENTS
         | _copilot_explain.AGENTS
         | _readme.AGENTS
+        | _session_closeout.AGENTS
     )
     for name, cfg in all_agents.items():
         registry[name] = {

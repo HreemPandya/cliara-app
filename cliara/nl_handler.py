@@ -449,6 +449,40 @@ class NLHandler:
         """Non-streaming LLM call. Convenience wrapper around _call_llm_stream."""
         return self._call_llm_stream(agent_type, user_message, stream_callback=None)
 
+    def session_closeout_questions(self, briefing: str) -> Optional[Dict[str, str]]:
+        """
+        Ask the LLM for three tailored questions (blocked / decided / next).
+        Returns None if the LLM is disabled or the call fails; caller should use defaults.
+        """
+        defaults = {
+            "blocked": "What's blocked? (Enter to skip)",
+            "decided": "What did you decide? (Enter to skip)",
+            "next": "What's the next step? (Enter to skip)",
+        }
+        if not self.llm_enabled:
+            return None
+        try:
+            user_msg = (
+                f"{briefing}\n\n"
+                "Respond with a single JSON object only; keys blocked, decided, next; "
+                "each value one short tailored question ending with ?."
+            )
+            text = self._call_llm("session_closeout", user_msg)
+            raw = self._extract_json(text)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            out: Dict[str, str] = {}
+            for k in ("blocked", "decided", "next"):
+                v = data.get(k)
+                if isinstance(v, str) and v.strip():
+                    out[k] = v.strip()[:500]
+                else:
+                    out[k] = defaults[k]
+            return out
+        except Exception:
+            return None
+
     @staticmethod
     def _extract_json(text: str) -> Optional[str]:
         """Find the first complete JSON object in *text*.

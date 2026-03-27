@@ -15,6 +15,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+# Keys for optional structured closeout (session end --reflect)
+CLOSEOUT_KEYS = ("blocked", "decided", "next")
+
+
+def _normalize_closeout(raw: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Return None if empty; otherwise only known keys with non-empty stripped values."""
+    if not raw:
+        return None
+    out: Dict[str, str] = {}
+    for k in CLOSEOUT_KEYS:
+        v = raw.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            out[k] = s
+    return out if out else None
+
+
+def _normalize_closeout_prompts(raw: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Question text shown at reflect time; same keys, stored for session show."""
+    if not raw:
+        return None
+    out: Dict[str, str] = {}
+    for k in CLOSEOUT_KEYS:
+        v = raw.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            out[k] = s[:800]
+    return out if out else None
+
 
 @dataclass
 class CommandEntry:
@@ -85,6 +118,10 @@ class TaskSession:
     commands: List[CommandEntry] = field(default_factory=list)
     notes: List[NoteEntry] = field(default_factory=list)
     end_note: Optional[str] = None
+    # Optional structured closeout from `session end --reflect` (blocked / decided / next)
+    closeout: Optional[Dict[str, str]] = None
+    # Questions asked at reflect (LLM-tailored or defaults); for display in session show
+    closeout_prompts: Optional[Dict[str, str]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +137,10 @@ class TaskSession:
             "commands": [c.to_dict() for c in self.commands],
             "notes": [n.to_dict() for n in self.notes],
             "end_note": self.end_note,
+            "closeout": dict(self.closeout) if self.closeout else None,
+            "closeout_prompts": dict(self.closeout_prompts)
+            if self.closeout_prompts
+            else None,
         }
 
     @classmethod
@@ -117,6 +158,18 @@ class TaskSession:
             commands=[CommandEntry.from_dict(c) for c in data.get("commands", [])],
             notes=[NoteEntry.from_dict(n) for n in data.get("notes", [])],
             end_note=data.get("end_note"),
+            closeout=(
+                _normalize_closeout({k: raw_co.get(k) for k in CLOSEOUT_KEYS})
+                if isinstance((raw_co := data.get("closeout")), dict)
+                else None
+            ),
+            closeout_prompts=(
+                _normalize_closeout_prompts(
+                    {k: raw_p.get(k) for k in CLOSEOUT_KEYS}
+                )
+                if isinstance((raw_p := data.get("closeout_prompts")), dict)
+                else None
+            ),
         )
 
     @property
@@ -233,6 +286,8 @@ class SessionStore:
             commands=[],
             notes=[],
             end_note=None,
+            closeout=None,
+            closeout_prompts=None,
         )
         self._data[key] = session.to_dict()
         self._save()
@@ -298,8 +353,14 @@ class SessionStore:
         session.updated = now
         self.update(session)
 
-    def end_session(self, session_id: str, end_note: Optional[str] = None):
-        """Mark session as ended with optional note."""
+    def end_session(
+        self,
+        session_id: str,
+        end_note: Optional[str] = None,
+        closeout: Optional[Dict[str, str]] = None,
+        closeout_prompts: Optional[Dict[str, str]] = None,
+    ):
+        """Mark session as ended with optional note, closeout answers, and optional prompt texts."""
         session = self.get_by_id(session_id)
         if session is None:
             return
@@ -307,6 +368,8 @@ class SessionStore:
         session.updated = session.ended_at
         if end_note is not None:
             session.end_note = end_note
+        session.closeout = _normalize_closeout(closeout)
+        session.closeout_prompts = _normalize_closeout_prompts(closeout_prompts)
         self.update(session)
 
     def list_all(self) -> List[TaskSession]:

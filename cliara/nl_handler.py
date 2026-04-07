@@ -46,6 +46,7 @@ _STREAMING_SAFE_AGENTS = frozenset({
     "commit_message",
     "copilot_explain",
     "readme",
+    "chat_polish",
 })
 
 
@@ -554,6 +555,15 @@ class NLHandler:
             pass
         return default
 
+    def chat_polish_bundle(self, bundle_markdown: str) -> str:
+        """Optional: compress a Cliara chat export for Cursor/Copilot. Requires LLM."""
+        if not self.llm_enabled:
+            raise RuntimeError("LLM is not configured. Run setup-llm or set API keys.")
+        return self._call_llm(
+            "chat_polish",
+            "Here is the Cliara context to compress:\n\n" + bundle_markdown,
+        )
+
     @staticmethod
     def _extract_json(text: str) -> Optional[str]:
         """Find the first complete JSON object in *text*.
@@ -960,13 +970,14 @@ Diff summary:
 Diff (may be truncated):
 {diff_truncated}
 
-Rules:
-- Use conventional commit format:  type: description
-- Allowed types: feat, fix, docs, style, refactor, test, chore, build, ci, perf
-- Keep the description under 72 characters total (including the type prefix)
-- Use imperative mood ("add" not "added", "fix" not "fixed")
-- Be specific about what actually changed
-- If there are multiple kinds of changes, pick the most significant type
+Rules (Conventional Commits):
+- Format: type: description (lowercase type; imperative description; no trailing period)
+- Core types: feat (new feature), fix (bug fix), refactor (restructure, no behavior change),
+  docs (documentation only), style (formatting/lint, no logic), test (tests), chore (misc/deps/config)
+- Extras: perf (performance), ci (CI/CD), build (build/packaging/deps), revert (undo a commit)
+- Prefer the primary change type (usually feat or fix) when several apply
+- Keep the line reasonably short (~50–72 chars when practical)
+- Be specific about what the diff actually changes
 - Return ONLY the commit message — one line, no quotes, no explanation"""
 
             response = self._call_llm_stream("commit_message", prompt, stream_callback)

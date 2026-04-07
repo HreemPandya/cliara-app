@@ -63,6 +63,7 @@ class Config:
         "model_history": None,  # history summarisation & search
         "model_copilot": None,  # CopilotGate explain
         "model_session_reflect": None,  # session end --reflect reflection plan
+        "model_chat_polish": None,  # optional: chat polish — compress bundle for Cursor
         # Ollama (local LLM) settings
         "ollama_base_url": "http://localhost:11434",  # Ollama server URL
         "first_run_complete": False,
@@ -78,6 +79,17 @@ class Config:
         "copilot_gate": True,
         "copilot_gate_mode": "auto",            # "auto" | "explicit" | "all"
         "copilot_gate_auto_approve_safe": True,  # Auto-execute SAFE pasted commands
+        # Copilot/Cursor — paste-ready context (chat copy, session snapshot --chat)
+        "chat_export_max_stderr_chars": 12000,
+        "chat_export_max_stdout_chars": 8000,
+        "chat_export_include_stdout": False,
+        "chat_export_include_regression_snapshot": False,
+        "chat_export_regression_max_chars": 2000,
+        "chat_polish_enabled": False,  # chat polish — LLM compress (uses LLM when enabled)
+        # When True, store truncated stdout/stderr on each session command (privacy-sensitive)
+        "session_persist_output": False,
+        "session_output_max_stderr_chars": 4000,
+        "session_output_max_stdout_chars": 4000,
         # PostgreSQL configuration (optional)
         "postgres": {
             "host": "localhost",
@@ -391,6 +403,7 @@ class Config:
             "readme":         "model_readme",
             "copilot_explain":"model_copilot",
             "session_reflect": "model_session_reflect",
+            "chat_polish":     "model_chat_polish",
         }
         if agent_type:
             key = _AGENT_CONFIG_KEYS.get(agent_type)

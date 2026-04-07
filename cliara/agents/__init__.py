@@ -14,6 +14,7 @@ from cliara.agents import commit_and_deploy as _commit_deploy
 from cliara.agents import copilot_explain as _copilot_explain
 from cliara.agents import readme_generator as _readme
 from cliara.agents import session_reflect as _session_reflect
+from cliara.agents import chat_polish as _chat_polish
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -35,6 +36,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
         | _copilot_explain.AGENTS
         | _readme.AGENTS
         | _session_reflect.AGENTS
+        | _chat_polish.AGENTS
     )
     for name, cfg in all_agents.items():
         registry[name] = {

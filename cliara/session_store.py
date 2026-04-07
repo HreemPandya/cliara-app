@@ -98,9 +98,12 @@ class CommandEntry:
     timestamp: str  # ISO
     id: str = ""  # UUID for graph parent/child links
     parent_id: Optional[str] = None  # id of command this is a follow-up of (e.g. fix after failure)
+    # Optional truncated captures when session_persist_output is enabled
+    stderr_preview: Optional[str] = None
+    stdout_preview: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        d: Dict[str, Any] = {
             "command": self.command,
             "cwd": self.cwd,
             "exit_code": self.exit_code,
@@ -108,6 +111,11 @@ class CommandEntry:
             "id": self.id,
             "parent_id": self.parent_id,
         }
+        if self.stderr_preview:
+            d["stderr_preview"] = self.stderr_preview
+        if self.stdout_preview:
+            d["stdout_preview"] = self.stdout_preview
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "CommandEntry":
@@ -118,6 +126,16 @@ class CommandEntry:
             timestamp=data.get("timestamp", ""),
             id=data.get("id") or str(uuid.uuid4()),
             parent_id=data.get("parent_id"),
+            stderr_preview=(
+                str(data["stderr_preview"]).strip()[:16000]
+                if data.get("stderr_preview")
+                else None
+            ),
+            stdout_preview=(
+                str(data["stdout_preview"]).strip()[:16000]
+                if data.get("stdout_preview")
+                else None
+            ),
         )
 
 
@@ -352,6 +370,8 @@ class SessionStore:
         branch: Optional[str] = None,
         project_root: Optional[str] = None,
         parent_id: Optional[str] = None,
+        stderr_preview: Optional[str] = None,
+        stdout_preview: Optional[str] = None,
     ) -> Optional[str]:
         """Append a command to the session and update cwds/branch/updated.
         Returns the new command's id, or None if session not found."""
@@ -367,6 +387,8 @@ class SessionStore:
             timestamp=now,
             id=entry_id,
             parent_id=parent_id,
+            stderr_preview=stderr_preview,
+            stdout_preview=stdout_preview,
         )
         session.commands.append(entry)
         if cwd and cwd not in session.cwds:

@@ -48,6 +48,12 @@ from cliara.cross_platform import (
     translate_pipeline,
 )
 from cliara import regression
+from cliara.chat_export import (
+    format_last_run_bundle,
+    format_session_for_chat,
+    default_shell_label,
+    truncate_text,
+)
 from cliara.copilot_gate import (
     SourceDetector,
     InputSource,
@@ -752,8 +758,11 @@ class CliaraShell:
 
         # Error translator state — populated by execute_shell_command()
         self.last_stderr: str = ""
+        self.last_stdout: str = ""
         self.last_exit_code: int = 0
         self.last_command: str = ""  # Last shell command that was executed
+        # When True, next handle_input skips Copilot Gate (replay via last/retry)
+        self._gate_force_typed: bool = False
         self._prev_cwd: Optional[str] = None  # Previous directory for "cd -"
         # Load persisted last command so "last" works after restart
         _last_cmd_file = self.config.config_dir / "last_command.txt"
@@ -1017,6 +1026,7 @@ class CliaraShell:
             "  • ss <name> / session start   Start a task session",
             "  • se [note] / session end     End session — add --reflect for closeout",
             "  • session help           More session commands (notes, list, show)",
+            "  • chat copy              Copy last-run context for Copilot or Cursor",
             "  • push                    Smart git push — auto-commit message & branch",
             "  • explain <cmd>           Understand any command  (e.g. explain git rebase)",
             "  • macro add <name>        Create a reusable macro",
@@ -1453,18 +1463,22 @@ class CliaraShell:
 
         # --- Copilot Gate: intercept AI-generated commands ---
         elif self.config.get("copilot_gate", True):
-            gate_mode = self.config.get("copilot_gate_mode", "auto")
-            source = self._source_detector.classify(
-                user_input, self.last_command, mode=gate_mode)
-            if self._source_detector.is_ai_generated(source):
-                command = user_input[4:].strip() if source == InputSource.AI_TAGGED else user_input
-                if not command:
-                    return
-                approved = self._copilot_gate.evaluate(command, source)
-                if not approved:
-                    print_warning("  [Cancelled]")
-                    return
-                user_input = command
+            # Replay of last command (last/retry) is always treated as typed — not AI paste.
+            if getattr(self, "_gate_force_typed", False):
+                self._gate_force_typed = False
+            else:
+                gate_mode = self.config.get("copilot_gate_mode", "auto")
+                source = self._source_detector.classify(
+                    user_input, self.last_command, mode=gate_mode)
+                if self._source_detector.is_ai_generated(source):
+                    command = user_input[4:].strip() if source == InputSource.AI_TAGGED else user_input
+                    if not command:
+                        return
+                    approved = self._copilot_gate.evaluate(command, source)
+                    if not approved:
+                        print_warning("  [Cancelled]")
+                        return
+                    user_input = command
 
         # Check for exit commands
         if user_input.lower() in ['exit', 'quit', 'q']:
@@ -1483,13 +1497,21 @@ class CliaraShell:
             print_info(f"Cliara {__version__}")
             return
 
-        # Repeat last command
-        if user_input.strip().lower() == 'last':
+        # Repeat last command (retry alias — same as last)
+        _ulow = user_input.strip().lower()
+        if _ulow == "last" or _ulow == "retry":
             if not self.last_command:
                 print_error("[Cliara] No previous command to repeat.")
                 return
             print_dim(f"→ reruns: {self.last_command}")
+            self._gate_force_typed = True
             self.handle_input(self.last_command)
+            return
+
+        # Copilot/Cursor — copy context for chat
+        if user_input.lower() == "chat" or user_input.lower().startswith("chat "):
+            rest = user_input[4:].strip() if len(user_input) > 4 else ""
+            self._handle_chat_command(rest)
             return
 
         # Setup health check
@@ -3847,6 +3869,7 @@ class CliaraShell:
         """
         # Reset per-command error state
         self.last_stderr = ""
+        self.last_stdout = ""
         self.last_exit_code = 0
         self.last_command = command
         self._last_command_elapsed = None
@@ -3905,6 +3928,7 @@ class CliaraShell:
                 if result.stderr:
                     print(result.stderr, end="", file=sys.stderr)
                 self.last_stderr = result.stderr or ""
+                self.last_stdout = result.stdout or ""
                 self.last_exit_code = result.returncode
                 success = result.returncode == 0
                 elapsed = time.time() - start_time
@@ -3959,12 +3983,14 @@ class CliaraShell:
                     )
 
                 stderr_lines: List[str] = []
+                stdout_lines: List[str] = []
 
                 def _drain_stdout():
                     """Read stdout line-by-line, display via timer lock."""
                     try:
                         assert proc.stdout is not None
                         for line in proc.stdout:
+                            stdout_lines.append(line)
                             with timer.output_lock():
                                 sys.stdout.write(line)
                                 sys.stdout.flush()
@@ -4017,6 +4043,7 @@ class CliaraShell:
                     return False
 
                 self.last_stderr = "".join(stderr_lines)
+                self.last_stdout = "".join(stdout_lines)
                 self.last_exit_code = proc.returncode
                 success = proc.returncode == 0
                 elapsed = time.time() - start_time
@@ -4051,6 +4078,22 @@ class CliaraShell:
         branch = _get_branch(Path(cwd))
         parent_id = self._next_command_parent_id
         self._next_command_parent_id = None  # consume once
+        stderr_preview = None
+        stdout_preview = None
+        if self.config.get("session_persist_output"):
+            try:
+                smax = int(self.config.get("session_output_max_stderr_chars", 4000))
+            except (TypeError, ValueError):
+                smax = 4000
+            try:
+                omax = int(self.config.get("session_output_max_stdout_chars", 4000))
+            except (TypeError, ValueError):
+                omax = 4000
+            if (self.last_stderr or "").strip():
+                stderr_preview = truncate_text(self.last_stderr, smax)
+            lo = getattr(self, "last_stdout", "") or ""
+            if lo.strip():
+                stdout_preview = truncate_text(lo, omax)
         self.session_store.add_command(
             self.current_session.id,
             command=command,
@@ -4059,6 +4102,8 @@ class CliaraShell:
             branch=branch,
             project_root=root,
             parent_id=parent_id,
+            stderr_preview=stderr_preview,
+            stdout_preview=stdout_preview,
         )
         # Refresh in-memory session so prompt and list stay in sync
         updated = self.session_store.get_by_id(self.current_session.id)
@@ -4375,6 +4420,9 @@ class CliaraShell:
         if sub == "graph":
             self._session_graph(rest)
             return
+        if sub == "snapshot":
+            self._session_snapshot(rest)
+            return
         if sub == "note":
             self._session_note(rest)
             return
@@ -4389,6 +4437,7 @@ class CliaraShell:
         print_dim("  session list                    List sessions")
         print_dim("  session show <name>             Show session summary (no resume)")
         print_dim("  session graph [name]            Show execution graph (tree)")
+        print_dim("  session snapshot --chat [name]  Copy session for Copilot/Cursor chat")
         print_dim("  session note <text>             Add a note to current session")
         print_dim("  session help                    Show this help")
 
@@ -4799,6 +4848,112 @@ class CliaraShell:
             self.current_session = updated
         print_success("[Cliara] Note added.")
 
+    def _build_chat_bundle_text(self) -> str:
+        """Markdown for last shell run + cwd (for Copilot/Cursor)."""
+        cwd = str(Path.cwd())
+        branch = _get_branch(Path(cwd))
+        reg_snap = None
+        if self.config.get("chat_export_include_regression_snapshot"):
+            reg_snap = regression.gather_current_snapshot(Path(cwd))
+        try:
+            mx = int(self.config.get("chat_export_max_stderr_chars", 12000))
+        except (TypeError, ValueError):
+            mx = 12000
+        try:
+            mxo = int(self.config.get("chat_export_max_stdout_chars", 8000))
+        except (TypeError, ValueError):
+            mxo = 8000
+        try:
+            rm = int(self.config.get("chat_export_regression_max_chars", 2000))
+        except (TypeError, ValueError):
+            rm = 2000
+        return format_last_run_bundle(
+            cwd=cwd,
+            shell=default_shell_label(self.shell_path),
+            os_name=platform.system(),
+            branch=branch,
+            last_command=self.last_command,
+            last_exit_code=self.last_exit_code,
+            last_stderr=self.last_stderr or "",
+            last_stdout=getattr(self, "last_stdout", "") or "",
+            session_name=self.current_session.name if self.current_session else None,
+            session_id=self.current_session.id if self.current_session else None,
+            max_stderr=mx,
+            max_stdout=mxo,
+            include_stdout=bool(self.config.get("chat_export_include_stdout", False)),
+            regression_snapshot=reg_snap,
+            regression_max_chars=rm,
+        )
+
+    def _handle_chat_command(self, rest: str):
+        """chat copy | chat polish — Copilot/Cursor integration."""
+        parts = rest.split(maxsplit=1)
+        sub = (parts[0].lower() if parts else "").strip()
+        if sub in ("", "help"):
+            print_info("\n[Cliara] chat — context for Copilot or Cursor\n")
+            print("  chat copy              Copy last-run markdown (cwd, command, exit, stderr) to clipboard")
+            print("  chat polish            LLM-compress clipboard (needs LLM; enable chat_polish_enabled)")
+            print_dim("  Tip: use `session snapshot --chat` for full session + last run.\n")
+            return
+        if sub == "copy":
+            text = self._build_chat_bundle_text()
+            if self._write_system_clipboard(text):
+                print_success("[Copied to clipboard — paste into Copilot or Cursor chat]")
+            else:
+                print_error("[Cliara] Could not copy to clipboard")
+            return
+        if sub == "polish":
+            if not self.config.get("chat_polish_enabled"):
+                print_error(
+                    "[Cliara] chat polish is disabled. Set chat_polish_enabled to true in config."
+                )
+                return
+            raw = self._read_system_clipboard() or ""
+            if not raw.strip():
+                print_error("[Cliara] Clipboard is empty. Run chat copy (or session snapshot --chat) first.")
+                return
+            if not self.nl_handler.llm_enabled:
+                print_error("[Cliara] LLM not configured. Run setup-llm.")
+                return
+            try:
+                out = self.nl_handler.chat_polish_bundle(raw)
+            except Exception as e:
+                print_error(f"[Cliara] chat polish failed: {e}")
+                return
+            if self._write_system_clipboard(out):
+                print_success("[Copied polished summary to clipboard]")
+            else:
+                print_error("[Cliara] Could not copy to clipboard")
+            return
+        print_error(f"[Cliara] Unknown chat subcommand: {sub!r}. Try: chat copy, chat help")
+
+    def _session_snapshot(self, rest: str):
+        """session snapshot --chat [name] — full session + last-run bundle for IDE chat."""
+        tokens = [t for t in rest.split() if t]
+        if "--chat" not in tokens:
+            print_error("[Cliara] Usage: session snapshot --chat [session-name]")
+            print_dim("  Copies markdown for the current or named session plus last-run context.")
+            return
+        name_tokens = [t for t in tokens if t != "--chat"]
+        name = " ".join(name_tokens).strip() if name_tokens else None
+        cwd = Path.cwd()
+        project_root = _get_project_root(cwd)
+        if name:
+            session = self.session_store.get_by_key(name, project_root)
+        else:
+            session = self.current_session
+        if session is None:
+            print_error(
+                "[Cliara] No session. Start with ss <name> or: session snapshot --chat <name>"
+            )
+            return
+        bundle = self._build_chat_bundle_text()
+        text = format_session_for_chat(session, bundle, max_commands=40)
+        if self._write_system_clipboard(text):
+            print_success("[Copied session snapshot to clipboard — paste into Copilot or Cursor]")
+        else:
+            print_error("[Cliara] Could not copy to clipboard")
+
     def _session_help(self):
         """Show session command help."""
         print_info("\n[Cliara] Task sessions — persistent, resumable workflow context\n")
@@ -4812,6 +4967,7 @@ class CliaraShell:
         print("  session list                   List sessions for this project")
         print("  session show <name>             Show session summary without resuming")
         print("  session graph [name]            Show execution graph (tree); optional: export [file], export --json <file>")
+        print("  session snapshot --chat [name]  Copy session + last-run markdown for Copilot/Cursor")
         print("  session note <text>            Add a note to the current session")
         print("  session help                   Show this help")
         print_dim("\n  Sessions are keyed by name + project (git root). Close the terminal")
@@ -5737,7 +5893,14 @@ class CliaraShell:
         print_dim("  se [note]                        End session (shortcut)")
         print_dim("  se --reflect                     End with closeout prompts")
         print_dim("  session list / show / note        List, show, or add notes")
+        print_dim("  session snapshot --chat [name]  Copy session for Copilot/Cursor")
         print_dim("  Sessions persist across terminal closes — resume anytime.\n")
+
+        print_info("  Copilot / Cursor")
+        print_dim("  ─────────────────────────────────────")
+        print_dim("  chat copy                  Copy last-run markdown (cwd, exit, stderr) to clipboard")
+        print_dim("  chat polish                Optional: LLM-compress clipboard (chat_polish_enabled)")
+        print_dim("  last / retry               Re-run the last shell command (skip Copilot Gate)\n")
 
         print_info("  Smart Deploy")
         print_dim("  ─────────────────────────────────────")

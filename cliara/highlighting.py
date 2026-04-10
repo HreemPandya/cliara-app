@@ -116,8 +116,8 @@ THEMES = {
             "op":       "[cyan]",
             "num":      "[bright_magenta]",
         },
-        # Neutral print_info / status lines — matches lexer accent, not generic ANSI cyan
-        "ui_info": "#66d9ef",
+        # print_info: same ANSI slot as prompt-name (ansicyan bold → Rich)
+        "ui_info": "bold cyan",
     },
     "dracula": {
         "styles": {
@@ -148,8 +148,8 @@ THEMES = {
             "op":       "[bright_cyan]",
             "num":      "[magenta]",
         },
-        # Match prompt-name accent (magenta/purple), not operator cyan
-        "ui_info": "#bd93f9",
+        # Same as prompt-name: ansimagenta bold
+        "ui_info": "bold magenta",
     },
     "nord": {
         "styles": {
@@ -180,7 +180,8 @@ THEMES = {
             "op":       "[blue]",
             "num":      "[bright_magenta]",
         },
-        "ui_info": "#81a1c1",
+        # Same as prompt-name: ansiblue bold
+        "ui_info": "bold blue",
     },
     "solarized": {
         # Dark background: bright ANSI colors (widely supported)
@@ -199,7 +200,8 @@ THEMES = {
         "prompt_style": {
             "prompt-name":  "ansibrightred bold",   # Solarized orange
             "prompt-sep":   "ansibrightblack",
-            "prompt-path":  "ansibrightwhite",
+            # ansiwhite — prompt_toolkit rejects ansibrightwhite (ValueError: Wrong color format)
+            "prompt-path":  "ansiwhite",
             "prompt-arrow": "ansibrightblack",
             "prompt-exit-success": "ansigreen bold",
             "prompt-exit-fail": "ansired bold",
@@ -212,7 +214,8 @@ THEMES = {
             "op":       "[cyan]",
             "num":      "[magenta]",
         },
-        "ui_info": "#2aa198",
+        # Same as prompt-name: ansibrightred bold — use ANSI name so Rich matches PT (not hex #cb4b16).
+        "ui_info": "bold bright_red",
     },
     "catppuccin": {
         "styles": {
@@ -243,39 +246,41 @@ THEMES = {
             "op":       "[bright_cyan]",
             "num":      "[color(183)]",
         },
-        "ui_info": "#89dceb",
+        # Same as prompt-name: ansigreen bold
+        "ui_info": "bold green",
     },
     "light": {
-        # Light background: dark ANSI colors so text is readable (clearly different from solarized).
+        # White / snow — light foreground for dark terminals (cliara name + body text near white).
         "styles": {
-            Token.Text:        "",
-            Comment.Single:    "ansiblue italic",
-            String.Double:     "ansigreen",
-            String.Single:     "ansigreen",
-            String.Backtick:   "ansigreen",
-            Name.Variable:     "ansiyellow",
-            Name.Tag:          "ansiblue",
-            Operator:          "ansiblue",
-            Punctuation:       "ansiblue",
-            Number.Integer:    "ansimagenta",
+            Token.Text:        "#f5f5f5",
+            Comment.Single:    "#a3a3a3 italic",
+            String.Double:     "#bbf7d0",
+            String.Single:     "#bbf7d0",
+            String.Backtick:   "#bbf7d0",
+            Name.Variable:     "#fef9c3",
+            Name.Tag:          "#d4d4d4",
+            Operator:          "#ffffff",
+            Punctuation:       "#ffffff",
+            Number.Integer:    "#fecdd3",
         },
         "prompt_style": {
-            "prompt-name":  "ansiblue bold",       # Dark blue on light (not red/orange)
-            "prompt-sep":   "ansiblack",
-            "prompt-path":  "ansiblack",
-            "prompt-arrow": "ansiblack",
-            "prompt-exit-success": "ansigreen bold",
-            "prompt-exit-fail": "ansired bold",
+            "prompt-name":  "bold #ffffff",
+            "prompt-sep":   "#737373",
+            "prompt-path":  "#e5e5e5",
+            "prompt-arrow": "#a3a3a3",
+            "prompt-exit-success": "bold #86efac",
+            "prompt-exit-fail": "bold #fca5a5",
         },
         "preview": {
-            "name":     "[bold blue]",
-            "string":   "[green]",
-            "flag":     "[blue]",
-            "var":      "[yellow]",
-            "op":       "[blue]",
-            "num":      "[magenta]",
+            "name":     "[bold white]",
+            "string":   "[#bbf7d0]",
+            "flag":     "[#a3a3a3]",
+            "var":      "[#fef9c3]",
+            "op":       "[white]",
+            "num":      "[#fecdd3]",
         },
-        "ui_info": "#005f87",
+        # Same as prompt-name: bold #ffffff → Rich white (truecolor ok; matches PT hex)
+        "ui_info": "bold white",
     },
 }
 
@@ -291,7 +296,7 @@ def get_ui_info_style(theme_name: str) -> str:
     name = (theme_name or "").strip().lower()
     if name not in THEMES:
         name = DEFAULT_THEME
-    return str(THEMES[name].get("ui_info", "#bd93f9"))
+    return str(THEMES[name].get("ui_info", THEMES[DEFAULT_THEME].get("ui_info", "bold magenta")))
 
 
 def get_style_for_theme(theme_name: str):
@@ -359,7 +364,7 @@ def get_prompt_name_ansi(theme_name: str) -> tuple:
         "nord": (True, 34),       # blue bold
         "solarized": (True, 91),  # bright red / orange
         "catppuccin": (True, 32), # green bold
-        "light": (True, 34),      # blue bold (dark on light bg; distinct from solarized)
+        "light": (True, 97),      # bright white bold (snow theme; plain input() fallback)
     }
     bold, fg = _prompt_ansi.get(name, (True, 35))
     # Standard ANSI: 30-37 normal, 90-97 bright. 256-color: 0-255 via 38;5;n

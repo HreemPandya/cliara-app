@@ -33,7 +33,25 @@ def set_ui_theme(name: Optional[str]) -> None:
 
 
 def get_ui_theme() -> str:
-    """Active theme name for UI styling (defaults before shell init: dracula)."""
-    from cliara.highlighting import DEFAULT_THEME
+    """Active theme for print_info (synced by CliaraShell; else ~/.cliara/config.json once)."""
+    global _ui_theme
+    from cliara.highlighting import DEFAULT_THEME, list_themes
 
-    return _ui_theme if _ui_theme else DEFAULT_THEME
+    if _ui_theme is not None:
+        return _ui_theme
+    themes = frozenset(list_themes())
+    try:
+        import json
+        from pathlib import Path
+
+        path = Path.home() / ".cliara" / "config.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            t = (data.get("theme") or "").strip().lower()
+            if t in themes:
+                _ui_theme = t
+                return t
+    except Exception:
+        pass
+    _ui_theme = DEFAULT_THEME
+    return _ui_theme

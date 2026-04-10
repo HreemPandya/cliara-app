@@ -5777,7 +5777,8 @@ class CliaraShell:
         theme_name = (self.config.get("theme") or "dracula").strip().lower()
         _pygments_theme_map = {
             "solarized": "solarized-dark",
-            "light": "solarized-light",
+            # light theme = white/snow on dark — use a dark Pygments bg for history Syntax
+            "light": "native",
             "nord": "dracula",
             "catppuccin": "dracula",
         }
@@ -5985,7 +5986,7 @@ class CliaraShell:
         print_info("  Theme")
         print_dim("  ─────────────────────────────────────")
         print_dim("  theme                      List color themes and show current")
-        print_dim("  theme <name>               Set theme (monokai, dracula, nord, solarized, catppuccin, light)")
+        print_dim("  theme <name>               Set theme (…, light = white/snow on dark)")
         print_dim("  Stored in ~/.cliara/config.json — applies immediately.\n")
 
         print_info("  Diff Preview")

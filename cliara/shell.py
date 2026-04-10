@@ -820,7 +820,7 @@ class CliaraShell:
         
         # Show LLM status after the progress bar (single clean line)
         if self.nl_handler.llm_enabled:
-            print_success(f"  LLM: {self.nl_handler.provider.upper()} connected")
+            print_success(f"  LLM: {self._llm_status_provider_label()} connected")
         else:
             # Auto-detect Ollama first (silent, no prompt)
             from cliara import setup_wizard as _wiz
@@ -866,7 +866,14 @@ class CliaraShell:
             text = f"[{minutes}m{seconds:02d}s]"
 
         return [("class:prompt-duration", text)]
-    
+
+    def _llm_status_provider_label(self) -> str:
+        """UPPERCASE provider, with Ollama model name when applicable."""
+        prov = (self.nl_handler.provider or "").upper()
+        if self.nl_handler.provider == "ollama":
+            return f"{prov} · {self.nl_handler.resolved_model_for_display()}"
+        return prov
+
     def _initialize_llm(self, quiet: bool = False):
         """Initialize LLM if API key is configured."""
         provider = self.config.get_llm_provider()
@@ -1013,7 +1020,7 @@ class CliaraShell:
             "",
         ]
         if self.nl_handler.llm_enabled:
-            lines.append(f"LLM: {self.nl_handler.provider.upper()} (Ready)")
+            lines.append(f"LLM: {self._llm_status_provider_label()} (Ready)")
         else:
             lines.append("LLM: Not configured (set OPENAI_API_KEY in .env)")
         lines.extend([
@@ -1069,7 +1076,12 @@ class CliaraShell:
         from cliara import __version__
         parts = [f"cliara {__version__}"]
         if self.nl_handler.llm_enabled:
-            parts.append(f" {self.nl_handler.provider} (ready)")
+            if self.nl_handler.provider == "ollama":
+                parts.append(
+                    f" {self.nl_handler.provider} · {self.nl_handler.resolved_model_for_display()} (ready)"
+                )
+            else:
+                parts.append(f" {self.nl_handler.provider} (ready)")
         else:
             parts.append(" LLM not configured")
         n_macros = len(self.macros.list_all()) if hasattr(self.macros, "list_all") else 0
@@ -2992,14 +3004,44 @@ class CliaraShell:
         When auto_run is True (startup with no provider), uses a shorter prompt.
         Returns True if login succeeded and LLM is ready, False otherwise.
         """
-        print()
+        from rich import box
+        from rich.panel import Panel
+        from rich.text import Text
+
+        from cliara.console import get_console
+
+        _login_console = get_console()
+        _login_console.print()
         if auto_run:
-            print_dim("  No AI provider configured. Opening browser to sign in with GitHub...")
+            _login_console.print(
+                Panel(
+                    Text.from_markup(
+                        "[bold white]No AI provider yet.[/]\n\n"
+                        "[dim]Next: sign in with GitHub for free Cliara Cloud "
+                        "(150 queries/month, no card).[/]\n\n"
+                        "[dim]Press[/] [bold]Ctrl+C[/] [dim]to skip and choose Groq, Gemini, or Ollama in the menu.[/]"
+                    ),
+                    title=Text.from_markup("[bold cyan]Cliara Cloud[/]"),
+                    subtitle=Text.from_markup("[dim]Zero-friction setup[/]"),
+                    border_style="cyan",
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
         else:
-            print_info("  Cliara Login — Zero-Friction Cloud Access")
-            print_dim("  ─────────────────────────────────────────")
-            print_dim("  Free tier: 150 queries/month · no credit card · GPT-4o-mini")
-        print()
+            _login_console.print(
+                Panel(
+                    Text.from_markup(
+                        "[dim]Free tier:[/] 150 queries/month · no credit card · GPT-4o-mini\n\n"
+                        "[dim]A browser window will open for GitHub sign-in.[/]"
+                    ),
+                    title=Text.from_markup("[bold cyan]Cliara Login[/]"),
+                    border_style="cyan",
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
+        _login_console.print()
 
         from cliara import auth as _auth
         try:
@@ -3055,7 +3097,10 @@ class CliaraShell:
             print_success(f"  Cliara Cloud: logged in ({email})")
             print_dim("  Free tier · 150 queries/month · resets monthly")
         elif self.nl_handler.llm_enabled and self.nl_handler.provider:
-            print_success(f"  BYOK: {self.nl_handler.provider}")
+            byok = self.nl_handler.provider
+            if self.nl_handler.provider == "ollama":
+                byok = f"{byok} · {self.nl_handler.resolved_model_for_display()}"
+            print_success(f"  BYOK: {byok}")
             print_dim("  Using your own API key")
         else:
             print_warning("  Not configured")
@@ -3354,7 +3399,12 @@ class CliaraShell:
         if self.nl_handler.llm_enabled:
             key = self.config.get_llm_api_key()
             masked = f" (...{key[-4:]})" if key and len(key) >= 4 else " (configured)"
-            print_success(f"  {icons.OK} LLM: {self.nl_handler.provider or '?'}{masked}")
+            model_bit = ""
+            if self.nl_handler.provider == "ollama":
+                model_bit = f" · {self.nl_handler.resolved_model_for_display()}"
+            print_success(
+                f"  {icons.OK} LLM: {self.nl_handler.provider or '?'}{model_bit}{masked}"
+            )
         else:
             console.print(f"  {icons.FAIL} LLM: not configured (run setup-llm)", style="red")
         # Macros
@@ -5626,7 +5676,12 @@ class CliaraShell:
         from cliara import __version__
         parts = [f"{icons.INFO} cliara {__version__}"]
         if self.nl_handler.llm_enabled:
-            parts.append(f"{self.nl_handler.provider} ready")
+            if self.nl_handler.provider == "ollama":
+                parts.append(
+                    f"{self.nl_handler.provider} · {self.nl_handler.resolved_model_for_display()} ready"
+                )
+            else:
+                parts.append(f"{self.nl_handler.provider} ready")
         else:
             parts.append("no LLM")
         cwd = _fmt_path(str(Path.cwd()))

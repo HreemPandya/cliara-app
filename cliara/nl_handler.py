@@ -21,7 +21,7 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 _PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
     "openai":    "gpt-4o-mini",
     "anthropic": "claude-3-haiku-20240307",
-    "ollama":    "llama3.2",
+    "ollama":    "gemma4",
     "groq":      "llama-3.3-70b-versatile",
     "gemini":    "gemini-1.5-flash",
     "cliara":    "llama-3.3-70b-versatile",  # Gateway picks the best available model
@@ -227,7 +227,11 @@ class NLHandler:
             if model:
                 return model
         return _PROVIDER_DEFAULT_MODELS.get(self.provider or "", "gpt-4o-mini")
-    
+
+    def resolved_model_for_display(self) -> str:
+        """Model name for banners and status (primary NL agent resolution)."""
+        return self._resolve_model("nl_to_commands")
+
     def process_query(
         self,
         query: str,

@@ -2,7 +2,7 @@
 Ollama setup wizard for Cliara.
 
 Handles the full lifecycle of getting Ollama working:
-  1. Locate the ollama binary
+  1. Locate the ollama binary (optional: run the official installer if missing)
   2. Start the background service if it isn't running
   3. Present an interactive model picker
   4. Pull the chosen model with live progress
@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from cliara.shell import CliaraShell
@@ -33,12 +33,20 @@ if TYPE_CHECKING:
 # Model catalogue
 # ---------------------------------------------------------------------------
 
+DEFAULT_OLLAMA_MODEL = "gemma4"
+
 RECOMMENDED_MODELS = [
+    {
+        "name": DEFAULT_OLLAMA_MODEL,
+        "size": "~10 GB",
+        "desc": "Google Gemma 4 — default, strong general quality (needs more disk/RAM)",
+        "recommended": True,
+    },
     {
         "name": "llama3.2",
         "size": "~2 GB",
-        "desc": "Best starting point — fast, accurate, low RAM",
-        "recommended": True,
+        "desc": "Fast, accurate, lower RAM if Gemma 4 is too heavy",
+        "recommended": False,
     },
     {
         "name": "mistral",
@@ -58,15 +66,11 @@ RECOMMENDED_MODELS = [
         "desc": "Strong at code and technical tasks",
         "recommended": False,
     },
-    {
-        "name": "gemma2",
-        "size": "~5 GB",
-        "desc": "Google's model — high quality, needs more RAM",
-        "recommended": False,
-    },
 ]
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
+OLLAMA_INSTALL_SCRIPT = "https://ollama.com/install.sh"
+OLLAMA_DOWNLOAD_PAGE = "https://ollama.com/download"
 
 # Common non-PATH install locations per OS
 _CANDIDATE_PATHS = {
@@ -97,6 +101,87 @@ def _find_ollama() -> Optional[str]:
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def _wait_for_ollama_binary(max_seconds: int = 45, interval: float = 1.0) -> Optional[str]:
+    """Poll until ``ollama`` appears (installer may update PATH or drop binaries)."""
+    deadline = time.monotonic() + max_seconds
+    while time.monotonic() < deadline:
+        found = _find_ollama()
+        if found:
+            return found
+        time.sleep(interval)
+    return _find_ollama()
+
+
+def _can_auto_install_ollama() -> Tuple[bool, str]:
+    """Whether we can offer a one-shot official install, and a short reason if not."""
+    system = platform.system()
+    if system == "Windows":
+        if shutil.which("winget"):
+            return True, ""
+        return False, "winget (Windows Package Manager) not found — install Ollama manually."
+    if system == "Darwin":
+        if shutil.which("brew") or shutil.which("curl"):
+            return True, ""
+        return False, "Need Homebrew or curl for automatic install."
+    if system == "Linux":
+        if shutil.which("brew") or shutil.which("curl"):
+            return True, ""
+        return False, "Need curl (or Homebrew) for automatic install."
+    return False, "Automatic Ollama install is not set up for this OS."
+
+
+def _run_official_ollama_install() -> bool:
+    """Run Ollama's supported installer for this OS. Uses inherited stdio (sudo / UAC prompts).
+
+    Returns True if the subprocess exited with code 0.
+    """
+    system = platform.system()
+    inherit = {"stdin": None, "stdout": None, "stderr": None}
+
+    if system == "Darwin":
+        brew = shutil.which("brew")
+        if brew:
+            r = subprocess.run([brew, "install", "ollama"], **inherit)  # type: ignore[arg-type]
+            return r.returncode == 0
+        r = subprocess.run(
+            ["sh", "-c", f"curl -fsSL {OLLAMA_INSTALL_SCRIPT} | sh"],
+            **inherit,  # type: ignore[arg-type]
+        )
+        return r.returncode == 0
+
+    if system == "Linux":
+        brew = shutil.which("brew")
+        if brew:
+            r = subprocess.run([brew, "install", "ollama"], **inherit)  # type: ignore[arg-type]
+            if r.returncode == 0:
+                return True
+        r = subprocess.run(
+            ["sh", "-c", f"curl -fsSL {OLLAMA_INSTALL_SCRIPT} | sh"],
+            **inherit,  # type: ignore[arg-type]
+        )
+        return r.returncode == 0
+
+    if system == "Windows":
+        winget = shutil.which("winget")
+        if not winget:
+            return False
+        r = subprocess.run(
+            [
+                winget,
+                "install",
+                "-e",
+                "--id",
+                "Ollama.Ollama",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ],
+            **inherit,  # type: ignore[arg-type]
+        )
+        return r.returncode == 0
+
+    return False
 
 
 def _service_running(url: str, timeout: int = 3) -> bool:
@@ -233,14 +318,54 @@ def run(shell: "CliaraShell") -> None:  # noqa: C901  (wizard flow is inherently
 
     ollama_bin = _find_ollama()
     if not ollama_bin:
-        print_error(
-            "\n  Ollama is not installed or not on your PATH.\n"
-            "\n  Download the installer from:  https://ollama.com\n"
-            "  After installing, re-run:     setup-ollama\n"
-        )
-        return
+        print_warning("\n  Ollama is not installed or not on your PATH.\n")
+        auto_ok, auto_msg = _can_auto_install_ollama()
+        if not auto_ok:
+            print_error(f"  {auto_msg}")
+            print_dim(f"\n  Download:  {OLLAMA_DOWNLOAD_PAGE}")
+            print_dim("  After installing, re-run:  setup-ollama")
+            print_dim("  Or run setup-llm for Groq, Gemini, OpenAI, etc.\n")
+            return
 
-    print_success(f"  ✓ Ollama found:  {ollama_bin}")
+        print_dim(
+            "  Cliara can launch the official Ollama installer (internet required;"
+        )
+        print_dim(
+            "  Linux/macOS may prompt for your password; Windows may show winget / UAC).\n"
+        )
+        try:
+            raw_install = input("  Install Ollama now? (y/n) [n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print_dim("  Setup cancelled.")
+            return
+
+        if raw_install not in ("y", "yes"):
+            print_dim(f"\n  Install manually when ready:  {OLLAMA_DOWNLOAD_PAGE}")
+            print_dim("  Then re-run:  setup-ollama")
+            print_dim("  Or run setup-llm for cloud providers.\n")
+            return
+
+        print_dim("\n  Running installer (follow any prompts below)...\n")
+        if not _run_official_ollama_install():
+            print_error("\n  Installer exited with an error or was cancelled.")
+            print_dim(f"  Try again or install from:  {OLLAMA_DOWNLOAD_PAGE}\n")
+            return
+
+        print_dim("\n  Looking for the Ollama command...")
+        ollama_bin = _wait_for_ollama_binary()
+        if not ollama_bin:
+            print_error(
+                "\n  Ollama still not found. Open a new terminal if PATH was updated,"
+            )
+            print_error("  or install from the link below and re-run setup-ollama.")
+            print_dim(f"\n  {OLLAMA_DOWNLOAD_PAGE}\n")
+            return
+
+        print_success(f"  ✓ Ollama found:  {ollama_bin}")
+        print()
+    else:
+        print_success(f"  ✓ Ollama found:  {ollama_bin}")
     print()
 
     # ── Step 2: ensure the service is running ────────────────────────
@@ -279,7 +404,7 @@ def run(shell: "CliaraShell") -> None:  # noqa: C901  (wizard flow is inherently
         print()
 
     try:
-        raw = input("  Enter number or model name [llama3.2]: ").strip()
+        raw = input(f"  Enter number or model name [{DEFAULT_OLLAMA_MODEL}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         print_dim("  Setup cancelled.")
@@ -295,7 +420,7 @@ def run(shell: "CliaraShell") -> None:  # noqa: C901  (wizard flow is inherently
     elif raw:
         chosen = raw
     else:
-        chosen = "llama3.2"
+        chosen = DEFAULT_OLLAMA_MODEL
 
     print()
 

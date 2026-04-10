@@ -318,8 +318,40 @@ def login() -> "tuple[str, str]":
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
-    print(f"\n  Opening browser for GitHub login...")
-    print(f"  If the browser does not open, visit:\n  {oauth_url}\n")
+    from rich import box
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.style import Style
+    from rich.text import Text
+
+    from cliara.console import get_console
+
+    _c = get_console()
+    _c.print()
+    _c.print(
+        Panel(
+            Group(
+                Text.from_markup(
+                    "[bold white]Opening your browser[/] for [bold]GitHub[/] sign-in…\n"
+                ),
+                Text(""),
+                Text(
+                    "If nothing opens, copy this URL into a browser:",
+                    style="dim",
+                ),
+                Text(""),
+                Text(
+                    oauth_url,
+                    style=Style(color="cyan", dim=True, link=oauth_url),
+                ),
+            ),
+            title=Text.from_markup("[bold cyan]Cliara Cloud[/]"),
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+    _c.print()
 
     try:
         webbrowser.open(oauth_url)

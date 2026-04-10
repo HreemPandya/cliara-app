@@ -53,7 +53,7 @@ class Config:
         "llm_api_key": None,  # Never persisted to disk — comes from env
         "llm_model": None,    # Global model override; None = provider default
         # Per-task model overrides — None means fall back to llm_model then provider default
-        # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "llama3.2" for ollama
+        # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "gemma4" for ollama
         "model_nl": None,       # ? natural-language → commands
         "model_fix": None,      # Error translation & fix suggestions
         "model_explain": None,  # explain <command>

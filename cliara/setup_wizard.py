@@ -25,10 +25,23 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from rich import box
+from rich.console import Group
+from rich.markup import escape
+from rich.panel import Panel
+from rich.style import Style
+from rich.table import Table
+from rich.text import Text
+
 from cliara import icons
 
 if TYPE_CHECKING:
     from cliara.shell import CliaraShell
+
+
+def _wiz_console():
+    from cliara.console import get_console
+    return get_console()
 
 # ---------------------------------------------------------------------------
 # Provider catalogue
@@ -183,8 +196,9 @@ def auto_detect_ollama(shell: "CliaraShell") -> bool:
     if ok:
         try:
             from cliara.shell import print_success
+            model = shell.nl_handler.resolved_model_for_display()
             print_success(
-                f"  LLM: OLLAMA auto-detected and connected  "
+                f"  LLM: OLLAMA · {model} auto-detected and connected  "
                 f"(saved to {env_path})"
             )
         except Exception:
@@ -212,22 +226,71 @@ def _clear_incompatible_model(shell: "CliaraShell") -> None:
 # Interactive setup wizard
 # ---------------------------------------------------------------------------
 
-def _print_header():
-    print()
-    print("  " + "─" * 58)
-    print("  Cliara — LLM Setup  (powers ?, explain, smart push, ...)")
-    print("  " + "─" * 58)
+def _print_header_and_menu() -> None:
+    """Render the LLM setup screen with Rich panels and a provider table."""
+    console = _wiz_console()
 
+    subtitle = Text()
+    subtitle.append("No AI provider configured yet.\n", style="dim")
+    subtitle.append("Choose one to enable ", style="dim")
+    subtitle.append("?", style="bold cyan")
+    subtitle.append(", ", style="dim")
+    subtitle.append("explain", style="bold cyan")
+    subtitle.append(", smart push, macros, and other AI features.", style="dim")
 
-def _print_menu():
-    print()
-    print("  No AI provider configured.  Pick one to get started:")
-    print()
+    table = Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        pad_edge=False,
+        padding=(0, 1),
+    )
+    table.add_column("#", style="dim", justify="center", width=3)
+    table.add_column("Provider", style="bold white", width=12, no_wrap=True)
+    table.add_column("Details", min_width=36)
+
     for i, p in enumerate(_PROVIDERS, 1):
-        rec = "  ← recommended (free)" if p["recommended"] else ""
-        print(f"    [{i}] {p['label']:<12}  {p['tagline']}{rec}")
-    print(f"    [s] Skip          Use Cliara without AI features")
-    print()
+        detail = Text(p["tagline"], style="white")
+        if p["recommended"]:
+            detail.append("\n")
+            detail.append("★ Recommended — free, no card", style="bold green")
+        table.add_row(str(i), p["label"], detail)
+
+    skip_detail = Text()
+    skip_detail.append("Shell, git, and macros only", style="dim")
+    skip_detail.append("\n")
+    skip_detail.append("Run setup-llm later anytime", style="italic dim")
+    table.add_row(
+        "s",
+        Text("Skip", style="bold yellow"),
+        skip_detail,
+    )
+
+    body = Group(subtitle, Text(""), table)
+    panel = Panel(
+        body,
+        title=Text.from_markup("[bold cyan]Cliara[/] [dim]·[/] [bold white]LLM Setup[/]"),
+        subtitle=Text.from_markup("[dim]Powers natural language & AI-assisted workflows[/]"),
+        border_style="cyan",
+        box=box.DOUBLE,
+        padding=(1, 2),
+    )
+    console.print()
+    console.print(panel)
+
+
+def _print_choice_prompt() -> None:
+    console = _wiz_console()
+    line = Text()
+    line.append("   ➜ ", style="bold cyan")
+    line.append("Your choice ", style="bold white")
+    line.append("(number, name, or ", style="dim")
+    line.append("s", style="bold yellow")
+    line.append(" to skip) ", style="dim")
+    line.append("[1]", style="bold cyan")
+    line.append(": ", style="dim")
+    console.print(line, end="")
 
 
 def _read_masked(prompt: str) -> str:
@@ -244,14 +307,15 @@ def run_wizard(shell: "CliaraShell") -> bool:
 
     Returns True if the LLM was successfully configured, False otherwise.
     """
-    _print_header()
-    _print_menu()
+    _print_header_and_menu()
+    _print_choice_prompt()
 
     # --- Read user choice ---
     try:
-        raw = input("  Your choice [1]: ").strip().lower()
+        raw = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print()
+        _wiz_console().print()
+        _wiz_console().print("   [dim]Setup cancelled.[/]")
         _mark_dismissed(shell)
         return False
 
@@ -277,7 +341,9 @@ def run_wizard(shell: "CliaraShell") -> bool:
                 break
 
     if provider_info is None:
-        print(f"\n  Unrecognised choice '{raw}'. Skipping setup.")
+        c = _wiz_console()
+        c.print()
+        c.print(f"   [yellow]Unrecognised choice[/] [bold]'{raw}'[/]. Skipping setup.")
         _mark_dismissed(shell)
         return False
 
@@ -291,15 +357,28 @@ def run_wizard(shell: "CliaraShell") -> bool:
 
 def _handle_ollama(shell: "CliaraShell") -> bool:
     """Guide the user through Ollama setup (delegates to existing wizard)."""
-    print()
-    print("  Launching the Ollama setup wizard...")
-    print()
+    c = _wiz_console()
+    c.print()
+    c.print(
+        Panel(
+            Text.from_markup(
+                "[bold]Ollama[/] runs models on your machine — no API key.\n"
+                "[dim]The next steps can install Ollama (if needed), pick a model, and connect Cliara.[/]"
+            ),
+            title=Text.from_markup("[bold cyan]Local LLM[/]"),
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+    c.print()
     try:
         from cliara import setup_ollama
         setup_ollama.run(shell)
         return shell.nl_handler.llm_enabled
     except Exception as exc:
-        print(f"\n  Error during Ollama setup: {exc}")
+        c.print()
+        c.print(f"   [red]Error during Ollama setup:[/] {exc}")
         return False
 
 
@@ -310,21 +389,35 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
     signup_url = provider_info["signup_url"]
     env_var = provider_info["env_var"]
     key_hint = provider_info["key_hint"]
+    c = _wiz_console()
 
-    print()
-    print(f"  Get your free {label} API key at:")
-    print(f"    {signup_url}")
-    print()
+    c.print()
+    c.print(
+        Panel(
+            Group(
+                Text.from_markup(f"Open the link below and create a key for [bold]{label}[/]."),
+                Text(""),
+                Text(signup_url, style=Style(color="cyan", bold=True, underline=True, link=signup_url)),
+            ),
+            title=Text.from_markup(f"[bold white]{label}[/] [dim]· API key[/]"),
+            border_style="blue",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+    c.print()
 
     try:
-        api_key = _read_masked(f"  {key_hint}").strip()
+        api_key = _read_masked(f"   {key_hint}").strip()
     except (EOFError, KeyboardInterrupt):
-        print()
+        c.print()
+        c.print("   [dim]Setup cancelled.[/]")
         _mark_dismissed(shell)
         return False
 
     if not api_key:
-        print("\n  No key entered. Skipping setup.")
+        c.print()
+        c.print("   [yellow]No key entered.[/] Skipping setup.")
         _mark_dismissed(shell)
         return False
 
@@ -334,21 +427,50 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
     # Apply in-process and reinitialise
     ok = _apply_env_and_reinit(shell, pid, env_var, api_key)
 
-    print()
+    c.print()
     if ok:
         masked = _mask_key(api_key)
-        print(f"  [{icons.OK}] {label} connected  (key: {masked})")
-        print(f"  [{icons.OK}] Key saved to {env_path}  (persists across sessions)")
-        print()
-        print("  Try it now:  ? list python files changed today")
-        print("               explain git rebase -i HEAD~3")
-        print()
+        c.print(
+            Panel(
+                Group(
+                    Text.from_markup(
+                        f"[green]{escape(icons.OK)}[/] [bold]{escape(label)}[/] connected  "
+                        f"[dim](key: {escape(masked)})[/]"
+                    ),
+                    Text.from_markup(
+                        f"[green]{escape(icons.OK)}[/] Saved to [cyan]{escape(str(env_path))}[/] "
+                        "— persists across sessions"
+                    ),
+                    Text(""),
+                    Text.from_markup(
+                        "[dim]Try:[/] [bold cyan]?[/] [dim]list python files changed today[/]"
+                    ),
+                    Text.from_markup(
+                        "[dim]     [/][bold cyan]explain[/] [dim]git rebase -i HEAD~3[/]"
+                    ),
+                ),
+                title=Text.from_markup("[bold green]Connected[/]"),
+                border_style="green",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
         # Clear the dismissed flag in case it was set before
         shell.config.settings["llm_wizard_dismissed"] = False
         shell.config.save()
     else:
-        print(f"  [{icons.FAIL}] Could not connect to {label}.")
-        print("  Double-check your API key and try 'setup-llm' again.")
+        c.print(
+            Panel(
+                Text.from_markup(
+                    f"[red]{escape(icons.FAIL)}[/] Could not connect to [bold]{escape(label)}[/].\n\n"
+                    "[dim]Double-check your API key and run[/] [bold]setup-llm[/] [dim]again.[/]"
+                ),
+                title=Text.from_markup("[bold red]Connection failed[/]"),
+                border_style="red",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
 
     return ok
 
@@ -361,7 +483,19 @@ def _mark_dismissed(shell: "CliaraShell") -> None:
 
 
 def _print_skip_info() -> None:
-    print()
-    print("  AI features are disabled. Run 'setup-llm' any time to set up a provider.")
-    print("  Normal shell commands continue to work without an AI provider.")
-    print()
+    c = _wiz_console()
+    c.print()
+    c.print(
+        Panel(
+            Text.from_markup(
+                "[dim]AI features ([bold]?[/], [bold]explain[/], smart push, …) are off.\n\n"
+                "Run [bold cyan]setup-llm[/] anytime to add Groq, Gemini, Ollama, or OpenAI.\n\n"
+                "Your normal shell, git, and macros keep working as usual.[/]"
+            ),
+            title=Text.from_markup("[yellow]Shell-only mode[/]"),
+            border_style="yellow",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
+    c.print()

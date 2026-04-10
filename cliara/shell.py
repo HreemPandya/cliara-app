@@ -130,8 +130,18 @@ def print_warning(msg: str):
 
 
 def print_info(msg: str):
-    """Print a cyan informational message."""
-    _cliara_console().print(msg, style="cyan")
+    """Print a neutral informational message using the active Cliara theme."""
+    from cliara.console import get_ui_theme
+    from cliara.highlighting import get_ui_info_style
+
+    # Brackets like [Cliara] are labels, not Rich markup — markup would split styling
+    # (e.g. quoted 'main' picking up stray tags) and fight the single ui_info color.
+    _cliara_console().print(
+        msg,
+        style=get_ui_info_style(get_ui_theme()),
+        markup=False,
+        highlight=False,
+    )
 
 
 def print_header(msg: str):
@@ -709,6 +719,9 @@ class CliaraShell:
         print()  # blank line before the bar
         progress.step("Loading config...")
         self.config = config or Config()
+        from cliara.console import set_ui_theme
+
+        set_ui_theme(self.config.get("theme"))
 
         progress.step("Setting up macros...")
         # Pass config dict to MacroManager for storage backend selection
@@ -3227,9 +3240,11 @@ class CliaraShell:
     
     def _apply_theme(self, name: str):
         """Set theme in config, refresh prompt session, and print an instant colored preview."""
+        from cliara.console import set_ui_theme
         from cliara.highlighting import get_theme_preview_markup
         from rich.panel import Panel
         self.config.set("theme", name)
+        set_ui_theme(name)
         session = self._create_prompt_session()
         if session is not None:
             self._prompt_session = session

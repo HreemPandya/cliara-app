@@ -116,6 +116,8 @@ THEMES = {
             "op":       "[cyan]",
             "num":      "[bright_magenta]",
         },
+        # Neutral print_info / status lines — matches lexer accent, not generic ANSI cyan
+        "ui_info": "#66d9ef",
     },
     "dracula": {
         "styles": {
@@ -146,6 +148,8 @@ THEMES = {
             "op":       "[bright_cyan]",
             "num":      "[magenta]",
         },
+        # Match prompt-name accent (magenta/purple), not operator cyan
+        "ui_info": "#bd93f9",
     },
     "nord": {
         "styles": {
@@ -176,6 +180,7 @@ THEMES = {
             "op":       "[blue]",
             "num":      "[bright_magenta]",
         },
+        "ui_info": "#81a1c1",
     },
     "solarized": {
         # Dark background: bright ANSI colors (widely supported)
@@ -207,6 +212,7 @@ THEMES = {
             "op":       "[cyan]",
             "num":      "[magenta]",
         },
+        "ui_info": "#2aa198",
     },
     "catppuccin": {
         "styles": {
@@ -237,6 +243,7 @@ THEMES = {
             "op":       "[bright_cyan]",
             "num":      "[color(183)]",
         },
+        "ui_info": "#89dceb",
     },
     "light": {
         # Light background: dark ANSI colors so text is readable (clearly different from solarized).
@@ -268,6 +275,7 @@ THEMES = {
             "op":       "[blue]",
             "num":      "[magenta]",
         },
+        "ui_info": "#005f87",
     },
 }
 
@@ -276,6 +284,14 @@ PROMPT_STYLE = THEMES["dracula"]["prompt_style"]
 
 # Default theme when none set or invalid (always apply a theme)
 DEFAULT_THEME = "dracula"
+
+
+def get_ui_info_style(theme_name: str) -> str:
+    """Rich style (hex or name) for neutral informational lines (print_info)."""
+    name = (theme_name or "").strip().lower()
+    if name not in THEMES:
+        name = DEFAULT_THEME
+    return str(THEMES[name].get("ui_info", "#bd93f9"))
 
 
 def get_style_for_theme(theme_name: str):

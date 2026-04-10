@@ -4343,9 +4343,10 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
             "branch": branch,
         }
-        stream_cb = self._stream_callback_for_console() if self.config.get("stream_llm", True) else None
+        # No streaming: stream uses end="" so the next print_info would share one line
+        # with the message, and we already print the message once below.
         commit_msg = self.nl_handler.generate_commit_message(
-            diff_stat, diff_content, files, context, stream_callback=stream_cb
+            diff_stat, diff_content, files, context, stream_callback=None
         )
         if not commit_msg or not commit_msg.strip():
             print_error("[Cliara] Could not generate commit message. Try again or use: git commit -m \"your message\"")

@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple
 
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.diff_preview import DiffPreview
+from cliara.self_upgrade import is_cliara_pip_install_command
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +435,10 @@ class RiskEngine:
     # ── blast radius ──────────────────────────────────────────────────
 
     def _estimate_blast_radius(self, command: str) -> str:
+        # Upgrading Cliara itself is scoped to one package, not general system-wide pip.
+        if is_cliara_pip_install_command(command):
+            return "local"
+
         for pat in _GLOBAL_SCOPE_PATTERNS:
             if pat.search(command):
                 return "system-wide"

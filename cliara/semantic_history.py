@@ -82,10 +82,16 @@ class SemanticHistoryStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"entries": self._entries}
         with with_file_lock(self._path):
+            # Compact JSON: faster writes and smaller files than indent=2.
             self._path.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
                 encoding="utf-8",
             )
+
+    def flush(self) -> None:
+        """Write the current in-memory entries to disk (e.g. before process exit)."""
+        with self._lock:
+            self._save()
 
     def add(
         self,
@@ -96,10 +102,12 @@ class SemanticHistoryStore:
         embedding: Optional[List[float]] = None,
         timestamp: Optional[str] = None,
         dedupe: bool = True,
+        persist: bool = True,
     ) -> None:
         """
         Add an entry. Evicts oldest if over max_entries.
         If dedupe is True, skip if same (command, cwd) was added within the last minute.
+        If persist is False, only update in-memory state (caller should persist later, or call flush()).
         """
         ts = timestamp or _now_iso()
         entry = {
@@ -131,7 +139,8 @@ class SemanticHistoryStore:
                         if 0 <= delta <= _DEDUPE_WINDOW_SECONDS:
                             # Update existing with new summary/embedding
                             self._entries[-(i + 1)] = entry
-                            self._save()
+                            if persist:
+                                self._save()
                             return
                     except Exception:
                         pass
@@ -140,7 +149,8 @@ class SemanticHistoryStore:
             if len(self._entries) > self._max_entries:
                 self._entries.sort(key=lambda x: x.get("timestamp", ""), reverse=False)
                 self._entries = self._entries[-self._max_entries :]
-            self._save()
+            if persist:
+                self._save()
 
     def update_summary_for_command(
         self,

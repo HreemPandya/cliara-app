@@ -13,7 +13,9 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
+
+from cliara.file_lock import with_file_lock
 
 # Keys for optional structured closeout (session end --reflect)
 CLOSEOUT_KEYS = ("blocked", "decided", "next")
@@ -302,12 +304,28 @@ class SessionStore:
         else:
             self._data = {}
 
-    def _save(self):
+    def _reload_unlocked(self):
+        """Refresh ``_data`` from disk (caller must hold the store lock)."""
+        self._load()
+
+    def _save_unlocked(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
             json.dumps(self._data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+
+    def _save(self):
+        with with_file_lock(self._path):
+            self._reload_unlocked()
+            self._save_unlocked()
+
+    def _mutate(self, fn: Callable[[], None]) -> None:
+        """Reload latest file state, apply *fn* mutating ``_data``, then save."""
+        with with_file_lock(self._path):
+            self._reload_unlocked()
+            fn()
+            self._save_unlocked()
 
     def get_by_key(self, name: str, project_root: Optional[str]) -> Optional[TaskSession]:
         """Return the session for this name and project root, or None."""
@@ -351,15 +369,21 @@ class SessionStore:
             closeout_prompts=None,
             reflection=None,
         )
-        self._data[key] = session.to_dict()
-        self._save()
+
+        def _apply():
+            self._data[key] = session.to_dict()
+
+        self._mutate(_apply)
         return session
 
     def update(self, session: TaskSession):
         """Persist session changes."""
         key = _session_key(session.name, session.project_root)
-        self._data[key] = session.to_dict()
-        self._save()
+
+        def _apply():
+            self._data[key] = session.to_dict()
+
+        self._mutate(_apply)
 
     def add_command(
         self,
@@ -375,31 +399,38 @@ class SessionStore:
     ) -> Optional[str]:
         """Append a command to the session and update cwds/branch/updated.
         Returns the new command's id, or None if session not found."""
-        session = self.get_by_id(session_id)
-        if session is None:
-            return None
-        now = datetime.now(timezone.utc).isoformat()
-        entry_id = str(uuid.uuid4())
-        entry = CommandEntry(
-            command=command,
-            cwd=cwd,
-            exit_code=exit_code,
-            timestamp=now,
-            id=entry_id,
-            parent_id=parent_id,
-            stderr_preview=stderr_preview,
-            stdout_preview=stdout_preview,
-        )
-        session.commands.append(entry)
-        if cwd and cwd not in session.cwds:
-            session.cwds.append(cwd)
-        if branch is not None:
-            session.branch = branch
-        if project_root is not None:
-            session.project_root = project_root
-        session.updated = now
-        self.update(session)
-        return entry_id
+        holder: List[Optional[str]] = [None]
+
+        def _apply():
+            session = self.get_by_id(session_id)
+            if session is None:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            entry_id = str(uuid.uuid4())
+            entry = CommandEntry(
+                command=command,
+                cwd=cwd,
+                exit_code=exit_code,
+                timestamp=now,
+                id=entry_id,
+                parent_id=parent_id,
+                stderr_preview=stderr_preview,
+                stdout_preview=stdout_preview,
+            )
+            session.commands.append(entry)
+            if cwd and cwd not in session.cwds:
+                session.cwds.append(cwd)
+            if branch is not None:
+                session.branch = branch
+            if project_root is not None:
+                session.project_root = project_root
+            session.updated = now
+            key = _session_key(session.name, session.project_root)
+            self._data[key] = session.to_dict()
+            holder[0] = entry_id
+
+        self._mutate(_apply)
+        return holder[0]
 
     def get_last_command_id(self, session_id: str) -> Optional[str]:
         """Return the id of the last command in the session, or None."""
@@ -411,13 +442,18 @@ class SessionStore:
 
     def add_note(self, session_id: str, text: str):
         """Append a note to the session."""
-        session = self.get_by_id(session_id)
-        if session is None:
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        session.notes.append(NoteEntry(text=text, timestamp=now))
-        session.updated = now
-        self.update(session)
+
+        def _apply():
+            session = self.get_by_id(session_id)
+            if session is None:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            session.notes.append(NoteEntry(text=text, timestamp=now))
+            session.updated = now
+            key = _session_key(session.name, session.project_root)
+            self._data[key] = session.to_dict()
+
+        self._mutate(_apply)
 
     def end_session(
         self,
@@ -428,22 +464,27 @@ class SessionStore:
         reflection: Optional[List[Dict[str, Any]]] = None,
     ):
         """Mark session ended. Use reflection= for session_reflect; else legacy closeout fields."""
-        session = self.get_by_id(session_id)
-        if session is None:
-            return
-        session.ended_at = datetime.now(timezone.utc).isoformat()
-        session.updated = session.ended_at
-        if end_note is not None:
-            session.end_note = end_note
-        if reflection is not None:
-            session.reflection = _normalize_reflection_log(reflection)
-            session.closeout = None
-            session.closeout_prompts = None
-        else:
-            session.reflection = None
-            session.closeout = _normalize_closeout(closeout)
-            session.closeout_prompts = _normalize_closeout_prompts(closeout_prompts)
-        self.update(session)
+
+        def _apply():
+            session = self.get_by_id(session_id)
+            if session is None:
+                return
+            session.ended_at = datetime.now(timezone.utc).isoformat()
+            session.updated = session.ended_at
+            if end_note is not None:
+                session.end_note = end_note
+            if reflection is not None:
+                session.reflection = _normalize_reflection_log(reflection)
+                session.closeout = None
+                session.closeout_prompts = None
+            else:
+                session.reflection = None
+                session.closeout = _normalize_closeout(closeout)
+                session.closeout_prompts = _normalize_closeout_prompts(closeout_prompts)
+            key = _session_key(session.name, session.project_root)
+            self._data[key] = session.to_dict()
+
+        self._mutate(_apply)
 
     def list_all(self) -> List[TaskSession]:
         """Return all sessions, sorted by updated descending."""

@@ -48,6 +48,7 @@ from cliara.cross_platform import (
     translate_pipeline,
 )
 from cliara import regression
+from cliara.self_upgrade import is_cliara_pip_install_command
 from cliara.chat_export import (
     format_last_run_bundle,
     format_session_for_chat,
@@ -913,6 +914,14 @@ class CliaraShell:
         else:
             pass
 
+    def _flush_semantic_history(self) -> None:
+        """Persist semantic history (including in-memory-only stubs) to disk."""
+        if self._semantic_history:
+            try:
+                self._semantic_history.flush()
+            except Exception:
+                pass
+
     def _semantic_history_worker(self):
         """Background worker: get (command, cwd, exit_code, summary_override) from queue; add to semantic store."""
         q = self._semantic_history_queue
@@ -942,19 +951,27 @@ class CliaraShell:
                     emb_text = f"{command} {summary}".strip()
                     embedding = self.nl_handler.get_embedding(emb_text)
 
+                # Single disk write per command: main thread added the same row with persist=False.
                 store.add(
                     command=command,
                     summary=summary,
                     cwd=cwd,
                     exit_code=exit_code,
                     embedding=embedding,
+                    persist=True,
                 )
             except Exception:
                 # Still add with empty summary so store populates (e.g. LLM timeout)
                 if item is not None:
                     try:
                         command, cwd, exit_code, _ = item
-                        store.add(command=command, summary="", cwd=cwd, exit_code=exit_code)
+                        store.add(
+                            command=command,
+                            summary="",
+                            cwd=cwd,
+                            exit_code=exit_code,
+                            persist=True,
+                        )
                     except Exception:
                         pass
             finally:
@@ -969,7 +986,7 @@ class CliaraShell:
         cwd: Optional[str] = None,
         exit_code: Optional[int] = None,
     ):
-        """Add command to semantic history (sync so store is never empty); enqueue for background summary."""
+        """Add command to semantic history; enqueue for background summary when enabled."""
         if not self._semantic_history:
             return
         summary_override = None
@@ -977,17 +994,22 @@ class CliaraShell:
             summary_override = self._last_explained_summary or ""
             self._last_explained_command = None
             self._last_explained_summary = None
-        # Add synchronously so store is always populated even if worker fails or is slow
+        will_enqueue = (
+            self._semantic_history_queue is not None
+            and self.config.get("semantic_history_summary_on_add", True)
+        )
+        # When a worker will finalize (summary + optional embedding), keep the stub in memory only
+        # and persist once in the worker — avoids two full JSON writes per command.
         try:
             self._semantic_history.add(
                 command=command,
                 summary=summary_override or "",
                 cwd=cwd,
                 exit_code=exit_code,
+                persist=not will_enqueue,
             )
         except Exception:
             pass
-        # Enqueue for background summary (worker will add again with summary; dedupe replaces)
         if not self._semantic_history_queue:
             return
         if not self.config.get("semantic_history_summary_on_add", True):
@@ -1459,16 +1481,22 @@ class CliaraShell:
         Returns the process exit code (0 = success).
         """
         import sys
-        from cliara.safety import DangerLevel as _DL
 
-        assessment = self._risk_engine.assess(command)
-        non_interactive = not sys.stdin.isatty()
+        try:
+            if is_cliara_pip_install_command(command.strip()):
+                ok = self._run_cliara_pip_self_upgrade(command.strip())
+                return 0 if ok else (self.last_exit_code or 1)
 
-        if not self._inline_gate(command, assessment, non_interactive=non_interactive):
-            return 130  # cancelled, same as Ctrl+C convention
+            assessment = self._risk_engine.assess(command)
+            non_interactive = not sys.stdin.isatty()
 
-        success = self.execute_shell_command(command, capture=False)
-        return 0 if success else self.last_exit_code or 1
+            if not self._inline_gate(command, assessment, non_interactive=non_interactive):
+                return 130  # cancelled, same as Ctrl+C convention
+
+            success = self.execute_shell_command(command, capture=False)
+            return 0 if success else self.last_exit_code or 1
+        finally:
+            self._flush_semantic_history()
 
     def handle_input(self, user_input: str):
         """
@@ -1552,6 +1580,15 @@ class CliaraShell:
         # Setup health check
         if user_input.strip().lower() == 'doctor':
             self._handle_doctor()
+            return
+
+        # Self-upgrade: same interpreter as this Cliara process (avoids wrong pip / env)
+        _u_strip = user_input.strip()
+        _u_low = _u_strip.lower()
+        if _u_low == "upgrade-cliara" or _u_low.startswith("upgrade-cliara "):
+            tail = _u_strip[14:].strip() if len(_u_strip) >= 14 else ""
+            synthetic = f"pip install --upgrade cliara {tail}".strip()
+            self._run_cliara_pip_self_upgrade(synthetic)
             return
 
         # Quick tips — show full banner anytime (built-in "macro")
@@ -1695,6 +1732,10 @@ class CliaraShell:
             os.system('cls' if platform.system() == 'Windows' else 'clear')
             if self.config.get('clear_show_header', True):
                 self._print_clear_status_line()
+            return
+
+        if is_cliara_pip_install_command(user_input.strip()):
+            self._run_cliara_pip_self_upgrade(user_input.strip())
             return
 
         # Diff preview: show exactly what destructive commands will affect
@@ -3468,6 +3509,71 @@ class CliaraShell:
                     f.write(self.last_command)
         except Exception:
             pass
+
+    def _run_cliara_pip_self_upgrade(self, original: str) -> bool:
+        """
+        Run ``sys.executable -m pip install --upgrade cliara`` so the active
+        environment is updated. Skips the shell wrapper (PowerShell/cmd) so the
+        interpreter running Cliara is always the one pip targets.
+        """
+        from cliara.self_upgrade import (
+            build_pip_upgrade_cliara_argv,
+            stderr_suggests_file_in_use,
+            windows_replace_failure_hint,
+        )
+
+        argv = build_pip_upgrade_cliara_argv(original)
+        display = subprocess.list2cmdline(argv)
+        print_info(f"[Cliara] Upgrading Cliara: {display}")
+
+        self.last_stderr = ""
+        self.last_stdout = ""
+        self.last_command = original.strip()
+        self._persist_last_command()
+        start_time = time.time()
+
+        try:
+            r = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired:
+            print_error("[Cliara] pip timed out (10 minutes).")
+            self.last_exit_code = -1
+            self._session_record_command(display, False)
+            self.history.set_last_exit_ts(self.last_exit_code, start_time)
+            return False
+
+        if r.stdout:
+            print(r.stdout, end="")
+        if r.stderr:
+            print(r.stderr, end="", file=sys.stderr)
+
+        self.last_stdout = r.stdout or ""
+        self.last_stderr = r.stderr or ""
+        self.last_exit_code = r.returncode
+        ok = r.returncode == 0
+        elapsed = time.time() - start_time
+        self._last_command_elapsed = elapsed
+        self._session_record_command(display, ok)
+        self.history.set_last_exit_ts(self.last_exit_code, start_time)
+
+        if not ok and platform.system() == "Windows" and stderr_suggests_file_in_use(
+            self.last_stderr
+        ):
+            print()
+            print_warning("[Cliara] Could not replace files while Cliara is running.")
+            print_dim(windows_replace_failure_hint())
+        elif ok:
+            print_success(
+                "[Cliara] pip finished. Restart Cliara to load the new version."
+            )
+
+        return ok
 
     # ------------------------------------------------------------------
     # NL query confirmation with copy option
@@ -5616,7 +5722,8 @@ class CliaraShell:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "explain", "lint", "push", "session", "deploy",
+        "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "upgrade-cliara",
+        "explain", "lint", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm",
         "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",
     })
@@ -5702,6 +5809,7 @@ class CliaraShell:
 
     def _print_exit_message(self):
         """Styled exit message: 2 lines, plus session resume hint if a session is active."""
+        self._flush_semantic_history()
         console = _cliara_console()
         console.print()
         console.print("[dim]Session ended. See you next time.[/dim]")
@@ -6003,8 +6111,10 @@ class CliaraShell:
         print_dim("  tips                       Show quick-tips panel (startup banner)")
         print_dim("  last                       Repeat the last command")
         print_dim("  doctor                     Setup health check (shell, LLM, macros, config)")
+        print_dim("  upgrade-cliara [pip flags] Same as pip install --upgrade cliara (this interpreter)")
         print_dim("  history [N]                Show last N commands (default 20)")
         print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
+        print_dim("  config set semantic_history_enabled false — disable semantic history & ? find")
         print_dim("  version / status / readme  Show version, auth, or generate README")
         print_dim("  exit / Ctrl+C              Quit Cliara")
 

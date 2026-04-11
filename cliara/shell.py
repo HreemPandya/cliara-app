@@ -745,6 +745,7 @@ class CliaraShell:
         self._copilot_gate = CopilotGate(
             self._risk_engine,
             auto_approve_safe=self.config.get("copilot_gate_auto_approve_safe", True),
+            auto_approve_caution=self.config.get("copilot_gate_auto_approve_caution", False),
         )
 
         progress.step("Loading history...")
@@ -776,6 +777,9 @@ class CliaraShell:
         self.last_command: str = ""  # Last shell command that was executed
         # When True, next handle_input skips Copilot Gate (replay via last/retry)
         self._gate_force_typed: bool = False
+        # After CopilotGate approves pasted/AI input, skip duplicate _inline_gate (see handle_input).
+        # Cleared at the next handle_input if the prior line exited before reaching _inline_gate.
+        self._inline_skip_once: bool = False
         self._prev_cwd: Optional[str] = None  # Previous directory for "cd -"
         # Load persisted last command so "last" works after restart
         _last_cmd_file = self.config.config_dir / "last_command.txt"
@@ -1476,6 +1480,10 @@ class CliaraShell:
         # Any new input clears a pending fix suggestion
         self._pending_fix = None
 
+        # Leftover from a pasted/AI line that returned early (builtin, cd, …) — do not carry over.
+        if self._inline_skip_once:
+            self._inline_skip_once = False
+
         # Record every command (built-in and shell) so history shows push, doctor, macros, etc.
         if user_input.strip():
             self.history.add(user_input.strip())
@@ -1504,6 +1512,8 @@ class CliaraShell:
                         print_warning("  [Cancelled]")
                         return
                     user_input = command
+                    # Risk already assessed — avoid a second prompt at _inline_gate
+                    self._inline_skip_once = True
 
         # Check for exit commands
         if user_input.lower() in ['exit', 'quit', 'q']:
@@ -3564,58 +3574,34 @@ class CliaraShell:
     # ------------------------------------------------------------------
     def _inline_gate(self, command: str, assessment, *, non_interactive: bool = False) -> bool:
         """
-        Render an inline risk warning and ask for y/n confirmation.
-        Returns *True* to proceed, *False* to cancel.
-        SAFE commands always proceed with a dim explanation line.
+        Tiered risk gate for typed commands — same UX tiers as CopilotGate (SAFE / CAUTION /
+        DANGEROUS ``RUN`` / CRITICAL ``I UNDERSTAND``).
 
         When *non_interactive* is True (e.g. stdin not a TTY), risky commands
         are denied without prompting so the process does not block.
+
+        After CopilotGate already approved pasted/AI input, *inline_skip_once* avoids
+        prompting twice for the same line.
         """
         from cliara.copilot_gate import RiskAssessment
 
         ra: RiskAssessment = assessment
         level = ra.danger_level
 
-        if level == DangerLevel.SAFE:
-            print_dim(f"  -> {ra.explanation}")
-            return True
-
-        # Build detail lines
-        details: List[str] = []
-        if ra.blast_radius != "local":
-            details.append(f"Scope: {ra.blast_radius}")
-        details.extend(ra.risk_factors)
-        details.extend(ra.context_warnings)
-
-        if level == DangerLevel.CAUTION:
-            print_warning(f"  [!] CAUTION: {ra.explanation}")
-            for d in details:
-                print_warning(f"  | {d}")
-        elif level == DangerLevel.DANGEROUS:
-            print_error(f"  [!!] DANGEROUS: {ra.explanation}")
-            for d in details:
-                print_error(f"  | {d}")
-        elif level == DangerLevel.CRITICAL:
-            print_error(f"  [!!!] CRITICAL: {ra.explanation}")
-            for d in details:
-                print_error(f"  | {d}")
-            print_error("  This action is potentially destructive and irreversible.")
-
         if non_interactive:
+            if level == DangerLevel.SAFE:
+                print_dim(f"  -> {ra.explanation}")
+                return True
             print_warning("  [Skipped] Non-interactive (no TTY); risky commands are not run.")
             return False
 
-        try:
-            response = input("  Proceed? (y/n): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return False
-
-        if response in ("y", "yes"):
+        if self._inline_skip_once:
+            self._inline_skip_once = False
             return True
 
-        print_warning("  [Cancelled]")
-        return False
+        return self._copilot_gate.confirm_command(
+            command, ra, source_label="typed",
+        )
 
     # ------------------------------------------------------------------
     # Cross-platform command translation

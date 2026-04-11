@@ -79,6 +79,8 @@ class Config:
         "copilot_gate": True,
         "copilot_gate_mode": "auto",            # "auto" | "explicit" | "all"
         "copilot_gate_auto_approve_safe": True,  # Auto-execute SAFE pasted commands
+        # When True, CAUTION-tier pasted/typed commands run after a one-line notice (no y/n)
+        "copilot_gate_auto_approve_caution": False,
         # Copilot/Cursor — paste-ready context (chat copy, session snapshot --chat)
         "chat_export_max_stderr_chars": 12000,
         "chat_export_max_stdout_chars": 8000,

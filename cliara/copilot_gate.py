@@ -604,9 +604,11 @@ class CopilotGate:
 
     def __init__(self, risk_engine: RiskEngine, *,
                  auto_approve_safe: bool = True,
+                 auto_approve_caution: bool = False,
                  nl_handler=None):
         self._risk = risk_engine
         self._auto_approve_safe = auto_approve_safe
+        self._auto_approve_caution = auto_approve_caution
         self._nl_handler = nl_handler
 
     # ── public API ────────────────────────────────────────────────────
@@ -618,29 +620,32 @@ class CopilotGate:
         Returns *True* when execution is approved, *False* to cancel.
         """
         assessment = self._risk.assess(command)
-        return self._render_gate(command, assessment, source)
-
-    # ── rendering (4-tier UX) ─────────────────────────────────────────
-
-    def _render_gate(self, command: str, ra: RiskAssessment,
-                     source: InputSource) -> bool:
-        from cliara.console import get_console
-        console = get_console()
-
         source_label = {
             InputSource.PASTED: "pasted",
             InputSource.AI_TAGGED: "ai",
             InputSource.COPILOT_CLI: "copilot",
         }.get(source, "ai")
+        return self.confirm_command(command, assessment, source_label=source_label)
+
+    def confirm_command(
+        self, command: str, ra: RiskAssessment, *, source_label: str,
+    ) -> bool:
+        """
+        Present the 4-tier gate UX for an already-computed assessment.
+
+        Used for pasted/AI commands (via ``evaluate``) and for typed shell
+        commands (via ``CliaraShell._inline_gate``) so behavior stays consistent.
+        """
+        from cliara.console import get_console
+        console = get_console()
 
         if ra.danger_level == DangerLevel.SAFE:
             return self._gate_safe(console, ra, source_label)
-        elif ra.danger_level == DangerLevel.CAUTION:
+        if ra.danger_level == DangerLevel.CAUTION:
             return self._gate_caution(console, ra, source_label)
-        elif ra.danger_level == DangerLevel.DANGEROUS:
+        if ra.danger_level == DangerLevel.DANGEROUS:
             return self._gate_dangerous(console, command, ra, source_label)
-        else:
-            return self._gate_critical(console, command, ra, source_label)
+        return self._gate_critical(console, command, ra, source_label)
 
     # ── Tier 1: SAFE ──
 
@@ -668,6 +673,10 @@ class CopilotGate:
         detail = " [yellow]|[/yellow] ".join(parts)
 
         console.print(f" [yellow bold] {label} [/yellow bold]  {detail}")
+
+        if self._auto_approve_caution:
+            console.print("  [dim](caution tier auto-approved — set copilot_gate_auto_approve_caution false to confirm)[/dim]")
+            return True
 
         try:
             resp = input("  Run? (y/n): ").strip().lower()

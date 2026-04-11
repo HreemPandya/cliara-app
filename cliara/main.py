@@ -3,9 +3,11 @@ Cliara - Main entry point.
 Starts the Cliara shell.
 """
 
-import sys
 import argparse
+import platform
+import sys
 from pathlib import Path
+from typing import Optional
 
 from cliara import __version__
 from cliara.config import Config
@@ -90,6 +92,94 @@ def _run_status(config_dir=None):
     print()
 
 
+# Prefixes that must not be sent to Ollama as model names (same idea as setup_wizard).
+_CLOUD_MODEL_PREFIXES = ("gpt-", "claude-", "llama-3.", "gemini-", "mixtral-", "text-")
+
+
+def _clear_stale_cloud_model_for_ollama(config: Config) -> None:
+    stored = config.get("llm_model") or ""
+    if any(stored.startswith(p) for p in _CLOUD_MODEL_PREFIXES):
+        config.settings["llm_model"] = None
+        config.save()
+
+
+def _init_nl_handler_headless(config: Config):
+    """
+    Build an NLHandler with LLM ready for one-shot queries (no REPL, no wizard).
+    Returns NLHandler or None if the LLM could not be initialized.
+    """
+    from cliara.nl_handler import NLHandler
+    from cliara.safety import SafetyChecker
+
+    safety = SafetyChecker()
+    nl = NLHandler(safety, config=config)
+
+    provider = config.get_llm_provider()
+    api_key = config.get_llm_api_key()
+
+    if not provider or not api_key:
+        return None
+
+    ok = False
+    if provider == "ollama":
+        _clear_stale_cloud_model_for_ollama(config)
+        ok = nl.initialize_llm(
+            "ollama",
+            api_key,
+            base_url=config.get_ollama_base_url(),
+        )
+    else:
+        ok = nl.initialize_llm(provider, api_key)
+
+    return nl if ok and nl.llm_enabled else None
+
+
+def _run_ask(query: str, *, config_dir: Optional[str] = None, shell_override: Optional[str] = None) -> None:
+    """
+    Translate natural language to shell commands; print them and exit (no execution).
+
+    Exit codes: 0 success, 2 no LLM / init failure, 3 empty or unusable generation.
+    """
+    query = (query or "").strip()
+    if not query:
+        print("cliara ask: missing query - example: cliara ask list files in this directory", file=sys.stderr)
+        sys.exit(2)
+
+    config = Config(config_dir=config_dir)
+
+    nl = _init_nl_handler_headless(config)
+    if nl is None:
+        print(
+            "cliara ask: no AI provider configured.\n"
+            "  Run: cliara login   (Cliara Cloud)\n"
+            "  Or set OPENAI_API_KEY / GROQ_API_KEY / GEMINI_API_KEY, or run Ollama.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    shell_path = shell_override or config.get("shell") or config._detect_shell()
+    context = {
+        "cwd": str(Path.cwd()),
+        "os": platform.system(),
+        "shell": shell_path,
+    }
+
+    commands, explanation, danger_level = nl.process_query(query, context, stream_callback=None)
+
+    if not commands:
+        print(f"cliara ask: {explanation}", file=sys.stderr)
+        sys.exit(3)
+
+    print("Suggested commands:")
+    for i, cmd in enumerate(commands, 1):
+        print(f"  {i}. {cmd}")
+    print()
+    print(f"Explanation: {explanation}")
+    print(f"Risk: {danger_level.value}")
+    print()
+    print("(Not executed - run them yourself or start the Cliara shell.)")
+
+
 def main():
     """Main entry point for Cliara."""
     parser = argparse.ArgumentParser(
@@ -101,6 +191,8 @@ Examples:
   cliara login              Log in to Cliara Cloud (GitHub OAuth, no API key needed)
   cliara logout             Sign out and clear stored token
   cliara status             Show auth and LLM status
+  cliara ask list git branches   Turn plain English into commands (not run)
+  cliara nl undo last commit     Same as ask
   cliara -c "git status"    Run a single command through Cliara's gate
   cliara -c "rm -rf dist"   Risky commands still require approval
   cliara --config-dir ~/my-config  Use custom config directory
@@ -155,8 +247,34 @@ Once in the shell:
     subparsers.add_parser('login', help='Log in to Cliara Cloud (GitHub OAuth)')
     subparsers.add_parser('logout', help='Sign out and clear stored Cliara Cloud token')
     subparsers.add_parser('status', help='Show auth and LLM status')
-    
+
+    ask_p = subparsers.add_parser(
+        'ask',
+        help='Translate natural language to shell commands (does not execute them)',
+    )
+    ask_p.add_argument(
+        'query',
+        nargs='+',
+        metavar='WORDS',
+        help='What you want to do, in plain language',
+    )
+
+    nl_p = subparsers.add_parser(
+        'nl',
+        help='Same as ask: natural language to suggested commands only',
+    )
+    nl_p.add_argument(
+        'query',
+        nargs='+',
+        metavar='WORDS',
+        help='What you want to do, in plain language',
+    )
+
     args = parser.parse_args()
+
+    if args.debug:
+        import os
+        os.environ['DEBUG'] = '1'
 
     # Standalone login/logout/status — run OAuth, clear token, or show status, then exit (no REPL)
     if args.command == 'login':
@@ -168,12 +286,14 @@ Once in the shell:
     if args.command == 'status':
         _run_status(config_dir=args.config_dir)
         sys.exit(0)
-    
-    # Set debug mode
-    if args.debug:
-        import os
-        os.environ['DEBUG'] = '1'
-    
+    if args.command in ('ask', 'nl'):
+        _run_ask(
+            ' '.join(args.query),
+            config_dir=args.config_dir,
+            shell_override=args.shell,
+        )
+        sys.exit(0)
+
     try:
         # Initialize config
         config = Config(config_dir=args.config_dir)

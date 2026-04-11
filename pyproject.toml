@@ -42,6 +42,8 @@ dependencies = [
     "httpx>=0.25,<0.28",  # Pin: httpx 0.28+ breaks openai (proxies API change)
     # AI: BYOK Claude (setup wizard option)
     "anthropic>=0.8.0",
+    # Semantic history: batch cosine similarity over embeddings
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]

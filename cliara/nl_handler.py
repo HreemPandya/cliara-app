@@ -8,6 +8,8 @@ import os
 import platform
 import re
 from pathlib import Path
+
+import numpy as np
 from shutil import which
 from typing import List, Tuple, Optional, Dict, Any, Callable
 
@@ -872,16 +874,6 @@ Command: {cmd_for_prompt}"""
         except Exception:
             return None
 
-    @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
-        """Cosine similarity between two equal-length vectors (pure-Python, no deps)."""
-        dot = sum(x * y for x, y in zip(a, b))
-        mag_a = sum(x * x for x in a) ** 0.5
-        mag_b = sum(x * x for x in b) ** 0.5
-        if mag_a == 0 or mag_b == 0:
-            return 0.0
-        return dot / (mag_a * mag_b)
-
     def search_history_by_embeddings(
         self,
         entries: List[Dict[str, Any]],
@@ -912,15 +904,30 @@ Command: {cmd_for_prompt}"""
         if not query_emb:
             return []
 
-        scored = [
-            (self._cosine_similarity(query_emb, e["embedding"]), e)
-            for e in with_emb
-        ]
-        scored.sort(key=lambda x: x[0], reverse=True)
+        q = np.asarray(query_emb, dtype=np.float32)
+        try:
+            M = np.stack(
+                [np.asarray(e["embedding"], dtype=np.float32) for e in with_emb],
+                axis=0,
+            )
+        except ValueError:
+            return []
 
-        # Only return entries with a meaningful similarity score
+        if M.ndim != 2 or M.shape[1] != q.shape[0]:
+            return []
+
+        q_norm = q / (np.linalg.norm(q) + 1e-12)
+        row_norms = np.linalg.norm(M, axis=1, keepdims=True)
+        M_norm = M / (row_norms + 1e-12)
+        scores = M_norm @ q_norm
+
+        order = np.argsort(-scores)
         threshold = 0.30
-        return [e for score, e in scored[:top_k] if score >= threshold]
+        out: List[Dict[str, Any]] = []
+        for i in order[:top_k]:
+            if scores[i] >= threshold:
+                out.append(with_emb[int(i)])
+        return out
 
     # ------------------------------------------------------------------
     # Commit-message generation (smart push)

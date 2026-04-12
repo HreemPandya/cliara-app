@@ -1067,30 +1067,22 @@ class CliaraShell:
             lines.append(f"LLM: {self._llm_status_provider_label()} (Ready)")
         else:
             lines.append("LLM: Not configured (set OPENAI_API_KEY in .env)")
+        _nl_hint = (
+            f"e.g. {nl} kill port 3000"
+            if self.nl_handler.llm_enabled
+            else "(configure LLM — see help)"
+        )
         lines.extend([
             "",
             "Quick tips:",
-            f"  • {nl} <query>             Ask in plain English" + (" (e.g. " + nl + " list large files)" if self.nl_handler.llm_enabled else " (requires API key)"),
-            f"  • {nl} fix                 Diagnose & fix the last failed command",
-            f"  • explain last            Last run — command + output + exit (also {nl} explain last)",
-            f"  • {nl} why                 Regression deep-dive after a failure",
-            f"  • {nl} find / when did I   Search history by meaning",
-            "  • ss <name> / session start   Start a task session",
-            "  • se [note] / session end     End session — add --reflect for closeout",
-            "  • session help           More session commands (notes, list, show)",
-            "  • chat copy              Copy last-run context for Copilot or Cursor",
-            "  • push                    Smart git push — auto-commit message & branch",
-            "  • explain <cmd>           Understand any command  (e.g. explain git rebase)",
-            "  • macro add <name>        Create a reusable macro",
-            "  • macro add <name> --nl   Create a macro from plain English",
-            "  • <macro-name>            Run a saved macro",
-            "  • help                    Show all commands",
-            "  • version                 Show Cliara version",
-            "  • status                  Show auth and LLM status",
-            "  • readme                  Generate README from project context",
-            "  • theme [name]            List or set color theme (e.g. dracula, nord)",
-            "  • tips                    Show this quick-tips panel anytime",
-            "  • exit                    Quit Cliara",
+            f"  • {nl} <query>        Plain English → shell commands  {_nl_hint}",
+            f"  • {nl} fix            After error — what broke + how to fix",
+            f"  • explain last        Last run — output + exit code  ({nl} explain last)",
+            f"  • {nl} find …         Search history by meaning  ({nl} when did I …)",
+            "  • macro add <n>       Save command chains; run by typing the macro name",
+            "  • push                Smart git — suggest commit + push",
+            "  • ss / se · chat copy Start/end task sessions; copy last run for AI editors",
+            "  • help · tips · exit  Full command list · show tips again · quit",
         ])
         lines.extend([
             "",

@@ -5829,6 +5829,7 @@ class CliaraShell:
         print()
         print_dim("  First run: Cliara detects your project type and proposes a plan.")
         print_dim("  After confirming, the plan is saved — next time it's instant.")
+        print_dim("  PyPI: upload step uses twine --username __token__; paste your full pypi-… API token at the password prompt.")
         print()
 
     # ------------------------------------------------------------------

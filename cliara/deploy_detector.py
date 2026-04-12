@@ -314,7 +314,11 @@ def _detect_python_publish(cwd: Path) -> Optional[DeployPlan]:
         marker = "pyproject.toml" if (cwd / "pyproject.toml").exists() else "setup.py"
         return DeployPlan(
             platform="pypi",
-            steps=["python -m build", "twine upload dist/*"],
+            steps=[
+                "python -m build",
+                # PyPI API tokens require username __token__; password prompt = full pypi-… token
+                "twine upload --username __token__ dist/*",
+            ],
             project_name=_python_project_name(cwd),
             detected_from=marker,
             needs_build=True,

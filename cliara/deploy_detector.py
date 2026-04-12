@@ -312,12 +312,18 @@ def _detect_npm_publish(cwd: Path) -> Optional[DeployPlan]:
 def _detect_python_publish(cwd: Path) -> Optional[DeployPlan]:
     if (cwd / "pyproject.toml").exists() or (cwd / "setup.py").exists():
         marker = "pyproject.toml" if (cwd / "pyproject.toml").exists() else "setup.py"
+        # Align with project PUBLISH.md: tools → clean dist → build → twine as __token__
+        _clean_dist = (
+            'python -c "import shutil, pathlib; '
+            "shutil.rmtree(pathlib.Path('dist'), ignore_errors=True)\""
+        )
         return DeployPlan(
             platform="pypi",
             steps=[
+                "python -m pip install --upgrade build twine",
+                _clean_dist,
                 "python -m build",
-                # PyPI API tokens require username __token__; password prompt = full pypi-… token
-                "twine upload --username __token__ dist/*",
+                "python -m twine upload dist/* -u __token__",
             ],
             project_name=_python_project_name(cwd),
             detected_from=marker,

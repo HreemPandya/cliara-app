@@ -118,6 +118,20 @@ THEMES = {
         },
         # print_info: same ANSI slot as prompt-name (ansicyan bold → Rich)
         "ui_info": "bold cyan",
+        "tips_panel": {
+            "border": "cyan",
+            "title_brand": "bold cyan",
+            "title_sep": "dim",
+            "title_tagline": "bold white",
+            "meta": "dim #888888",
+            "heading": "bold bright_green",
+            "rule": "dim #6a6a6a",
+            "kbd": "bold cyan",
+            "body": "bright_white",
+            "hint": "dim #6a6a6a",
+            "footer_icon": "bold yellow",
+            "footer": "dim #66d9ef",
+        },
     },
     "dracula": {
         "styles": {
@@ -150,6 +164,21 @@ THEMES = {
         },
         # Same as prompt-name: ansimagenta bold
         "ui_info": "bold magenta",
+        # Rich styles for startup / `tips` panel (border + typography)
+        "tips_panel": {
+            "border": "bright_magenta",
+            "title_brand": "bold bright_magenta",
+            "title_sep": "dim",
+            "title_tagline": "bold white",
+            "meta": "dim #bd93f9",
+            "heading": "bold bright_cyan",
+            "rule": "dim #6272a4",
+            "kbd": "bold bright_magenta",
+            "body": "white",
+            "hint": "dim #6272a4",
+            "footer_icon": "bold yellow",
+            "footer": "dim #8be9fd",
+        },
     },
     "nord": {
         "styles": {
@@ -182,6 +211,20 @@ THEMES = {
         },
         # Same as prompt-name: ansiblue bold
         "ui_info": "bold blue",
+        "tips_panel": {
+            "border": "blue",
+            "title_brand": "bold blue",
+            "title_sep": "dim",
+            "title_tagline": "bold white",
+            "meta": "dim #81a1c1",
+            "heading": "bold bright_cyan",
+            "rule": "dim #4c566a",
+            "kbd": "bold bright_blue",
+            "body": "bright_white",
+            "hint": "dim #616e88",
+            "footer_icon": "bold yellow",
+            "footer": "dim #88c0d0",
+        },
     },
     "solarized": {
         # Dark background: bright ANSI colors (widely supported)
@@ -216,6 +259,20 @@ THEMES = {
         },
         # Same as prompt-name: ansibrightred bold — use ANSI name so Rich matches PT (not hex #cb4b16).
         "ui_info": "bold bright_red",
+        "tips_panel": {
+            "border": "bright_red",
+            "title_brand": "bold bright_red",
+            "title_sep": "dim",
+            "title_tagline": "bold ansiwhite",
+            "meta": "dim cyan",
+            "heading": "bold cyan",
+            "rule": "dim bright_black",
+            "kbd": "bold bright_red",
+            "body": "ansiwhite",
+            "hint": "dim bright_black",
+            "footer_icon": "bold yellow",
+            "footer": "dim bright_cyan",
+        },
     },
     "catppuccin": {
         "styles": {
@@ -248,6 +305,20 @@ THEMES = {
         },
         # Same as prompt-name: ansigreen bold
         "ui_info": "bold green",
+        "tips_panel": {
+            "border": "green",
+            "title_brand": "bold green",
+            "title_sep": "dim",
+            "title_tagline": "bold bright_white",
+            "meta": "dim #a6adc8",
+            "heading": "bold bright_cyan",
+            "rule": "dim #6c7086",
+            "kbd": "bold green",
+            "body": "#e2e8f0",
+            "hint": "dim #a6adc8",
+            "footer_icon": "bold yellow",
+            "footer": "dim #89dceb",
+        },
     },
     "light": {
         # White / snow — light foreground for dark terminals (cliara name + body text near white).
@@ -281,6 +352,20 @@ THEMES = {
         },
         # Same as prompt-name: bold #ffffff → Rich white (truecolor ok; matches PT hex)
         "ui_info": "bold white",
+        "tips_panel": {
+            "border": "#737373",
+            "title_brand": "bold white",
+            "title_sep": "dim #737373",
+            "title_tagline": "bold #e5e5e5",
+            "meta": "dim #a3a3a3",
+            "heading": "bold #ffffff",
+            "rule": "dim #525252",
+            "kbd": "bold white",
+            "body": "#e5e5e5",
+            "hint": "dim #a3a3a3",
+            "footer_icon": "bold #fde047",
+            "footer": "dim #d4d4d4",
+        },
     },
 }
 
@@ -297,6 +382,20 @@ def get_ui_info_style(theme_name: str) -> str:
     if name not in THEMES:
         name = DEFAULT_THEME
     return str(THEMES[name].get("ui_info", THEMES[DEFAULT_THEME].get("ui_info", "bold magenta")))
+
+
+def get_tips_panel_styles(theme_name: str) -> dict:
+    """
+    Rich style map for the startup / ``tips`` panel (border, title, body tiers).
+    Follows the active Cliara theme; unknown themes fall back to dracula.
+    """
+    name = (theme_name or "").strip().lower()
+    if name not in THEMES:
+        name = DEFAULT_THEME
+    raw = THEMES[name].get("tips_panel")
+    if not raw:
+        raw = THEMES[DEFAULT_THEME]["tips_panel"]
+    return dict(raw)
 
 
 def get_style_for_theme(theme_name: str):

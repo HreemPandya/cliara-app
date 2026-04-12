@@ -781,6 +781,10 @@ class CliaraShell:
         self.last_stdout: str = ""
         self.last_exit_code: int = 0
         self.last_command: str = ""  # Last shell command that was executed
+        # When False, hide ✓/✗ in the prompt (e.g. user just ran theme/help). last_exit_code
+        # is unchanged so ? fix still sees the last real shell failure. Starts True so the first
+        # prompt matches prior behaviour; handle_input clears it until a shell run completes.
+        self.show_shell_exit_in_prompt: bool = True
         # When True, next handle_input skips Copilot Gate (replay via last/retry)
         self._gate_force_typed: bool = False
         # After CopilotGate approves pasted/AI input, skip duplicate _inline_gate (see handle_input).
@@ -1057,39 +1061,75 @@ class CliaraShell:
     def _print_full_banner(self):
         """Print the full quick-tips banner (Rich Panel). Used at startup when appropriate and by the 'tips' command."""
         from cliara import __version__
+        from cliara.console import get_ui_theme
+        from cliara.highlighting import get_tips_panel_styles
+        from rich.markup import escape
         from rich.panel import Panel
-        nl = self.config.get('nl_prefix', '?')
-        lines = [
-            f"Shell: {self.shell_path}",
-            "",
-        ]
+        from rich.text import Text
+
+        nl = self.config.get("nl_prefix", "?")
+        theme = get_ui_theme()
+        s = get_tips_panel_styles(theme)
+
+        def M(key: str, text: str) -> str:
+            """Wrap *text* (user-facing; escaped) in Rich style *key* from theme."""
+            raw = (text or "").replace("\n", " ")
+            st = (s.get(key) or "").strip()
+            if not st:
+                return escape(raw)
+            return f"[{st}]{escape(raw)}[/]"
+
+        shell_line = f"Shell: {self.shell_path}"
         if self.nl_handler.llm_enabled:
-            lines.append(f"LLM: {self._llm_status_provider_label()} (Ready)")
+            llm_line = f"LLM: {self._llm_status_provider_label()} (Ready)"
         else:
-            lines.append("LLM: Not configured (set OPENAI_API_KEY in .env)")
+            llm_line = "LLM: Not configured (set OPENAI_API_KEY in .env)"
+
         _nl_hint = (
             f"e.g. {nl} kill port 3000"
             if self.nl_handler.llm_enabled
             else "(configure LLM — see help)"
         )
-        lines.extend([
+
+        rule = f"[{s['rule']}]{'─' * 52}[/]"
+        tip_footer = self._pick_tip()
+
+        blocks = [
+            M("meta", shell_line),
+            M("meta", llm_line),
             "",
-            "Quick tips:",
-            f"  • {nl} <query>        Plain English → shell commands  {_nl_hint}",
-            f"  • {nl} fix            After error — what broke + how to fix",
-            f"  • explain last        Last run — output + exit code  ({nl} explain last)",
-            f"  • {nl} find …         Search history by meaning  ({nl} when did I …)",
-            "  • macro add <n>       Save command chains; run by typing the macro name",
-            "  • push                Smart git — suggest commit + push",
-            "  • ss / se · chat copy Start/end task sessions; copy last run for AI editors",
-            "  • help · tips · exit  Full command list · show tips again · quit",
-        ])
-        lines.extend([
+            rule,
             "",
-            f"[dim]💡 Did you know? {self._pick_tip()}[/dim]",
-        ])
-        content = "\n".join(lines)
-        panel = Panel(content, title=f"Cliara {__version__} — AI-Powered Shell", border_style="cyan")
+            M("heading", "Quick tips"),
+            "",
+            f"  • {M('kbd', f'{nl} <query>')}{M('body', '   Plain English → shell commands  ')}{M('hint', _nl_hint)}",
+            f"  • {M('kbd', f'{nl} fix')}{M('body', '            After error — what broke + how to fix')}",
+            f"  • {M('kbd', 'explain last')}{M('body', '     Last run — output + exit code  ')}{M('hint', f'({nl} explain last)')}",
+            f"  • {M('kbd', f'{nl} find …')}{M('body', '     Search history by meaning  ')}{M('hint', f'({nl} when did I …)')}",
+            f"  • {M('kbd', 'macro add <n>')}{M('body', ' Save command chains; run by typing the macro name')}",
+            f"  • {M('kbd', 'push')}{M('body', '               Smart git — suggest commit + push')}",
+            f"  • {M('kbd', 'ss / se · chat copy')}{M('body', ' Start/end task sessions; copy last run for AI editors')}",
+            f"  • {M('kbd', 'help · tips · exit')}{M('body', ' Full command list · show tips again · quit')}",
+            "",
+            rule,
+            "",
+            f"{M('footer_icon', '💡')} {M('footer', f'Did you know? {tip_footer}')}",
+        ]
+        content = "\n".join(blocks)
+
+        title = (
+            f"[{s['title_brand']}]Cliara {__version__}[/] "
+            f"[{s['title_sep']}]—[/] "
+            f"[{s['title_tagline']}]AI-Powered Shell[/]"
+        )
+
+        panel = Panel(
+            Text.from_markup(content, overflow="fold"),
+            title=Text.from_markup(title, overflow="fold"),
+            border_style=s.get("border", "cyan"),
+            padding=(1, 2),
+            highlight=False,
+        )
         _cliara_console().print(panel)
         _cliara_console().print()
 
@@ -1399,13 +1439,14 @@ class CliaraShell:
                 if self._prompt_session is not None:
                     # Coloured, syntax-highlighted prompt (uses current theme from config)
                     message = []
-                    # Exit code indicator: ✓ for success (exit code 0), ✗ N for failure
-                    if self.last_exit_code != 0:
-                        message.append(("class:prompt-exit-fail", f"✗ {self.last_exit_code}"))
-                        message.append(("class:prompt-sep", " "))
-                    elif self.last_command:
-                        message.append(("class:prompt-exit-success", "✓"))
-                        message.append(("class:prompt-sep", " "))
+                    # Exit code indicator: only after a line that ran the shell (not theme/help).
+                    if self.show_shell_exit_in_prompt:
+                        if self.last_exit_code != 0:
+                            message.append(("class:prompt-exit-fail", f"✗ {self.last_exit_code}"))
+                            message.append(("class:prompt-sep", " "))
+                        elif self.last_command:
+                            message.append(("class:prompt-exit-success", "✓"))
+                            message.append(("class:prompt-sep", " "))
                     message.append(("class:prompt-name", "cliara"))
                     message.append(("class:prompt-sep", " "))
                     if self.current_session:
@@ -1425,10 +1466,11 @@ class CliaraShell:
                     from cliara.highlighting import get_prompt_name_ansi
                     pfx, suf = get_prompt_name_ansi(self.config.get("theme") or "dracula")
                     exit_indicator = ""
-                    if self.last_exit_code != 0:
-                        exit_indicator = f"X {self.last_exit_code} "
-                    elif self.last_command:
-                        exit_indicator = "OK "
+                    if self.show_shell_exit_in_prompt:
+                        if self.last_exit_code != 0:
+                            exit_indicator = f"X {self.last_exit_code} "
+                        elif self.last_command:
+                            exit_indicator = "OK "
 
                     # Duration in plain mode: show on its own line (we can't right-align without prompt_toolkit)
                     if self._last_command_elapsed is not None:
@@ -1505,6 +1547,10 @@ class CliaraShell:
         """
         # Any new input clears a pending fix suggestion
         self._pending_fix = None
+
+        # Built-in lines (theme, help, …) should not keep showing the previous shell's ✗/✓.
+        # execute_shell_command and pip self-upgrade set this True again when a real run finishes.
+        self.show_shell_exit_in_prompt = False
 
         # Leftover from a pasted/AI line that returned early (builtin, cd, …) — do not carry over.
         if self._inline_skip_once:
@@ -3349,20 +3395,28 @@ class CliaraShell:
     def _apply_theme(self, name: str):
         """Set theme in config, refresh prompt session, and print an instant colored preview."""
         from cliara.console import set_ui_theme
-        from cliara.highlighting import get_theme_preview_markup
+        from cliara.highlighting import get_theme_preview_markup, get_tips_panel_styles
         from rich.panel import Panel
+        from rich.text import Text
         self.config.set("theme", name)
         set_ui_theme(name)
         session = self._create_prompt_session()
         if session is not None:
             self._prompt_session = session
         console = _cliara_console()
+        tp = get_tips_panel_styles(name)
         try:
+            from rich.markup import escape as _rich_esc
             markup = get_theme_preview_markup(name)
+            title = (
+                f"[{tp['title_brand']}]Theme applied[/] "
+                f"[{tp['title_sep']}]—[/] "
+                f"[{tp['title_tagline']}]{_rich_esc(name)}[/]"
+            )
             console.print(Panel(
-                markup,
-                title=f"[bold]Theme applied: {name}[/bold]",
-                border_style="green",
+                Text.from_markup(markup, overflow="fold"),
+                title=Text.from_markup(title, overflow="fold"),
+                border_style=tp.get("border", "green"),
                 padding=(0, 1),
             ))
         except Exception:
@@ -3603,6 +3657,7 @@ class CliaraShell:
             self.last_exit_code = -1
             self._session_record_command(display, False)
             self.history.set_last_exit_ts(self.last_exit_code, start_time)
+            self.show_shell_exit_in_prompt = True
             return False
 
         if r.stdout:
@@ -3630,6 +3685,7 @@ class CliaraShell:
                 "[Cliara] pip finished. Restart Cliara to load the new version."
             )
 
+        self.show_shell_exit_in_prompt = True
         return ok
 
     # ------------------------------------------------------------------
@@ -4282,6 +4338,8 @@ class CliaraShell:
             self._session_record_command(command, False)
             self.history.set_last_exit_ts(self.last_exit_code, start_time)
             return False
+        finally:
+            self.show_shell_exit_in_prompt = True
 
     def _session_record_command(self, command: str, success: bool):
         """If a task session is active, record this command to it."""

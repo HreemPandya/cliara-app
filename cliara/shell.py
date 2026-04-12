@@ -259,6 +259,11 @@ def _looks_like_why(query: str) -> bool:
     return False
 
 
+def _is_explain_last_rest(rest: str) -> bool:
+    """True if ``explain `` + *rest* is exactly ``explain last`` (case-insensitive)."""
+    return rest.strip().lower() == "last"
+
+
 def _is_semantic_history_search_intent(query: str) -> bool:
     """Return True if the query looks like a search over past commands by intent."""
     q = query.strip().lower()
@@ -1026,7 +1031,7 @@ class CliaraShell:
         "'{nl} why' runs a regression deep-dive: it compares the current failure to past successes.",
         "'{nl} find <phrase>' searches your command history by intent, not just text.",
         "Prefix any command with '{nl}' to translate plain English to shell — e.g. '{nl} kill port 3000'.",
-        "Use 'explain <cmd>' to get a plain-English breakdown of any shell command.",
+        "Use 'explain <cmd>' or 'explain last' to break down a command or the last run's output.",
         "Run 'macro add <name>' to save any command (or a series) as a reusable macro.",
         "Run 'macro add <name> --nl' to define a macro entirely in plain English.",
         "Type just a macro name to run it — no prefix needed.",
@@ -1067,6 +1072,7 @@ class CliaraShell:
             "Quick tips:",
             f"  • {nl} <query>             Ask in plain English" + (" (e.g. " + nl + " list large files)" if self.nl_handler.llm_enabled else " (requires API key)"),
             f"  • {nl} fix                 Diagnose & fix the last failed command",
+            f"  • explain last            Last run — command + output + exit (also {nl} explain last)",
             f"  • {nl} why                 Regression deep-dive after a failure",
             f"  • {nl} find / when did I   Search history by meaning",
             "  • ss <name> / session start   Start a task session",
@@ -1601,9 +1607,13 @@ class CliaraShell:
             self.handle_history(user_input[7:].strip() if len(user_input) > 7 else "")
             return
 
-        # Check for explain command
+        # Check for explain command (explain last before generic explain <cmd>)
         if user_input.lower().startswith('explain '):
-            self.handle_explain(user_input[8:].strip())
+            rest = user_input[8:].strip()
+            if _is_explain_last_rest(rest):
+                self.handle_explain_last()
+            else:
+                self.handle_explain(rest)
             return
 
         # Lint: explain + diff preview, then confirm before running
@@ -1787,6 +1797,12 @@ class CliaraShell:
             self.handle_why()
             return
 
+        # ── "? explain last" — same as bare explain last
+        q_low = query.strip().lower()
+        if q_low.startswith("explain ") and _is_explain_last_rest(q_low[8:].strip()):
+            self.handle_explain_last()
+            return
+
         # ── Semantic history search: ? find ... / ? when did I ... / ? what did I run ... ──
         if _is_semantic_history_search_intent(query):
             self.handle_semantic_history_search(query)
@@ -1925,6 +1941,55 @@ class CliaraShell:
         print()
 
         self._handle_error_translation(self.last_command, stderr)
+
+    def handle_explain_last(self):
+        """
+        Explain the last run: command line + exit code + captured stdout/stderr
+        in one narrative. If nothing was captured, falls back to ``explain <cmd>``
+        for the last command (no re-run prompt).
+        """
+        if not self.last_command:
+            print_error("[Cliara] Nothing to explain — no command run yet.")
+            return
+
+        stdout = self.last_stdout or ""
+        stderr = self.last_stderr or ""
+        if not stdout.strip() and not stderr.strip():
+            print_warning(
+                "[Cliara] No captured stdout/stderr for that run — "
+                "showing command-line explanation instead.\n"
+            )
+            self.handle_explain(self.last_command, offer_run=False)
+            return
+
+        print_info("\n[Explain last]")
+        print_dim(f"         Command:   {self.last_command}")
+        print_dim(f"         Exit code: {self.last_exit_code}\n")
+
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+        stream_cb = (
+            self._stream_callback_for_console()
+            if self.config.get("stream_llm", True)
+            else None
+        )
+        explanation = self.nl_handler.explain_terminal_output(
+            self.last_command,
+            self.last_exit_code,
+            stdout,
+            stderr,
+            context,
+            stream_callback=stream_cb,
+        )
+        print_header("-" * 60)
+        if stream_cb is None:
+            print(explanation)
+        else:
+            print()
+        print_header("-" * 60)
 
     def handle_why(self):
         """
@@ -5823,7 +5888,7 @@ class CliaraShell:
         """When user types ? with no query, show three context-aware prompt suggestions."""
         suggestions = []
         if self.last_command and self.last_exit_code != 0:
-            suggestions.append(f"{nl_prefix} explain the last error")
+            suggestions.append(f"{nl_prefix} explain last")
         elif self.last_command:
             short = self.last_command if len(self.last_command) <= 45 else self.last_command[:42] + "..."
             suggestions.append(f"{nl_prefix} explain {short}")
@@ -5932,12 +5997,14 @@ class CliaraShell:
         else:
             print_warning("  [Cancelled]")
 
-    def handle_explain(self, command: str):
+    def handle_explain(self, command: str, offer_run: bool = True):
         """
         Explain a shell command in plain English using the LLM.
 
         Args:
             command: The shell command to explain (e.g. "git rebase -i HEAD~3")
+            offer_run: If False, skip the "Run this command?" prompt (e.g. after
+                ``explain last`` when output was empty and we fall back to the command line).
         """
         if not command:
             print_error("[Error] Please provide a command to explain")
@@ -5977,22 +6044,23 @@ class CliaraShell:
                 command.strip(), one_line, str(Path.cwd())
             )
 
-        # Offer to run the command
-        print()
-        run = input("Run this command? (y/n): ").strip().lower()
-        if run in ['y', 'yes']:
-            # Safety check first
-            level, dangerous = self.safety.check_commands([command])
-            if level != DangerLevel.SAFE:
-                _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
-                prompt = self.safety.get_confirmation_prompt(level)
-                response = input(prompt).strip()
-                if not self.safety.validate_confirmation(response, level):
-                    print_warning("[Cancelled]")
-                    return
-
+        # Offer to run the command (skip when explaining something already executed)
+        if offer_run:
             print()
-            self.execute_shell_command(command, capture=False)
+            run = input("Run this command? (y/n): ").strip().lower()
+            if run in ['y', 'yes']:
+                # Safety check first
+                level, dangerous = self.safety.check_commands([command])
+                if level != DangerLevel.SAFE:
+                    _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
+                    prompt = self.safety.get_confirmation_prompt(level)
+                    response = input(prompt).strip()
+                    if not self.safety.validate_confirmation(response, level):
+                        print_warning("[Cancelled]")
+                        return
+
+                print()
+                self.execute_shell_command(command, capture=False)
 
     def show_help(self):
         """Show main help message."""
@@ -6019,6 +6087,8 @@ class CliaraShell:
         print_info("  Explain & Lint")
         print_dim("  ─────────────────────────────────────")
         print_dim("  explain <command>          Plain-English explanation of any command")
+        print_dim("  explain last               Last run: command + output + exit code (one explanation)")
+        print_dim(f"  {nl} explain last          Same as explain last")
         print_dim("  lint <command>             Explain + show impact, then ask to run (dry run)")
         print_dim("  Example: explain git rebase -i HEAD~3")
         print_dim("  Example: lint find . -name '*.py' -exec rm {} \\;\n")

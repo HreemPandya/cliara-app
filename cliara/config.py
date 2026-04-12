@@ -398,6 +398,7 @@ class Config:
             "nl_to_commands": "model_nl",
             "fix":            "model_fix",
             "explain":        "model_explain",
+            "explain_output": "model_explain",
             "history_summary":"model_history",
             "history_search": "model_history",
             "commit_message": "model_commit",

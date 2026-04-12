@@ -8,6 +8,7 @@ from typing import Any, Dict
 from cliara.agents import nl_to_commands as _nl
 from cliara.agents import fix as _fix
 from cliara.agents import explain as _explain
+from cliara.agents import explain_output as _explain_output
 from cliara.agents import history_summary as _history_summary
 from cliara.agents import history_search as _history_search
 from cliara.agents import commit_and_deploy as _commit_deploy
@@ -30,6 +31,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
         _nl.AGENTS
         | _fix.AGENTS
         | _explain.AGENTS
+        | _explain_output.AGENTS
         | _history_summary.AGENTS
         | _history_search.AGENTS
         |         _commit_deploy.AGENTS

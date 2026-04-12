@@ -45,6 +45,7 @@ _PROVIDER_BASE_URLS: Dict[str, str] = {
 # JSON appearing mid-parse gives broken UX.
 _STREAMING_SAFE_AGENTS = frozenset({
     "explain",
+    "explain_output",
     "commit_message",
     "copilot_explain",
     "readme",
@@ -752,6 +753,117 @@ Command: {command}"""
             f"  {hint}\n\n"
             f"Run 'setup-llm' to configure a free AI provider (Groq, Gemini, or Ollama)."
         )
+
+    @staticmethod
+    def _truncate_stream_for_prompt(text: str, max_lines: int = 80) -> str:
+        """Truncate long stream text for LLM prompts (head + tail)."""
+        if not text:
+            return ""
+        lines = text.splitlines()
+        if len(lines) <= max_lines:
+            return text
+        head = max(1, (max_lines * 3) // 5)
+        tail = max(1, max_lines - head - 3)
+        omitted = len(lines) - head - tail
+        return (
+            "\n".join(lines[:head])
+            + f"\n\n... ({omitted} lines omitted) ...\n\n"
+            + "\n".join(lines[-tail:])
+        )
+
+    def explain_terminal_output(
+        self,
+        command: str,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+        context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """
+        Explain a finished command: line + exit code + captured stdout/stderr
+        in one narrative (system prompt in explain_output agent).
+
+        Args:
+            command: Shell command that ran
+            exit_code: Process exit code
+            stdout: Captured standard output
+            stderr: Captured standard error
+            context: Optional cwd/os/shell
+            stream_callback: Optional token streamer for the console
+
+        Returns:
+            Plain-text explanation
+        """
+        if not self.llm_enabled:
+            return self._stub_explain_terminal_output(
+                command, exit_code, stdout, stderr
+            )
+
+        context_info = self._build_context(context or {})
+        os_name = context_info.get("os", "Unknown")
+        shell = context_info.get("shell", "bash")
+        cwd = context_info.get("cwd", "")
+
+        out_t = self._truncate_stream_for_prompt(stdout or "", 70)
+        err_t = self._truncate_stream_for_prompt(stderr or "", 70)
+        out_lines = len((stdout or "").splitlines())
+        err_lines = len((stderr or "").splitlines())
+
+        out_block = f"Stdout ({out_lines} lines, may be truncated):\n{out_t or '(empty)'}"
+        err_block = f"Stderr ({err_lines} lines, may be truncated):\n{err_t or '(empty)'}"
+
+        prompt = f"""Command that ran:
+{command}
+
+Exit code:
+{exit_code}
+
+{out_block}
+
+{err_block}
+
+Context:
+- OS: {os_name}
+- Shell: {shell}
+- Working directory: {cwd}
+"""
+        try:
+            response = self._call_llm_stream(
+                "explain_output", prompt, stream_callback
+            )
+            return (response or "").strip()
+        except Exception as e:
+            return f"Error explaining output: {e}"
+
+    def _stub_explain_terminal_output(
+        self,
+        command: str,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+    ) -> str:
+        lines = [
+            "LLM not configured — stub summary only.",
+            f"- Command: {command}",
+            f"- Exit code: {exit_code}",
+        ]
+        o = (stdout or "").strip()
+        e = (stderr or "").strip()
+        if o:
+            snippet = o[:400] + ("…" if len(o) > 400 else "")
+            lines.append(f"- Stdout ({len(o)} chars): {snippet!r}")
+        else:
+            lines.append("- Stdout: (empty)")
+        if e:
+            snippet = e[:400] + ("…" if len(e) > 400 else "")
+            lines.append(f"- Stderr ({len(e)} chars): {snippet!r}")
+        else:
+            lines.append("- Stderr: (empty)")
+        lines.append(
+            "Run 'setup-llm' or log in to Cliara Cloud for a full explanation."
+        )
+        return "\n".join(lines)
 
     def summarize_command_for_history(
         self,

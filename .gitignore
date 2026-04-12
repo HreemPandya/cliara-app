@@ -115,3 +115,7 @@ dist/
 
 # Local tools / helpers (not for repo)
 skills-creator/
+
+# Local agent skill dependency (caveman) — not committed
+.agents/skills/caveman/
+skills-lock.json

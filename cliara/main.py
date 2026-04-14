@@ -79,6 +79,13 @@ def _run_status(config_dir=None):
         email = token_data.get("email", "unknown")
         print_success(f"  Cliara Cloud: logged in ({email})")
         print_dim("  Free tier · 150 queries/month · resets monthly")
+        gh_tok = (token_data.get("github_provider_token") or "").strip()
+        if gh_tok:
+            print_success("  GitHub API: token on file (from login — used by `cliara gh`)")
+        else:
+            print_warning(
+                "  GitHub API: no provider token yet — run `cliara login` again to grant repo scopes"
+            )
     else:
         # Check if BYOK is configured via config
         config = Config(config_dir=config_dir)
@@ -191,6 +198,7 @@ Examples:
   cliara login              Log in to Cliara Cloud (GitHub OAuth, no API key needed)
   cliara logout             Sign out and clear stored token
   cliara status             Show auth and LLM status
+  cliara gh pr              GitHub PR with AI title/body (see cliara gh --help)
   cliara ask list git branches   Turn plain English into commands (not run)
   cliara nl undo last commit     Same as ask
   cliara -c "git status"    Run a single command through Cliara's gate
@@ -270,6 +278,10 @@ Once in the shell:
         help='What you want to do, in plain language',
     )
 
+    from cliara.gh_cli import register_gh_subparser, run_gh
+
+    register_gh_subparser(subparsers)
+
     args = parser.parse_args()
 
     if args.debug:
@@ -292,6 +304,9 @@ Once in the shell:
             config_dir=args.config_dir,
             shell_override=args.shell,
         )
+        sys.exit(0)
+    if args.command == 'gh':
+        run_gh(args)
         sys.exit(0)
 
     try:

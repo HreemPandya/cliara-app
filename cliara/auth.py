@@ -12,7 +12,7 @@ Flow:
     2. Open browser → Supabase GitHub OAuth URL (with redirect to localhost)
     3. Tiny local HTTP server captures the ?code= callback
     4. Exchange code + code_verifier for access_token + refresh_token
-    5. Write ~/.cliara/token.json
+    5. Write ~/.cliara/token.json (Supabase session + GitHub provider_token when returned)
     6. On future startups, load token, refresh if expired — transparently
 """
 
@@ -53,6 +53,13 @@ _CLIARA_GATEWAY_URL: str = os.getenv(
 _TOKEN_FILE = Path.home() / ".cliara" / "token.json"
 _CALLBACK_TIMEOUT = 120   # seconds to wait for the browser callback
 _TOKEN_REFRESH_BUFFER = 60  # refresh token when < 60 seconds until expiry
+
+# GitHub OAuth scopes passed through Supabase → GitHub (space-separated, URL-encoded in authorize URL).
+# Required for Issues/PRs and user identity in `cliara gh` commands.
+_GITHUB_PROVIDER_SCOPES = os.getenv(
+    "CLIARA_GITHUB_SCOPES",
+    "repo read:user read:org",
+)
 
 
 def get_gateway_url() -> str:
@@ -204,6 +211,21 @@ def _token_dir() -> Path:
 
 def _write_token(session: dict) -> None:
     """Persist session data to ~/.cliara/token.json."""
+    token_path = _token_dir() / "token.json"
+    prior: dict = {}
+    if token_path.exists():
+        try:
+            prior = json.loads(token_path.read_text(encoding="utf-8"))
+        except Exception:
+            prior = {}
+
+    # Supabase may return provider tokens at the top level of the session dict.
+    # On refresh, provider_token is often omitted — keep the previous GitHub token.
+    s_pt = session.get("provider_token")
+    s_prt = session.get("provider_refresh_token")
+    gh_token = s_pt if s_pt else prior.get("github_provider_token", "")
+    gh_refresh = s_prt if s_prt else prior.get("github_provider_refresh_token", "")
+
     token_data = {
         "access_token": session.get("access_token", ""),
         "refresh_token": session.get("refresh_token", ""),
@@ -211,8 +233,9 @@ def _write_token(session: dict) -> None:
         "expires_at": time.time() + int(session.get("expires_in", 3600)),
         "user_id": session.get("user", {}).get("id", ""),
         "email": session.get("user", {}).get("email", ""),
+        "github_provider_token": gh_token,
+        "github_provider_refresh_token": gh_refresh,
     }
-    token_path = _token_dir() / "token.json"
     token_path.write_text(json.dumps(token_data, indent=2), encoding="utf-8")
     # Restrict permissions on Unix (Windows ignores chmod, which is fine)
     try:
@@ -233,6 +256,27 @@ def load_token() -> Optional[dict]:
         return json.loads(token_path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def get_github_provider_token() -> Optional[str]:
+    """
+    Return a GitHub OAuth access token for REST API calls (Option A: stored locally).
+
+    Resolution order:
+      1. GITHUB_TOKEN environment variable (for CI or advanced users)
+      2. github_provider_token from ~/.cliara/token.json (from Cliara login + scopes)
+
+    Returns None if not configured. Does not validate or refresh the GitHub token;
+    on 401 from GitHub, users should run ``cliara login`` again.
+    """
+    env_tok = os.getenv("GITHUB_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    data = load_token()
+    if not data:
+        return None
+    tok = (data.get("github_provider_token") or "").strip()
+    return tok or None
 
 
 def get_valid_token() -> Optional[str]:
@@ -300,12 +344,16 @@ def login() -> "tuple[str, str]":
     port = _find_free_port()
     redirect_uri = f"http://localhost:{port}/callback"
 
+    # GitHub expects space-separated scopes; allow comma-separated env for convenience.
+    _scope_str = " ".join(_GITHUB_PROVIDER_SCOPES.replace(",", " ").split())
+    scope_q = urllib.parse.quote(_scope_str, safe="")
     oauth_url = (
         f"{_SUPABASE_URL}/auth/v1/authorize"
         f"?provider=github"
         f"&redirect_to={urllib.parse.quote(redirect_uri, safe='')}"
         f"&code_challenge={code_challenge}"
         f"&code_challenge_method=S256"
+        f"&scopes={scope_q}"
     )
 
     # Shared event to signal when the callback has been received

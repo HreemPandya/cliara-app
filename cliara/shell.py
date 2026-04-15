@@ -295,10 +295,10 @@ class _StartupProgress:
     Pip/npm-style progress bar for startup initialization.
 
     Renders a single updating line like:
-        Initializing Cliara...  [########·············]  Loading macros
+        Initializing Cliara...  ########·············  Loading macros
     """
 
-    BAR_WIDTH = 30  # characters inside the brackets
+    BAR_WIDTH = 30  # characters in the bar
 
     def __init__(self, total_steps: int):
         self.total = total_steps
@@ -323,9 +323,9 @@ class _StartupProgress:
         bar_empty = _c("2", bar_empty_char * empty) if _COLOR else bar_empty_char * empty
         pct = f"{int(frac * 100):>3}%"
 
-        # Fixed-width prefix:  "  [" + 30-char bar + "] NNN%  " = 41 visible chars
-        prefix = f"  [{bar_filled}{bar_empty}] {pct}  "
-        prefix_visible_len = 2 + 1 + self.BAR_WIDTH + 2 + 4 + 2  # 41
+        # Fixed-width prefix:  "  " + 30-char bar + " NNN%  " = 39 visible chars
+        prefix = f"  {bar_filled}{bar_empty} {pct}  "
+        prefix_visible_len = 2 + self.BAR_WIDTH + 1 + 4 + 2  # 39
 
         # Truncate the label so the full line never exceeds terminal width
         try:

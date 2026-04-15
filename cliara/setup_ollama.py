@@ -24,7 +24,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple
+
+from rich import box
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from cliara.console import get_console
 
 if TYPE_CHECKING:
     from cliara.shell import CliaraShell
@@ -295,6 +302,49 @@ def _resolve_env_path() -> Path:
     return Path(".env")
 
 
+def _print_recommended_models_table(already_have: Set[str]) -> None:
+    """Render the model catalogue as a bordered Rich table."""
+    console = get_console()
+    table = Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        pad_edge=False,
+        padding=(0, 1),
+    )
+    table.add_column("#", style="dim", justify="center", width=3)
+    table.add_column("Model", style="bold white", min_width=10, no_wrap=True)
+    table.add_column("Size", style="cyan", width=9, no_wrap=True)
+    table.add_column("Description", min_width=28)
+
+    for i, m in enumerate(RECOMMENDED_MODELS, 1):
+        notes = Text(m["desc"], style="white")
+        badges: List[Tuple[str, str]] = []
+        if m["recommended"]:
+            badges.append(("★ Recommended", "bold green"))
+        if m["name"] in already_have:
+            badges.append(("✓ Downloaded", "green"))
+        if badges:
+            notes.append("\n")
+            for j, (label, style) in enumerate(badges):
+                if j:
+                    notes.append("  ·  ", style="dim")
+                notes.append(label, style=style)
+        table.add_row(str(i), m["name"], m["size"], notes)
+
+    panel = Panel(
+        table,
+        title=Text.from_markup("[bold white]Choose a model[/] [dim]·[/] [cyan]ollama[/]"),
+        border_style="cyan",
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+    console.print()
+    console.print(panel)
+    console.print()
+
+
 # ---------------------------------------------------------------------------
 # Public entry-point
 # ---------------------------------------------------------------------------
@@ -388,19 +438,14 @@ def run(shell: "CliaraShell") -> None:  # noqa: C901  (wizard flow is inherently
     print()
 
     # ── Step 3: model picker ─────────────────────────────────────────
-    already_have = _list_local_models(ollama_bin)
+    already_have_list = _list_local_models(ollama_bin)
+    already_have = set(already_have_list)
 
-    print_dim("  Step 3/4  Choose a model\n")
-    print(f"  {'#':<4} {'Model':<14} {'Size':<10} Description")
-    print(f"  {'─'*4} {'─'*14} {'─'*10} {'─'*40}")
-    for i, m in enumerate(RECOMMENDED_MODELS, 1):
-        tag  = "  ← recommended" if m["recommended"]   else ""
-        have = "  (downloaded)"  if m["name"] in already_have else ""
-        print(f"  {i:<4} {m['name']:<14} {m['size']:<10} {m['desc']}{tag}{have}")
-    print()
+    print_dim("  Step 3/4  Choose a model")
+    _print_recommended_models_table(already_have)
 
-    if already_have:
-        print_dim(f"  Already downloaded: {', '.join(already_have)}")
+    if already_have_list:
+        print_dim(f"  Already downloaded: {', '.join(already_have_list)}")
         print()
 
     try:

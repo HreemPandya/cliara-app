@@ -155,15 +155,58 @@ def print_dim(msg: str):
     _cliara_console().print(msg, style="dim")
 
 
+def _ui_accent_style() -> str:
+    """Rich style for the active theme accent (same as ``print_info``); reflects theme switches."""
+    from cliara.console import get_ui_theme
+    from cliara.highlighting import get_ui_info_style
+
+    return get_ui_info_style(get_ui_theme())
+
+
+def _rich_help_with_placeholders(
+    text: str, base_style: str, placeholder_style: str
+) -> "Text":
+    """Split *text* on ``<...>`` tokens: *base_style* outside, *placeholder_style* inside."""
+    from rich.text import Text
+
+    if "<" not in text or ">" not in text:
+        return Text(text, style=base_style)
+    out = Text()
+    pos = 0
+    for m in re.finditer(r"<[^>]+>", text):
+        if m.start() > pos:
+            out.append(text[pos:m.start()], style=base_style)
+        out.append(m.group(), style=placeholder_style)
+        pos = m.end()
+    if pos < len(text):
+        out.append(text[pos:], style=base_style)
+    return out
+
+
 def print_help_example(body: str, *, label: str = "Example") -> None:
     """Print a help example: dim label, wide gap, bold cyan body (stands out from command rows)."""
     from rich.text import Text
 
+    accent = _ui_accent_style()
     gap = max(4, 14 - len(label))
     line = Text("  ")
     line.append(label, style="dim italic")
     line.append(" " * gap)
-    line.append(body, style="bold cyan")
+    line.append_text(_rich_help_with_placeholders(body, "bold cyan", accent))
+    _cliara_console().print(line)
+
+
+def print_help_cmd(command: str, description: str = "", *, pad_to: int = 34) -> None:
+    """Help reference row: bold white command; ``<placeholders>`` use the theme accent."""
+    from rich.text import Text
+
+    accent = _ui_accent_style()
+    line = Text("  ")
+    line.append_text(_rich_help_with_placeholders(command, "bold white", accent))
+    if description:
+        gap = max(2, pad_to - len(command))
+        line.append(" " * gap)
+        line.append_text(_rich_help_with_placeholders(description, "dim", accent))
     _cliara_console().print(line)
 
 
@@ -1054,7 +1097,7 @@ class CliaraShell:
         "Risky commands (rm -rf, format …) always pause for approval, even when piped.",
         "'push' automatically writes your commit message and selects the right branch.",
         "'ss <name>' (or session start) groups your work; 'se' / 'session end' closes; 'se --reflect' saves optional closeout; 'session list' shows past ones.",
-        "Run 'theme <name>' to switch colour themes — try dracula, nord, or catppuccin.",
+        "Use 'theme' or 'themes' to list or switch colour schemes — try dracula, nord, or catppuccin.",
         "'history' shows recent commands; '{nl} when did I <phrase>' finds them by meaning.",
         "Cliara watches long-running commands and notifies you when they finish.",
         "Set OPENAI_API_KEY in a .env file and Cliara picks it up automatically.",
@@ -1714,9 +1757,10 @@ class CliaraShell:
             self.handle_macro_command(user_input[6:].strip())
             return
 
-        # Theme: list or set color scheme
-        if user_input.strip() == 'theme' or user_input.startswith('theme '):
-            self._handle_theme_command(user_input[5:].strip())
+        # Theme: list or set color scheme (`themes` is a synonym)
+        _parts = user_input.strip().split(maxsplit=1)
+        if _parts and _parts[0].lower() in ("theme", "themes"):
+            self._handle_theme_command(_parts[1] if len(_parts) > 1 else "")
             return
 
         # Config — read/write persistent settings
@@ -5852,7 +5896,7 @@ class CliaraShell:
     _BUILTIN_NAMES = frozenset({
         "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "upgrade-cliara",
         "explain", "lint", "push", "session", "deploy",
-        "macro", "cd", "clear", "cls", "fix", "config", "theme", "setup-ollama", "setup-llm",
+        "macro", "cd", "clear", "cls", "fix", "config", "theme", "themes", "setup-ollama", "setup-llm",
         "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",
     })
 
@@ -6143,20 +6187,26 @@ class CliaraShell:
         print_info("  Natural Language")
         print_dim("  ─────────────────────────────────────")
         if self.nl_handler.llm_enabled:
-            print_dim(f"  {nl} <query>                Use natural language")
+            print_help_cmd(f"{nl} <query>", "Use natural language")
         else:
-            print_dim(f"  {nl} <query>                Use natural language (requires API key)")
-        print_dim(f"  {nl} <query> --save-as <n>  Generate & save as macro")
+            print_help_cmd(f"{nl} <query>", "Use natural language (requires API key)")
+        print_help_cmd(f"{nl} <query> --save-as <n>", "Generate & save as macro")
         print()
         print_help_example(f"{nl} kill process on port 3000")
         print()
 
         print_info("  Explain & Lint")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  explain <command>          Plain-English explanation of any command")
-        print_dim("  explain last               Last run: command + output + exit code (one explanation)")
-        print_dim(f"  {nl} explain last          Same as explain last")
-        print_dim("  lint <command>             Explain + show impact, then ask to run (dry run)")
+        print_help_cmd("explain <command>", "Plain-English explanation of any command")
+        print_help_cmd(
+            "explain last",
+            "Last run: command + output + exit code (one explanation)",
+        )
+        print_help_cmd(f"{nl} explain last", "Same as explain last")
+        print_help_cmd(
+            "lint <command>",
+            "Explain + show impact, then ask to run (dry run)",
+        )
         print()
         print_help_example("explain git rebase -i HEAD~3")
         print_help_example("lint find . -name '*.py' -exec rm {} \\;")
@@ -6164,62 +6214,89 @@ class CliaraShell:
 
         print_info("  Semantic History Search")
         print_dim("  ─────────────────────────────────────")
-        print_dim(f"  {nl} find <what>             Search past commands by meaning")
-        print_dim(f"  {nl} when did I ...          e.g. when did I fix the login bug")
-        print_dim(f"  {nl} what did I run ...      e.g. what did I run to deploy last time")
+        print_help_cmd(f"{nl} find <what>", "Search past commands by meaning")
+        print_help_cmd(f"{nl} when did I ...", "e.g. when did I fix the login bug")
+        print_help_cmd(f"{nl} what did I run ...", "e.g. what did I run to deploy last time")
         print_dim("  Requires LLM; uses stored summaries of your commands.\n")
 
         print_info("  Macros")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  macro add <name>           Create a macro")
-        print_dim("  macro add <name> --nl      Create macro from plain English")
-        print_dim("  macro edit <name>          Edit an existing macro")
-        print_dim("  macro list                 List all macros")
-        print_dim("  macro search <word>        Search macros")
-        print_dim("  <macro-name>               Run a saved macro\n")
+        print_help_cmd("macro add <name>", "Create a macro")
+        print_help_cmd("macro add <name> --nl", "Create macro from plain English")
+        print_help_cmd("macro edit <name>", "Edit an existing macro")
+        print_help_cmd("macro list", "List all macros")
+        print_help_cmd("macro search <word>", "Search macros")
+        print_help_cmd("<macro-name>", "Run a saved macro")
+        print()
 
         print_info("  Quick Fix")
         print_dim("  ─────────────────────────────────────")
         print_dim("  When a command fails, Cliara automatically shows a fix hint:")
         print_dim("    hint: try 'python3 script.py' (Tab to use)")
         print_dim("  Press Tab on an empty prompt to fill in the fix, then Enter.")
-        print_dim(f"  {nl} fix                    Full interactive diagnosis\n")
+        print_help_cmd(f"{nl} fix", "Full interactive diagnosis")
+        print()
 
         print_info("  Smart Push")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  push                       Stage, auto-commit, and push")
+        print_help_cmd("push", "Stage, auto-commit, and push")
         print_dim("  Detects branch, generates a conventional commit message")
         print_dim("  (feat:, fix:, docs:, …) from the diff. Accept, edit, or cancel.\n")
 
         print_info("  Task Sessions")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  ss <name> [ -- <intent>]         Start a task (shortcut for session start)")
-        print_dim("  session resume <name>            Resume and see summary + next step")
-        print_dim("  se [note]                        End session (shortcut)")
-        print_dim("  se --reflect                     End with closeout prompts")
-        print_dim("  session list / show / note        List, show, or add notes")
-        print_dim("  session snapshot --chat [name]  Copy session for Copilot/Cursor")
+        print_help_cmd(
+            "ss <name> [ -- <intent>]",
+            "Start a task (shortcut for session start)",
+            pad_to=36,
+        )
+        print_help_cmd("session resume <name>", "Resume and see summary + next step")
+        print_help_cmd("se [note]", "End session (shortcut)")
+        print_help_cmd("se --reflect", "End with closeout prompts")
+        print_help_cmd(
+            "session list / show / note",
+            "List, show, or add notes",
+            pad_to=36,
+        )
+        print_help_cmd(
+            "session snapshot --chat [name]",
+            "Copy session for Copilot/Cursor",
+            pad_to=36,
+        )
         print_dim("  Sessions persist across terminal closes — resume anytime.\n")
 
         print_info("  Copilot / Cursor")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  chat copy                  Copy last-run markdown (cwd, exit, stderr) to clipboard")
-        print_dim("  chat polish                Optional: LLM-compress clipboard (chat_polish_enabled)")
-        print_dim("  last / retry               Re-run the last shell command (skip Copilot Gate)\n")
+        print_help_cmd(
+            "chat copy",
+            "Copy last-run markdown (cwd, exit, stderr) to clipboard",
+        )
+        print_help_cmd(
+            "chat polish",
+            "Optional: LLM-compress clipboard (chat_polish_enabled)",
+        )
+        print_help_cmd(
+            "last / retry",
+            "Re-run the last shell command (skip Copilot Gate)",
+        )
+        print()
 
         print_info("  Smart Deploy")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  deploy                     Auto-detect project and deploy")
-        print_dim("  deploy config              Show saved deploy config")
-        print_dim("  deploy history             Show deploy history")
-        print_dim("  deploy reset               Re-detect deploy target")
+        print_help_cmd("deploy", "Auto-detect project and deploy")
+        print_help_cmd("deploy config", "Show saved deploy config")
+        print_help_cmd("deploy history", "Show deploy history")
+        print_help_cmd("deploy reset", "Re-detect deploy target")
         print_dim("  Detects Vercel, Netlify, Fly.io, Docker, npm, PyPI, and more.")
         print_dim("  Remembers your config — second deploy is just 'deploy' + 'y'.\n")
 
         print_info("  Theme")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  theme                      List color themes and show current")
-        print_dim("  theme <name>               Set theme (…, light = white/snow on dark)")
+        print_help_cmd("theme", "List color themes and show current (alias: themes)")
+        print_help_cmd(
+            "theme <name>",
+            "Set theme (same as themes <name>; light = white/snow on dark)",
+        )
         print_dim("  Stored in ~/.cliara/config.json — applies immediately.\n")
 
         print_info("  Diff Preview")
@@ -6240,25 +6317,46 @@ class CliaraShell:
 
         print_info("  AI Provider Setup")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  use                        Show active provider and all available options")
-        print_dim("  use <provider>             Switch provider live: use openai / use ollama / use groq")
-        print_dim("  setup-llm                  Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)")
-        print_dim("  setup-ollama               Set up a local Ollama model")
-        print_dim("  cliara login               Log in to Cliara Cloud (GitHub OAuth, free tier)")
-        print_dim("  cliara logout              Sign out and clear stored token")
+        print_help_cmd("use", "Show active provider and all available options")
+        print_help_cmd(
+            "use <provider>",
+            "Switch provider live: use openai / use ollama / use groq",
+        )
+        print_help_cmd(
+            "setup-llm",
+            "Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)",
+        )
+        print_help_cmd("setup-ollama", "Set up a local Ollama model")
+        print_help_cmd(
+            "cliara login",
+            "Log in to Cliara Cloud (GitHub OAuth, free tier)",
+        )
+        print_help_cmd("cliara logout", "Sign out and clear stored token")
         print_dim("  Free options: Groq (groq.com) · Gemini (aistudio.google.com) · Ollama (local)\n")
 
         print_info("  Other")
         print_dim("  ─────────────────────────────────────")
-        print_dim("  help                       Show this help")
-        print_dim("  tips                       Show quick-tips panel (startup banner)")
-        print_dim("  last                       Repeat the last command")
-        print_dim("  doctor                     Setup health check (shell, LLM, macros, config)")
-        print_dim("  upgrade-cliara [pip flags] Same as pip install --upgrade cliara (this interpreter)")
-        print_dim("  history [N]                Show last N commands (default 20)")
-        print_dim(f"  {nl} find / when did I ...   Search history by meaning (semantic)")
-        print_dim("  config set semantic_history_enabled false — disable semantic history & ? find")
-        print_dim("  version / status / readme  Show version, auth, or generate README")
-        print_dim("  exit / Ctrl+C              Quit Cliara")
+        print_help_cmd("help", "Show this help")
+        print_help_cmd("tips", "Show quick-tips panel (startup banner)")
+        print_help_cmd("last", "Repeat the last command")
+        print_help_cmd("doctor", "Setup health check (shell, LLM, macros, config)")
+        print_help_cmd(
+            "upgrade-cliara [pip flags]",
+            "Same as pip install --upgrade cliara (this interpreter)",
+            pad_to=36,
+        )
+        print_help_cmd("history [N]", "Show last N commands (default 20)")
+        print_help_cmd(
+            f"{nl} find / when did I ...",
+            "Search history by meaning (semantic)",
+            pad_to=36,
+        )
+        print_help_cmd(
+            "config set semantic_history_enabled false",
+            "disable semantic history & ? find",
+            pad_to=42,
+        )
+        print_help_cmd("version / status / readme", "Show version, auth, or generate README")
+        print_help_cmd("exit / Ctrl+C", "Quit Cliara")
 
         print_header("\n" + "=" * 60 + "\n")

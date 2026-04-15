@@ -155,6 +155,18 @@ def print_dim(msg: str):
     _cliara_console().print(msg, style="dim")
 
 
+def print_help_example(body: str, *, label: str = "Example") -> None:
+    """Print a help example: dim label, wide gap, bold cyan body (stands out from command rows)."""
+    from rich.text import Text
+
+    gap = max(4, 14 - len(label))
+    line = Text("  ")
+    line.append(label, style="dim italic")
+    line.append(" " * gap)
+    line.append(body, style="bold cyan")
+    _cliara_console().print(line)
+
+
 def _print_safety_panel(safety, commands, level):
     """Render safety warning as a Rich Panel (CRITICAL=red, DANGEROUS=orange, CAUTION=yellow)."""
     from rich.panel import Panel
@@ -6124,7 +6136,9 @@ class CliaraShell:
         print_info("\n  Normal Commands")
         print_dim("  ─────────────────────────────────────")
         print_dim("  Just type any command — it passes through to your shell")
-        print_dim("  Examples: ls, cd, git status, npm install\n")
+        print()
+        print_help_example("ls, cd, git status, npm install", label="Examples")
+        print()
 
         print_info("  Natural Language")
         print_dim("  ─────────────────────────────────────")
@@ -6133,7 +6147,9 @@ class CliaraShell:
         else:
             print_dim(f"  {nl} <query>                Use natural language (requires API key)")
         print_dim(f"  {nl} <query> --save-as <n>  Generate & save as macro")
-        print_dim(f"  Example: {nl} kill process on port 3000\n")
+        print()
+        print_help_example(f"{nl} kill process on port 3000")
+        print()
 
         print_info("  Explain & Lint")
         print_dim("  ─────────────────────────────────────")
@@ -6141,8 +6157,10 @@ class CliaraShell:
         print_dim("  explain last               Last run: command + output + exit code (one explanation)")
         print_dim(f"  {nl} explain last          Same as explain last")
         print_dim("  lint <command>             Explain + show impact, then ask to run (dry run)")
-        print_dim("  Example: explain git rebase -i HEAD~3")
-        print_dim("  Example: lint find . -name '*.py' -exec rm {} \\;\n")
+        print()
+        print_help_example("explain git rebase -i HEAD~3")
+        print_help_example("lint find . -name '*.py' -exec rm {} \\;")
+        print()
 
         print_info("  Semantic History Search")
         print_dim("  ─────────────────────────────────────")
@@ -6208,13 +6226,17 @@ class CliaraShell:
         print_dim("  ─────────────────────────────────────")
         print_dim("  Destructive commands (rm, git checkout, git clean,")
         print_dim("  git reset) show exactly what will be affected first.")
-        print_dim("  Example: rm *.log → shows each file and total size\n")
+        print()
+        print_help_example("rm *.log → shows each file and total size")
+        print()
 
         print_info("  Cross-Platform Translation")
         print_dim("  ─────────────────────────────────────")
         print_dim("  If a command doesn't exist on your OS, Cliara suggests")
         print_dim("  the equivalent automatically.")
-        print_dim("  Example: grep on Windows → Select-String (PowerShell)\n")
+        print()
+        print_help_example("grep on Windows → Select-String (PowerShell)")
+        print()
 
         print_info("  AI Provider Setup")
         print_dim("  ─────────────────────────────────────")

@@ -1092,7 +1092,8 @@ class CliaraShell:
         "Prefix any command with '{nl}' to translate plain English to shell — e.g. '{nl} kill port 3000'.",
         "Use 'explain <cmd>' or 'explain last' to break down a command or the last run's output.",
         "Run 'macro add <name>' to save any command (or a series) as a reusable macro.",
-        "Run 'macro add <name> --nl' to define a macro entirely in plain English.",
+        "Run 'macro create' so Cliara suggests the macro name, description, and multi-step commands from one English description.",
+        "Run 'macro add <name> --nl' to keep a chosen name and generate commands from plain English.",
         "Type just a macro name to run it — no prefix needed.",
         "Risky commands (rm -rf, format …) always pause for approval, even when piped.",
         "'push' automatically writes your commit message and selects the right branch.",
@@ -2258,7 +2259,7 @@ class CliaraShell:
         parts = args.split(maxsplit=1)
         if not parts:
             print("Usage: macro <command> [args]")
-            print("Commands: add, edit, list, stats, search, show, run, chain, delete, rename, save, help")
+            print("Commands: add, create, edit, list, stats, search, show, run, chain, delete, rename, save, help")
             return
         
         cmd = parts[0].lower()
@@ -2295,6 +2296,8 @@ class CliaraShell:
             self.macro_chain(args_rest)
         elif cmd == 'save':
             self.macro_save_last(args_rest)
+        elif cmd == 'create':
+            self.macro_create(args_rest)
         elif cmd == 'help':
             self.macro_help()
         else:
@@ -2369,85 +2372,167 @@ class CliaraShell:
         self.macros.add(name, commands, description, params=params or None)
         param_hint = f" [{', '.join(params)}]" if params else ""
         print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s){param_hint}")
-    
-    def macro_add_nl(self, name: Optional[str] = None):
-        """Create a macro using natural language description."""
+
+    def macro_create(self, raw: str):
+        """Create a macro from plain English; LLM suggests name, description, and ordered commands."""
         if not self.nl_handler.llm_enabled:
             print_error("[Error] LLM not configured. Run 'setup-llm' to configure a free AI provider.")
             return
-        
-        if not name:
-            name = input("Macro name: ").strip()
-            if not name:
-                print_error("[Error] Macro name required")
-                return
-        
-        print_info(f"\nCreating macro '{name}' from natural language")
-        print("Describe what this macro should do:")
-        nl_description = input("  > ").strip()
-        
+        nl_description = (raw or "").strip()
         if not nl_description:
-            print_error("[Error] Description required")
-            return
-        
-        print_info("\n[Generating commands...]")
-        
-        # Build context
+            print_info("\nDescribe the workflow — Cliara will suggest a name and shell commands:")
+            try:
+                nl_description = input("  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not nl_description:
+                print_error("[Error] Description required")
+                return
+        self._macro_from_nl_auto(nl_description)
+
+    def _macro_from_nl_auto(self, nl_description: str) -> None:
+        """LLM proposes macro name + commands + description; user confirms then saves."""
         context = {
             "cwd": str(Path.cwd()),
             "os": platform.system(),
-            "shell": self.shell_path or os.environ.get("SHELL", "bash")
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
-        
-        # Generate commands from NL
-        commands = self.nl_handler.generate_commands_from_nl(nl_description, context)
-        
-        if not commands or (len(commands) == 1 and commands[0].startswith("#")):
-            print_error(f"[Error] Could not generate commands: {commands[0] if commands else 'Unknown error'}")
+        from rich.status import Status
+
+        with Status("[dim]Designing macro…[/dim]", spinner="dots", console=_cliara_console()):
+            name, commands, desc, expl = self.nl_handler.propose_macro_from_nl(nl_description, context)
+
+        if not commands:
+            print_error(f"[Error] {expl or 'Could not generate commands'}")
             return
-        
-        # Show generated commands
-        print("\nGenerated commands:")
+
+        print(f"\nProposed macro name: {name or '(choose a name)'}")
+        if desc:
+            print_dim(f"Description: {desc}")
+        if expl:
+            print_dim(f"Notes: {expl}")
+        print("\nCommands:")
         for i, cmd in enumerate(commands, 1):
             print(f"  {i}. {cmd}")
-        
-        # Allow user to edit
-        edit = input("\nEdit commands? (y/n): ").strip().lower()
-        if edit in ['y', 'yes']:
-            print("\nEnter commands (one per line, empty line to finish):")
-            new_commands = []
+
+        final_name = name
+        try:
+            if final_name:
+                ok = input(f"\nKeep macro name '{final_name}'? (y/n): ").strip().lower()
+                if ok in ("n", "no"):
+                    final_name = input("Macro name: ").strip()
+            else:
+                final_name = input("\nMacro name: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print_warning("[Cancelled]")
+            return
+
+        if not final_name:
+            print_error("[Error] Macro name required")
+            return
+
+        suggested = (desc or expl or "").strip()
+        self._macro_nl_finalize(
+            final_name, commands, suggested, nl_description, commands_already_listed=True
+        )
+
+    def _macro_nl_finalize(
+        self,
+        name: str,
+        commands: List[str],
+        suggested_description: str,
+        nl_source: str,
+        *,
+        commands_already_listed: bool = False,
+    ) -> None:
+        """Optional command edit, safety check, description prompt, save."""
+        if not commands_already_listed:
+            print("\nCommands to save:")
             for i, cmd in enumerate(commands, 1):
-                new_cmd = input(f"  {i}. [{cmd}] ").strip()
-                if new_cmd:
-                    new_commands.append(new_cmd)
-                else:
-                    new_commands.append(cmd)
-            
-            # Allow adding more
-            while True:
-                extra = input("  > ").strip()
-                if not extra:
-                    break
-                new_commands.append(extra)
-            
-            commands = new_commands
-        
-        # Safety check
+                print(f"  {i}. {cmd}")
+        try:
+            edit = input("\nEdit commands? (y/n): ").strip().lower()
+            if edit in ("y", "yes"):
+                print("\nEnter commands (one per line, empty line to finish):")
+                new_commands: List[str] = []
+                for i, cmd in enumerate(commands, 1):
+                    new_cmd = input(f"  {i}. [{cmd}] ").strip()
+                    new_commands.append(new_cmd if new_cmd else cmd)
+                while True:
+                    extra = input("  > ").strip()
+                    if not extra:
+                        break
+                    new_commands.append(extra)
+                commands = new_commands
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print_warning("[Cancelled]")
+            return
+
         level, dangerous = self.safety.check_commands(commands)
-        if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
+        if level in (DangerLevel.DANGEROUS, DangerLevel.CRITICAL):
             _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             confirm = input("\nSave anyway? (yes/no): ").strip().lower()
-            if confirm not in ['yes', 'y']:
+            if confirm not in ("yes", "y"):
                 print_warning("[Cancelled]")
                 return
-        
+
+        default_desc = (suggested_description or "").strip() or nl_source
+        try:
+            desc_in = input(f"\nDescription [{default_desc}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print_warning("[Cancelled]")
+            return
+        description = desc_in or default_desc
+
         if not self._check_macro_name_conflict(name):
             print_warning("[Cancelled]")
             return
-        description = input("Description (optional): ").strip() or nl_description
-        
         self.macros.add(name, commands, description)
-        print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s) from natural language")
+        print_success(f"\n[OK] Macro '{name}' saved with {len(commands)} command(s)")
+
+    def macro_add_nl(self, name: Optional[str] = None):
+        """Create a macro using natural language.
+
+        ``macro add --nl`` (no name) infers the macro name and commands from one description.
+        ``macro add <name> --nl`` keeps the given name and only generates commands from NL.
+        """
+        if not self.nl_handler.llm_enabled:
+            print_error("[Error] LLM not configured. Run 'setup-llm' to configure a free AI provider.")
+            return
+
+        if not name:
+            self.macro_create("")
+            return
+
+        print_info(f"\nCreating macro '{name}' from natural language")
+        print("Describe what this macro should do:")
+        try:
+            nl_description = input("  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if not nl_description:
+            print_error("[Error] Description required")
+            return
+
+        print_info("\n[Generating commands...]")
+        context = {
+            "cwd": str(Path.cwd()),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+        commands = self.nl_handler.generate_commands_from_nl(nl_description, context)
+
+        if not commands or (len(commands) == 1 and commands[0].startswith("#")):
+            print_error(f"[Error] Could not generate commands: {commands[0] if commands else 'Unknown error'}")
+            return
+
+        self._macro_nl_finalize(name, commands, "", nl_description)
     
     def _macro_table(self, macros_iter, title: str):
         """Render a Rich table for a collection of macros.
@@ -2740,9 +2825,11 @@ class CliaraShell:
     def macro_help(self):
         """Show macro help."""
         print_info("\n[Macro Commands]\n")
+        print("  macro create [description...]       Suggest name + commands from English (or prompt)")
         print("  macro add <name>                    Create a new macro")
         print("  macro add <name> --params p1,p2     Create a parameterised macro")
-        print("  macro add <name> --nl               Create macro from natural language")
+        print("  macro add <name> --nl               Keep name; generate commands from English")
+        print("  macro add --nl                      Same as macro create (infer name + commands)")
         print("  macro edit <name>                   Edit an existing macro")
         print("  macro list                          List all macros")
         print("  macro stats                         Show macro statistics")

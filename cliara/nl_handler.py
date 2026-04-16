@@ -454,6 +454,20 @@ class NLHandler:
         else:
             raise Exception(f"Unsupported provider: {self.provider}")
 
+    def _openai_compat_error_message(self, err: Exception) -> str:
+        """Turn upstream errors into a short message; add hints for known platform failures."""
+        msg = str(err)
+        out = f"{self.provider} API error: {err}"
+        if "Application not found" in msg and "404" in msg:
+            out += (
+                "\n  Hint: The hosted API (often Railway) returned “Application not found”. "
+                "That usually means the gateway URL is wrong, the service is not reachable, "
+                "or public networking was misconfigured — not a problem with your macro text. "
+                "Check CLIARA_GATEWAY_URL, try GET …/health on the gateway host, or set "
+                "OPENAI_API_KEY / GROQ_API_KEY to use a provider directly."
+            )
+        return out
+
     def _call_openai_compat(
         self,
         system: str,
@@ -495,7 +509,7 @@ class NLHandler:
                 )
                 return response.choices[0].message.content.strip()
         except Exception as e:
-            raise Exception(f"{self.provider} API error: {e}")
+            raise Exception(self._openai_compat_error_message(e)) from e
 
     def _call_anthropic(
         self,
@@ -572,28 +586,9 @@ class NLHandler:
         )
 
     @staticmethod
-    def _extract_json(text: str) -> Optional[str]:
-        """Find the first complete JSON object in *text*.
-
-        Local models often prefix/suffix JSON with prose ("Sure! Here is...",
-        "```json", etc.).  This extracts the raw JSON regardless of surrounding
-        text by scanning for the first '{' and matching its closing '}'.
-        """
-        # Strip markdown fences first
-        text = re.sub(r"```json\s*", "", text)
-        text = re.sub(r"```\s*", "", text)
-        text = text.strip()
-
-        # Fast path: the whole string is valid JSON
-        try:
-            json.loads(text)
-            return text
-        except json.JSONDecodeError:
-            pass
-
-        # Scan for the first '{' and find its matching '}'
-        start = text.find("{")
-        if start == -1:
+    def _slice_balanced_json_object(text: str, start: int) -> Optional[str]:
+        """Return substring from *start* ('{') through matching '}', or None if unbalanced."""
+        if start < 0 or start >= len(text) or text[start] != "{":
             return None
         depth = 0
         in_string = False
@@ -615,12 +610,43 @@ class NLHandler:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    candidate = text[start : i + 1]
+                    return text[start : i + 1]
+        return None
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[str]:
+        """Find a complete JSON object in *text*.
+
+        Tries every ``{`` position so a bad first slice (nested prose, invalid
+        JSON) does not block a valid object later. Also tolerates trailing commas
+        in one common failure mode from local models.
+        """
+        # Strip markdown fences first
+        text = re.sub(r"```json\s*", "", text)
+        text = re.sub(r"```\s*", "", text)
+        text = text.strip()
+
+        # Fast path: the whole string is valid JSON
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            pass
+
+        search_from = 0
+        while search_from < len(text):
+            start = text.find("{", search_from)
+            if start == -1:
+                break
+            candidate = NLHandler._slice_balanced_json_object(text, start)
+            if candidate:
+                for fix in (candidate, re.sub(r",\s*}", "}", candidate)):
                     try:
-                        json.loads(candidate)
-                        return candidate
+                        json.loads(fix)
+                        return fix
                     except json.JSONDecodeError:
-                        return None
+                        continue
+            search_from = start + 1
         return None
 
     def _parse_response(self, response: str) -> Tuple[List[str], str]:
@@ -679,7 +705,134 @@ class NLHandler:
             return commands if commands else [f"# Could not generate: {nl_description}"]
         except Exception as e:
             return [f"# Error generating commands: {str(e)}"]
-    
+
+    @staticmethod
+    def _sanitize_macro_name(raw: Optional[str]) -> Optional[str]:
+        """Normalize LLM-suggested macro name to a safe slug."""
+        if raw is None:
+            return None
+        s = str(raw).strip().lower()
+        if not s:
+            return None
+        s = re.sub(r"[\s_]+", "-", s)
+        s = re.sub(r"[^a-z0-9-]+", "", s)
+        s = re.sub(r"-+", "-", s).strip("-")
+        if not s:
+            return None
+        if s[0].isdigit():
+            s = "m-" + s
+        if len(s) > 48:
+            s = s[:48].rstrip("-")
+        if len(s) < 2:
+            return None
+        return s
+
+    def _fallback_macro_name_from_text(self, text: str) -> str:
+        """Build a short slug from user text when the model omits macro_name."""
+        words = re.findall(r"[a-zA-Z0-9]+", (text or "").lower())[:6]
+        slug = "-".join(words) if words else "macro"
+        out = self._sanitize_macro_name(slug)
+        return out if out else "my-macro"
+
+    def _parse_macro_proposal(self, response: str) -> Tuple[Optional[str], List[str], str, str]:
+        """Parse nl_macro_propose JSON. Returns (name, commands, description, explanation)."""
+        raw = self._extract_json(response)
+        if not raw:
+            return None, [], "", "Could not parse macro proposal"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, [], "", "Invalid JSON in macro proposal"
+
+        name_raw = data.get("macro_name") or data.get("name") or ""
+        name = self._sanitize_macro_name(str(name_raw) if name_raw else None)
+
+        commands = data.get("commands", [])
+        if isinstance(commands, str):
+            commands = [commands] if commands.strip() else []
+        if not isinstance(commands, list):
+            commands = []
+        commands = [str(c).strip() for c in commands if str(c).strip()]
+
+        desc = data.get("description", "")
+        if not isinstance(desc, str):
+            desc = str(desc) if desc else ""
+        desc = desc.strip()
+
+        expl = data.get("explanation", "")
+        if not isinstance(expl, str):
+            expl = str(expl) if expl else ""
+        expl = expl.strip()
+
+        if not desc and expl:
+            desc = expl.split(".")[0][:200]
+
+        return name, commands, desc, expl
+
+    def _parse_macro_proposal_loose(
+        self, response: str, nl_description: str
+    ) -> Tuple[Optional[str], List[str], str, str]:
+        """
+        Parse macro JSON; if that fails, accept nl_to_commands-shaped JSON or
+        plain-text command lines from the same response.
+        """
+        name, commands, desc, expl = self._parse_macro_proposal(response)
+        if commands:
+            if not name:
+                name = self._fallback_macro_name_from_text(nl_description)
+            return name, commands, desc, expl
+
+        cmd2, expl2 = self._parse_response(response)
+        if cmd2:
+            nm = self._fallback_macro_name_from_text(nl_description)
+            d = (expl2 or "").split(".")[0][:200] if expl2 else ""
+            return nm, cmd2, d, expl2 or ""
+
+        return None, [], "", "Could not parse macro proposal"
+
+    def propose_macro_from_nl(
+        self,
+        nl_description: str,
+        context: Optional[dict] = None,
+    ) -> Tuple[Optional[str], List[str], str, str]:
+        """
+        Infer macro name, ordered commands, and description from plain English.
+
+        Returns:
+            (macro_name, commands, description, explanation).
+            On failure, macro_name is None, commands empty, explanation has the reason.
+        """
+        if not self.llm_enabled:
+            return None, [], "", "LLM not configured"
+
+        try:
+            context_info = self._build_context(context, include_directory_listing=True)
+            prompt = self._create_prompt(nl_description, context_info)
+            response = self._call_llm("nl_macro_propose", prompt)
+            name, commands, desc, expl = self._parse_macro_proposal_loose(
+                response, nl_description
+            )
+            if not commands:
+                # Model returned unusable text — fall back to command-only agent
+                commands_fb = self.generate_commands_from_nl(nl_description, context)
+                if (
+                    commands_fb
+                    and not (len(commands_fb) == 1 and str(commands_fb[0]).startswith("#"))
+                ):
+                    nm = self._fallback_macro_name_from_text(nl_description)
+                    return (
+                        nm,
+                        commands_fb,
+                        desc or nl_description[:200],
+                        expl or "Used command generator after macro JSON was missing or invalid.",
+                    )
+                return name, [], desc, expl or "No commands generated"
+            if not name:
+                name = self._fallback_macro_name_from_text(nl_description)
+            return name, commands, desc, expl
+        except Exception as e:
+            return None, [], "", f"Error: {e}"
+
     def explain_command(
         self,
         command: str,

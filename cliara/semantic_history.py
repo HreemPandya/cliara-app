@@ -157,10 +157,17 @@ class SemanticHistoryStore:
         command: str,
         summary: str,
         cwd: Optional[str] = None,
+        *,
+        embedding: Optional[List[float]] = None,
     ) -> bool:
         """
         Update the summary of the most recent entry matching (command, cwd).
         Returns True if an entry was updated.
+
+        *embedding*: if a list, store it (e.g. embedding of ``command`` + summary,
+        matching the semantic-history worker). If ``None``, any existing
+        embedding is removed so vector search falls back until a new vector
+        exists.
         """
         if not summary:
             return False
@@ -171,7 +178,12 @@ class SemanticHistoryStore:
                     continue
                 if (cwd or "") != (e.get("cwd") or ""):
                     continue
-                self._entries[i] = {**e, "summary": summary}
+                new_e = {**e, "summary": summary}
+                if embedding is not None:
+                    new_e["embedding"] = embedding
+                else:
+                    new_e.pop("embedding", None)
+                self._entries[i] = self._normalize_entry(new_e)
                 self._save()
                 return True
         return False

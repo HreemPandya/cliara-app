@@ -6298,8 +6298,15 @@ class CliaraShell:
         self._last_explained_command = command.strip()
         self._last_explained_summary = one_line if one_line else None
         if self._semantic_history and one_line:
+            embedding = None
+            if self.config.get("semantic_history_use_embeddings", False):
+                emb_text = f"{command.strip()} {one_line}".strip()
+                embedding = self.nl_handler.get_embedding(emb_text)
             self._semantic_history.update_summary_for_command(
-                command.strip(), one_line, str(Path.cwd())
+                command.strip(),
+                one_line,
+                str(Path.cwd()),
+                embedding=embedding,
             )
 
         # Offer to run the command (skip when explaining something already executed)

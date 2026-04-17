@@ -4024,7 +4024,6 @@ class CliaraShell:
         # Record in history
         self.history.add(command)
         self.history.set_last_execution([command])
-        self._enqueue_semantic_add(command, str(Path.cwd()), None)
 
         if platform.system() == "Windows" and is_powershell(self.shell_path or ""):
             try:
@@ -4037,12 +4036,17 @@ class CliaraShell:
                     [ps_exe, "-NoProfile", "-Command", command],
                     timeout=300,
                 )
+                self._enqueue_semantic_add(
+                    command, str(Path.cwd()), result.returncode
+                )
                 return result.returncode == 0
             except subprocess.TimeoutExpired:
                 print_error("[Error] Command timed out (5 minutes)")
+                self._enqueue_semantic_add(command, str(Path.cwd()), -1)
                 return False
             except Exception as e:
                 print_error(f"[Error] {e}")
+                self._enqueue_semantic_add(command, str(Path.cwd()), -1)
                 return False
         else:
             # CMD or Unix — just pass through to the regular shell
@@ -4310,7 +4314,6 @@ class CliaraShell:
         try:
             # History already added in handle_input; only track execution for macros/session
             self.history.set_last_execution([command])
-            self._enqueue_semantic_add(command, str(Path.cwd()), None)
 
             if capture:
                 # ── Capture mode: both stdout and stderr captured ──
@@ -4492,6 +4495,9 @@ class CliaraShell:
             self.history.set_last_exit_ts(self.last_exit_code, start_time)
             return False
         finally:
+            self._enqueue_semantic_add(
+                command, str(Path.cwd()), self.last_exit_code
+            )
             self.show_shell_exit_in_prompt = True
 
     def _session_record_command(self, command: str, success: bool):

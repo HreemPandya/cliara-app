@@ -1091,9 +1091,9 @@ class CliaraShell:
         "'{nl} find <phrase>' searches your command history by intent, not just text.",
         "Prefix any command with '{nl}' to translate plain English to shell — e.g. '{nl} kill port 3000'.",
         "Use 'explain <cmd>' or 'explain last' to break down a command or the last run's output.",
-        "Run 'macro add <name>' to save any command (or a series) as a reusable macro.",
-        "Run 'macro create' so Cliara suggests the macro name, description, and multi-step commands from one English description.",
-        "Run 'macro add <name> --nl' to keep a chosen name and generate commands from plain English.",
+        "Use 'ma <name>' to save command chains as a macro, or 'mc' to create one from plain English (name + steps suggested).",
+        "'mc' opens macro create — describe the workflow and Cliara suggests a name and multi-step shell commands.",
+        "'ma <name> --nl' keeps your chosen name and generates commands from English; 'ma --nl' is the same as 'mc'.",
         "Type just a macro name to run it — no prefix needed.",
         "Risky commands (rm -rf, format …) always pause for approval, even when piped.",
         "'push' automatically writes your commit message and selects the right branch.",
@@ -1104,7 +1104,7 @@ class CliaraShell:
         "Set OPENAI_API_KEY in a .env file and Cliara picks it up automatically.",
         "Use '{nl} deploy' to get guided deployment steps for your current project.",
         "The diff preview shows what a destructive command will affect before it runs.",
-        "'macro list' shows all your saved macros with descriptions and run counts.",
+        "'ml' lists your macros (full form: macro list).",
         "Press Ctrl+C to cancel a running command; Cliara will offer to diagnose failures.",
     ]
 
@@ -1162,7 +1162,7 @@ class CliaraShell:
             f"  • {M('kbd', f'{nl} fix')}{M('body', '            After error — what broke + how to fix')}",
             f"  • {M('kbd', 'explain last')}{M('body', '     Last run — output + exit code  ')}{M('hint', f'({nl} explain last)')}",
             f"  • {M('kbd', f'{nl} find …')}{M('body', '     Search history by meaning  ')}{M('hint', f'({nl} when did I …)')}",
-            f"  • {M('kbd', 'macro add <n>')}{M('body', ' Save command chains; run by typing the macro name')}",
+            f"  • {M('kbd', 'mc · ma · ml · ms')}{M('body', ' Default macro commands — create, add, list, save last run')}",
             f"  • {M('kbd', 'push')}{M('body', '               Smart git — suggest commit + push')}",
             f"  • {M('kbd', 'ss / se · chat copy')}{M('body', ' Start/end task sessions; copy last run for AI editors')}",
             f"  • {M('kbd', 'help · tips · exit')}{M('body', ' Full command list · show tips again · quit')}",
@@ -1752,6 +1752,12 @@ class CliaraShell:
                 return
             self.handle_nl_query(query_rest)
             return
+
+        # Macro short aliases (mc, ml, m …) — same handler as ``macro …``
+        _macro_alias = self._expand_macro_alias(user_input)
+        if _macro_alias is not None:
+            self.handle_macro_command(_macro_alias)
+            return
         
         # Check for macro commands
         if user_input.startswith('macro '):
@@ -2254,12 +2260,12 @@ class CliaraShell:
         Handle macro subcommands.
 
         Args:
-            args: Command arguments after 'macro '
+            args: Subcommand + rest (after ``mc`` / ``m`` / ``macro``, etc.)
         """
         parts = args.split(maxsplit=1)
         if not parts:
-            print("Usage: macro <command> [args]")
-            print("Commands: add, create, edit, list, stats, search, show, run, chain, delete, rename, save, help")
+            print("Usage: mc, ml, ma, mr, …  — same as macro create, list, add, run, …  (type mh for full list)")
+            print("Optional full form: macro <command> [args]")
             return
         
         cmd = parts[0].lower()
@@ -2302,7 +2308,7 @@ class CliaraShell:
             self.macro_help()
         else:
             print_error(f"Unknown macro command: {cmd}")
-            print_dim("Type 'macro help' for available commands")
+            print_dim("Type mh (or macro help) for available commands")
     
     def macro_add(self, raw: str):
         """Create a new macro interactively.
@@ -2310,7 +2316,7 @@ class CliaraShell:
         Accepts an optional ``--params name1,name2`` flag so the macro can
         declare typed placeholders.  Example::
 
-            macro add deploy-to --params env,tag
+            ma deploy-to --params env,tag
         """
         # ── Parse --params flag ─────────────────────────────────────────
         params: List[str] = []
@@ -2497,8 +2503,8 @@ class CliaraShell:
     def macro_add_nl(self, name: Optional[str] = None):
         """Create a macro using natural language.
 
-        ``macro add --nl`` (no name) infers the macro name and commands from one description.
-        ``macro add <name> --nl`` keeps the given name and only generates commands from NL.
+        ``ma --nl`` (no name) infers the macro name and commands from one description.
+        ``ma <name> --nl`` keeps the given name and only generates commands from NL.
         """
         if not self.nl_handler.llm_enabled:
             print_error("[Error] LLM not configured. Run 'setup-llm' to configure a free AI provider.")
@@ -2598,7 +2604,7 @@ class CliaraShell:
 
         if not macros:
             print_dim("\nNo macros yet.")
-            print_dim("Create one with: macro add <name>")
+            print_dim("Create one with: ma <name>  (or mc from English)")
             return
 
         self._macro_table(
@@ -2611,7 +2617,7 @@ class CliaraShell:
         stats = self.macros.get_stats()
         if stats["total"] == 0:
             print_dim("\nNo macros yet.")
-            print_dim("Create one with: macro add <name>")
+            print_dim("Create one with: ma <name>  (or mc from English)")
             return
         macros = self.macros.list_all()
         total_commands = sum(len(m.commands) for m in macros.values())
@@ -2823,32 +2829,36 @@ class CliaraShell:
         print_success(f"[OK] Macro '{name}' saved!")
     
     def macro_help(self):
-        """Show macro help."""
-        print_info("\n[Macro Commands]\n")
-        print("  macro create [description...]       Suggest name + commands from English (or prompt)")
-        print("  macro add <name>                    Create a new macro")
-        print("  macro add <name> --params p1,p2     Create a parameterised macro")
-        print("  macro add <name> --nl               Keep name; generate commands from English")
-        print("  macro add --nl                      Same as macro create (infer name + commands)")
-        print("  macro edit <name>                   Edit an existing macro")
-        print("  macro list                          List all macros")
-        print("  macro stats                         Show macro statistics")
-        print("  macro search <keyword>              Search macros by name, description, or tags")
-        print("  macro show <name>                   Show macro details")
-        print("  macro run <name>                    Run a macro (prompts for params if needed)")
-        print("  macro run <name> p1=v1 p2=v2        Run a macro with inline param values")
-        print("  macro chain <n1> <n2> [n3 …]        Run macros in sequence")
-        print_dim('      "my macro", "other macro"          — quoted names (multi-word)')
-        print_dim("      my macro, other macro              — comma-separated (multi-word)")
-        print("  macro delete <name>                 Delete a macro")
-        print("  macro rename <old> <new>            Rename a macro")
-        print("  macro save last as <name>           Save last commands as macro")
+        """Show macro help (short forms are the default; ``macro …`` is optional)."""
+        print_info("\n[Macros]\n")
+        print_dim("  Default — short commands:")
+        print("  mc [description...]                 Create: English in → suggested name + shell steps")
+        print("  ma <name>                           Add: type commands line by line")
+        print("  ma <name> --params p1,p2            Add with {p1} placeholders in commands")
+        print("  ma <name> --nl                      Add: keep name; generate steps from English")
+        print("  ma --nl                             Same as mc (infer name + steps)")
+        print("  ml                                  List all macros")
+        print("  mst                                 Macro statistics")
+        print("  msr <keyword>                       Search macros")
+        print("  msh <name>                          Show macro details")
+        print("  mr <name>                           Run (prompts for params if needed)")
+        print("  mr <name> p1=v1 p2=v2               Run with inline parameter values")
+        print("  mch <n1> <n2> [n3 …]                Run macros in sequence")
+        print_dim('        "my macro", "other macro"        — quoted names (multi-word)')
+        print_dim("        my macro, other macro            — comma-separated (multi-word)")
+        print("  me <name>                           Edit a macro")
+        print("  md <name>                           Delete a macro")
+        print("  mrn <old> <new>                     Rename a macro")
+        print("  ms <name>                           Save last executed commands as this macro")
+        print("  m <subcommand> [args]               Same as the macro word: macro <subcommand> …")
+        print("  mh                                  This help")
+        print_dim("\n  Optional full word (same behavior): macro create, macro add, macro list, …")
         print_dim("\nParameterised macros:")
         print_dim("  Use {param} placeholders in commands, e.g.  kubectl apply -n {env}")
-        print_dim("  Declare them with --params: macro add deploy --params env,tag")
-        print_dim("  Run with inline values:     deploy env=prod tag=v1.2")
-        print_dim("  Or just type the name and Cliara will prompt for each value.")
-        print("\nYou can also run macros by just typing their name:")
+        print_dim("  Declare: ma deploy --params env,tag")
+        print_dim("  Run: type the macro name with values, e.g.  deploy env=prod tag=v1.2")
+        print_dim("  Or run mr <name> and Cliara will prompt for each value.")
+        print("\nRun a saved macro by typing its name (no prefix):")
         print("  cliara > my-macro")
         print("  cliara > my-macro param=value\n")
     
@@ -4810,6 +4820,52 @@ class CliaraShell:
             return ("start " + tail).strip() if tail else "start"
         return None
 
+    @staticmethod
+    def _expand_macro_alias(user_input: str) -> Optional[str]:
+        """
+        Map short tokens to the argument string for ``handle_macro_command`` (text after ``macro ``).
+
+        Returns None if the line is not a macro alias (e.g. ``mkdir``).
+        """
+        stripped = user_input.strip()
+        if not stripped:
+            return None
+        parts = stripped.split(maxsplit=1)
+        head = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        cmd = head.lower()
+
+        # Longer / specific tokens before short prefixes (e.g. mst before ms)
+        if cmd == "mch":
+            return f"chain {rest}".strip() if rest else "chain"
+        if cmd == "msh":
+            return f"show {rest}".strip() if rest else "show"
+        if cmd == "msr":
+            return f"search {rest}".strip() if rest else "search"
+        if cmd == "mrn":
+            return f"rename {rest}".strip() if rest else "rename"
+        if cmd == "mst":
+            return f"stats {rest}".strip() if rest else "stats"
+        if cmd == "ms":
+            return f"save last as {rest}".strip() if rest else "save last as"
+        if cmd == "mr":
+            return f"run {rest}".strip() if rest else "run"
+        if cmd == "mc":
+            return f"create {rest}".strip() if rest else "create"
+        if cmd == "ml":
+            return f"list {rest}".strip() if rest else "list"
+        if cmd == "ma":
+            return f"add {rest}".strip() if rest else "add"
+        if cmd == "me":
+            return f"edit {rest}".strip() if rest else "edit"
+        if cmd == "md":
+            return f"delete {rest}".strip() if rest else "delete"
+        if cmd == "mh":
+            return f"help {rest}".strip() if rest else "help"
+        if cmd == "m":
+            return rest.strip()
+        return None
+
     def handle_session(self, subcommand: str = ""):
         """
         Task session subcommands: start, resume, end (optional --reflect), list, show, note, help.
@@ -5985,6 +6041,8 @@ class CliaraShell:
         "explain", "lint", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "themes", "setup-ollama", "setup-llm",
         "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",
+        # Macro CLI shortcuts (see _expand_macro_alias)
+        "m", "mc", "ml", "mr", "ma", "me", "md", "ms", "mst", "msh", "msr", "mch", "mrn", "mh",
     })
 
     def _check_macro_name_conflict(self, name: str) -> bool:
@@ -6308,12 +6366,17 @@ class CliaraShell:
 
         print_info("  Macros")
         print_dim("  ─────────────────────────────────────")
-        print_help_cmd("macro add <name>", "Create a macro")
-        print_help_cmd("macro add <name> --nl", "Create macro from plain English")
-        print_help_cmd("macro edit <name>", "Edit an existing macro")
-        print_help_cmd("macro list", "List all macros")
-        print_help_cmd("macro search <word>", "Search macros")
-        print_help_cmd("<macro-name>", "Run a saved macro")
+        print_dim("  Short commands are the default; macro … does the same with full words (e.g. macro list = ml).")
+        print_help_cmd("mc [description]", "Create from English — suggested name + steps")
+        print_help_cmd("ma <name>", "Add macro (line-by-line commands)")
+        print_help_cmd("ma <name> --nl", "Keep name; steps from English")
+        print_help_cmd("ma --nl", "Same as mc")
+        print_help_cmd("ml", "List macros")
+        print_help_cmd("mr <name>", "Run a macro")
+        print_help_cmd("ms <name>", "Save last run as macro")
+        print_help_cmd("m <sub> [args]", "Passthrough — same as macro <sub> …")
+        print_help_cmd("<macro-name>", "Run — type the saved name alone")
+        print_dim("  More commands: type mh in the shell (mst, msh, msr, mch, mrn, me, md).\n")
         print()
 
         print_info("  Quick Fix")

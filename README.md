@@ -111,10 +111,14 @@ cliara:proj ❯ ? fix                    # Fix the last failed command
 
 ### Macros
 
+Short commands are the default (`macro …` works the same).
+
 ```bash
-cliara:proj ❯ macro add build          # Create a macro
-cliara:proj ❯ build                    # Run it
-cliara:proj ❯ macro save last as test  # Save last command as macro
+cliara:proj ❯ ma build                 # Create a macro (line-by-line commands)
+cliara:proj ❯ mc                       # Create from English (suggested name + steps)
+cliara:proj ❯ build                    # Run it — type the macro name
+cliara:proj ❯ ms test                  # Save last run as macro named test
+cliara:proj ❯ ml                       # List macros  (same as macro list)
 ```
 
 ### Smart Commands

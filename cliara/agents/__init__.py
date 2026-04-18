@@ -17,13 +17,17 @@ from cliara.agents import readme_generator as _readme
 from cliara.agents import session_reflect as _session_reflect
 from cliara.agents import chat_polish as _chat_polish
 from cliara.agents import gh_assistant as _gh_assistant
+from cliara.agents import cliara_qa as _cliara_qa
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 
 def _load_prompt(name: str) -> str:
-    path = _PROMPTS_DIR / f"{name}.txt"
-    return path.read_text(encoding="utf-8").strip()
+    md_path = _PROMPTS_DIR / f"{name}.md"
+    if md_path.exists():
+        return md_path.read_text(encoding="utf-8").strip()
+
+    raise FileNotFoundError(f"Prompt file not found for agent '{name}'")
 
 
 def _build_registry() -> Dict[str, Dict[str, Any]]:
@@ -41,6 +45,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
         | _session_reflect.AGENTS
         | _chat_polish.AGENTS
         | _gh_assistant.AGENTS
+        | _cliara_qa.AGENTS
     )
     for name, cfg in all_agents.items():
         registry[name] = {

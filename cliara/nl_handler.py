@@ -51,6 +51,7 @@ _STREAMING_SAFE_AGENTS = frozenset({
     "copilot_explain",
     "readme",
     "chat_polish",
+    "cliara_qa",
 })
 
 # Cliara built-ins (and common shortcuts) so NL can treat "what does mc do"
@@ -68,6 +69,158 @@ _CLIARA_BUILTIN_COMMANDS = frozenset({
 _CLIARA_MACRO_ALIASES = frozenset({
     "m", "mc", "ml", "mr", "ma", "me", "md", "ms", "mst", "msh", "msr", "mch", "mrn", "mh", "macro",
 })
+
+_CLIARA_BUILTIN_HELP: Dict[str, Dict[str, str]] = {
+    "macro": {
+        "canonical": "macro",
+        "purpose": "Namespace for managing reusable command workflows.",
+        "usage": "macro help | macro list | macro run <name>",
+        "related": "mc, ma, mr, mh",
+    },
+    "m": {
+        "canonical": "m",
+        "purpose": "Short alias entrypoint for macro subcommands.",
+        "usage": "m <subcommand> ...",
+        "related": "macro, mh",
+    },
+    "mc": {
+        "canonical": "macro create",
+        "purpose": "Create a macro from plain-English workflow text.",
+        "usage": "mc [description...]",
+        "related": "ma --nl, mh, macro help",
+    },
+    "ma": {
+        "canonical": "macro add",
+        "purpose": "Add a named macro with explicit steps (or NL mode with --nl).",
+        "usage": "ma <name> [--nl]",
+        "related": "mc, ml, mr, me, md",
+    },
+    "ml": {
+        "canonical": "macro list",
+        "purpose": "List saved macros.",
+        "usage": "ml",
+        "related": "msh <name>, mr <name>",
+    },
+    "mr": {
+        "canonical": "macro run",
+        "purpose": "Run a saved macro by name.",
+        "usage": "mr <name>",
+        "related": "ml, msh <name>",
+    },
+    "me": {
+        "canonical": "macro edit",
+        "purpose": "Edit an existing macro definition.",
+        "usage": "me <name>",
+        "related": "ma, md, mrn",
+    },
+    "md": {
+        "canonical": "macro delete",
+        "purpose": "Delete a macro by name.",
+        "usage": "md <name>",
+        "related": "ml",
+    },
+    "ms": {
+        "canonical": "macro save last as",
+        "purpose": "Save the most recently executed command chain as a macro.",
+        "usage": "ms <name>",
+        "related": "ma, ml",
+    },
+    "mst": {
+        "canonical": "macro stats",
+        "purpose": "Show macro usage statistics.",
+        "usage": "mst",
+        "related": "ml",
+    },
+    "msh": {
+        "canonical": "macro show",
+        "purpose": "Show the steps of a macro.",
+        "usage": "msh <name>",
+        "related": "ml, mr",
+    },
+    "msr": {
+        "canonical": "macro search",
+        "purpose": "Search macros by name/description.",
+        "usage": "msr <query>",
+        "related": "ml",
+    },
+    "mch": {
+        "canonical": "macro chain",
+        "purpose": "Chain multiple macros in sequence.",
+        "usage": "mch <name1> <name2> ...",
+        "related": "mr",
+    },
+    "mrn": {
+        "canonical": "macro rename",
+        "purpose": "Rename a macro.",
+        "usage": "mrn <old> <new>",
+        "related": "me, md",
+    },
+    "mh": {
+        "canonical": "macro help",
+        "purpose": "Show all macro commands and examples.",
+        "usage": "mh",
+        "related": "macro help, mc, ml, mr, ma",
+    },
+    "session": {
+        "canonical": "session",
+        "purpose": "Manage task sessions (start, resume, end, list, show, note).",
+        "usage": "session help",
+        "related": "ss <name>, se [--reflect], session list",
+    },
+    "deploy": {
+        "canonical": "deploy",
+        "purpose": "Run project deploy workflow with detection and saved config.",
+        "usage": "deploy help",
+        "related": "deploy config, deploy history, deploy reset",
+    },
+    "explain": {
+        "canonical": "explain",
+        "purpose": "Explain a command (or last run output) in plain English.",
+        "usage": "explain <command> | explain last",
+        "related": "? fix, ? why",
+    },
+    "push": {
+        "canonical": "push",
+        "purpose": "Smart push flow with AI commit message and branch detection.",
+        "usage": "push",
+        "related": "status, deploy",
+    },
+    "setup-llm": {
+        "canonical": "setup-llm",
+        "purpose": "Interactive LLM provider setup wizard.",
+        "usage": "setup-llm",
+        "related": "setup-ollama, status",
+    },
+    "setup-ollama": {
+        "canonical": "setup-ollama",
+        "purpose": "Set up and connect local Ollama models.",
+        "usage": "setup-ollama",
+        "related": "setup-llm, status",
+    },
+    "theme": {
+        "canonical": "theme",
+        "purpose": "List or change the active Cliara theme.",
+        "usage": "theme [name] | themes",
+        "related": "themes",
+    },
+    "themes": {
+        "canonical": "themes",
+        "purpose": "List available themes.",
+        "usage": "themes",
+        "related": "theme <name>",
+    },
+    "status": {
+        "canonical": "status",
+        "purpose": "Show current auth/provider and LLM setup state.",
+        "usage": "status",
+        "related": "setup-llm, setup-ollama",
+    },
+}
+
+_CLIARA_HELP_KEY_ALIASES: Dict[str, str] = {
+    "ss": "session",
+    "se": "session",
+}
 
 
 def _default_session_reflect_plan() -> List[Dict[str, Any]]:
@@ -301,12 +454,6 @@ class NLHandler:
         """
         if not self.llm_enabled:
             return self._stub_response(query)
-
-        builtin_fastpath = self._cliara_builtin_help_fastpath(query)
-        if builtin_fastpath is not None:
-            commands, explanation = builtin_fastpath
-            level, _dangerous = self.safety.check_commands(commands)
-            return commands, explanation, level
         
         try:
             include_listing = self._should_include_directory_listing(query, context)
@@ -335,6 +482,52 @@ class NLHandler:
             return [], f"Error: {str(e)}", DangerLevel.SAFE
 
     @staticmethod
+    def should_answer_directly(query: str) -> bool:
+        """True when a `?` query is informational and should be answered, not executed."""
+        q = (query or "").strip().lower()
+        if not q:
+            return False
+
+        # "what is in X" / "list folder" style prompts are operational requests.
+        if NLHandler._looks_path_or_listing_intent(q):
+            return False
+
+        info_patterns = (
+            r"^(what\s+does|what\s+is|explain|describe)\b",
+            r"^(how\s+do\s+i\s+use|how\s+to\s+use|usage\s+of|meaning\s+of)\b",
+            r"\b(help\s+with|what\s+is\s+the\s+difference\s+between)\b",
+        )
+        if any(re.search(p, q) for p in info_patterns):
+            return True
+
+        subject = NLHandler._extract_command_help_subject(q)
+        if subject and subject in _CLIARA_BUILTIN_COMMANDS:
+            return True
+
+        return False
+
+    def answer_query(
+        self,
+        query: str,
+        context: Optional[dict] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Answer informational questions directly in plain text (no command execution)."""
+        deterministic = self._builtin_answer_fastpath(query)
+        if deterministic:
+            return deterministic
+
+        if not self.llm_enabled:
+            return "LLM is not configured. Run setup-llm to enable direct natural-language answers."
+
+        try:
+            ctx = self._build_context(context, include_directory_listing=False)
+            prompt = self._create_answer_prompt(query, ctx)
+            return self._call_llm_stream("cliara_qa", prompt, stream_callback).strip()
+        except Exception as e:
+            return f"Error while answering query: {e}"
+
+    @staticmethod
     def _extract_command_help_subject(query: str) -> Optional[str]:
         """Extract candidate command token from help/explain-style NL questions."""
         q = (query or "").strip().lower()
@@ -351,30 +544,24 @@ class NLHandler:
                 return m.group(1).strip("`'\"")
         return None
 
-    def _cliara_builtin_help_fastpath(self, query: str) -> Optional[Tuple[List[str], str]]:
-        """Map built-in help questions to deterministic Cliara commands."""
+    def _builtin_answer_fastpath(self, query: str) -> Optional[str]:
+        """Return deterministic direct answers for known Cliara built-in help questions."""
         subject = self._extract_command_help_subject(query)
         if not subject or subject not in _CLIARA_BUILTIN_COMMANDS:
             return None
 
-        if subject in _CLIARA_MACRO_ALIASES:
-            cmd = "mh"
-        elif subject == "session" or subject in {"ss", "se"}:
-            cmd = "session help"
-        elif subject == "deploy":
-            cmd = "deploy help"
-        elif subject in {"theme", "themes"}:
-            cmd = "themes"
-        elif subject == "status":
-            cmd = "status"
-        else:
-            cmd = "help"
+        key = _CLIARA_HELP_KEY_ALIASES.get(subject, subject)
 
-        explanation = (
-            f"Detected '{subject}' as a Cliara built-in command. "
-            f"Using Cliara-native help flow ({cmd}) instead of host-shell lookup."
+        data = _CLIARA_BUILTIN_HELP.get(key)
+        if data is None:
+            return None
+
+        return (
+            f"{subject} is a Cliara built-in command (canonical: {data['canonical']}).\n"
+            f"- Purpose: {data['purpose']}\n"
+            f"- Usage: {data['usage']}\n"
+            f"- Related: {data['related']}"
         )
-        return [cmd], explanation
 
     def _retry_nl_to_commands_json(self, prompt: str) -> str:
         """One-shot repair call when initial nl_to_commands output is malformed."""
@@ -555,7 +742,7 @@ class NLHandler:
     def _create_prompt(self, query: str, context: dict) -> str:
         """Create the user message for the NL-to-commands agent.
 
-        All behavioural rules live in the system prompt (nl_to_commands.txt).
+        All behavioural rules live in the system prompt (nl_to_commands.md).
         This method only supplies the request and runtime context.
         """
         os_name = context.get("os", "Unknown")
@@ -590,6 +777,31 @@ class NLHandler:
         if dir_listing:
             prompt += f"\nDirectory listing (depth 2 from cwd):\n{dir_listing}\n"
 
+        return prompt
+
+    def _create_answer_prompt(self, query: str, context: dict) -> str:
+        """Create informational-answer prompt for direct autonomous responses."""
+        os_name = context.get("os", "Unknown")
+        shell = context.get("shell", "unknown")
+        runtime = context.get("runtime", "Cliara")
+        cwd = context.get("cwd", "")
+        project_type = context.get("project_type", "")
+
+        prompt = f"User question: {query}\n\nContext:\n"
+        prompt += f"- Runtime: {runtime}\n"
+        prompt += f"- Host shell: {shell}\n"
+        prompt += f"- OS: {os_name}\n"
+        prompt += f"- CWD: {cwd}\n"
+        if project_type:
+            prompt += f"- Project type: {project_type}\n"
+        prompt += (
+            "- Cliara built-ins include: help, explain, push, deploy, session, config, theme/themes, "
+            "setup-llm, setup-ollama, macro aliases (mc/ml/ma/mr/mh).\n"
+        )
+        prompt += (
+            "\nAnswer directly and autonomously. If asked about a Cliara command, explain it plainly "
+            "with purpose, usage, and related commands. Do not ask the user to run a help command as the primary answer."
+        )
         return prompt
     
     def _call_llm_stream(

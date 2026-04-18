@@ -1961,6 +1961,41 @@ class CliaraShell:
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash")
         }
+
+        # Informational intent: answer directly, don't force command execution.
+        if self.nl_handler.should_answer_directly(query):
+            if save_as_name:
+                print_warning("[Cancelled] --save-as is only valid for executable command generation.")
+                return
+
+            stream_cb = None
+            answer_stream_chars = 0
+            if self.config.get("stream_llm", True):
+                base_cb = self._stream_callback_for_console()
+
+                def _answer_stream_cb(chunk: str) -> None:
+                    nonlocal answer_stream_chars
+                    answer_stream_chars += len(chunk or "")
+                    base_cb(chunk)
+
+                stream_cb = _answer_stream_cb
+
+            from rich.status import Status
+            with Status(f"[dim]Answering:[/dim] {query}", spinner="dots", console=_cliara_console()):
+                answer = self.nl_handler.answer_query(query, context, stream_callback=stream_cb)
+
+            print_header("\n" + "=" * 60)
+            print_info("ANSWER")
+            print_header("=" * 60)
+            if answer_stream_chars > 0:
+                print()
+            elif (answer or "").strip():
+                print(answer)
+            else:
+                print_error("[Error] No answer content returned from the LLM.")
+            print_header("=" * 60 + "\n")
+            return
+
         from rich.status import Status
         with Status(f"[dim]Thinking about:[/dim] {query}", spinner="dots", console=_cliara_console()) as status:
             progress_chars = 0
@@ -2043,7 +2078,7 @@ class CliaraShell:
         for i, cmd in enumerate(commands, 1):
             print_info(f"[{i}/{len(commands)}] {cmd}")
             print("-" * 60)
-            success = self.execute_shell_command(cmd, capture=False)
+            success = self._execute_nl_generated_command(cmd)
             print()
             
             if not success:
@@ -2057,6 +2092,56 @@ class CliaraShell:
         
         # Save to history for "save last"
         self.history.set_last_execution(commands)
+
+    def _execute_nl_generated_command(self, cmd: str) -> bool:
+        """Execute one NL-generated command, honoring Cliara built-ins before host shell."""
+        raw = (cmd or "").strip()
+        if not raw:
+            return True
+
+        low = raw.lower()
+        macro_alias = self._expand_macro_alias(raw)
+        if macro_alias is not None:
+            self.handle_macro_command(macro_alias)
+            return True
+
+        if low == "macro" or low.startswith("macro "):
+            rest = raw[6:].strip() if len(raw) > 6 else ""
+            self.handle_macro_command(rest)
+            return True
+
+        if low in ("help", "?help"):
+            self.show_help()
+            return True
+        if low == "status":
+            self._handle_status()
+            return True
+        if low == "setup-llm":
+            self._handle_setup_llm()
+            return True
+        if low == "setup-ollama":
+            self._handle_setup_ollama()
+            return True
+
+        if low == "session" or low.startswith("session "):
+            sub = raw[7:].strip() if len(raw) > 7 else ""
+            self.handle_session(sub)
+            return True
+
+        if low == "deploy" or low.startswith("deploy "):
+            sub = raw[6:].strip() if len(raw) > 6 else ""
+            self.handle_deploy(sub)
+            return True
+
+        if low.startswith("explain "):
+            rest = raw[8:].strip()
+            if _is_explain_last_rest(rest):
+                self.handle_explain_last()
+            else:
+                self.handle_explain(rest)
+            return True
+
+        return self.execute_shell_command(raw, capture=False)
     
     def handle_fix(self):
         """
@@ -5615,7 +5700,7 @@ class CliaraShell:
         if do_export or export_path is not None or export_json:
             if export_path is None:
                 safe_name = session.name.replace(" ", "-")[:30]
-                export_path = Path(f"cliara-graph-{safe_name}.json" if export_json else f"cliara-graph-{safe_name}.txt")
+                export_path = Path(f"cliara-graph-{safe_name}.json" if export_json else f"cliara-graph-{safe_name}.md")
             export_path = Path(export_path)
             if export_json:
                 export_tree_json(session.commands, export_path)

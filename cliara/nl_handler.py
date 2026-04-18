@@ -149,10 +149,38 @@ class NLHandler:
         self.llm_enabled = False
         self.llm_client = None
         self.provider = None
+        # Lazy OpenAI client for embeddings when chat uses another provider (e.g. Groq).
+        self._openai_embedding_client: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Provider initialisation
     # ------------------------------------------------------------------
+
+    def _client_for_embeddings(self):
+        """
+        Return an OpenAI-compatible client that can call ``embeddings.create``.
+
+        Uses the primary client when provider is *openai* or *ollama*; otherwise
+        tries ``OPENAI_API_KEY`` so vector search can work without a chat LLM.
+        """
+        if self.llm_client is not None and self.provider in ("openai", "ollama"):
+            return self.llm_client
+        if self._openai_embedding_client is not None:
+            return self._openai_embedding_client
+        key = os.getenv("OPENAI_API_KEY")
+        if not key:
+            return None
+        try:
+            from openai import OpenAI
+
+            self._openai_embedding_client = OpenAI(api_key=key)
+            return self._openai_embedding_client
+        except Exception:
+            return None
+
+    def supports_embedding_api(self) -> bool:
+        """True if embedding vectors can be fetched (OpenAI or Ollama, including API-key-only)."""
+        return self._client_for_embeddings() is not None
 
     def initialize_llm(self, provider: str, api_key: str, base_url: Optional[str] = None) -> bool:
         """
@@ -1124,14 +1152,21 @@ Command: {cmd_for_prompt}"""
     def get_embedding(self, text: str) -> Optional[List[float]]:
         """Fetch an embedding vector for *text*.
 
-        Supports OpenAI and Ollama (OpenAI-compatible).  Returns None for
-        Anthropic (no embeddings API) or on any failure.
+        Uses OpenAI or the primary Ollama client, or a dedicated OpenAI client
+        from ``OPENAI_API_KEY`` when chat uses another provider.  Returns None
+        on failure.
         """
-        if not self.llm_enabled or self.provider not in ("openai", "ollama") or not text.strip():
+        if not text.strip():
             return None
-        model = EMBEDDING_MODEL if self.provider == "openai" else "nomic-embed-text"
+        client = self._client_for_embeddings()
+        if client is None:
+            return None
+        if self.llm_client is client and self.provider == "ollama":
+            model = "nomic-embed-text"
+        else:
+            model = EMBEDDING_MODEL
         try:
-            resp = self.llm_client.embeddings.create(
+            resp = client.embeddings.create(
                 model=model,
                 input=text.strip(),
             )
@@ -1157,7 +1192,7 @@ Command: {cmd_for_prompt}"""
         Returns an empty list if no embeddings are stored yet or the API call
         fails (caller should fall back to summary-only search).
         """
-        if not self.llm_enabled or not entries or not (query or "").strip():
+        if not self.supports_embedding_api() or not entries or not (query or "").strip():
             return []
 
         # Filter to only entries that have embeddings

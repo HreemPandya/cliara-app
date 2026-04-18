@@ -2171,12 +2171,18 @@ class CliaraShell:
             print_dim("No semantic history yet. Run some commands, then try again.")
             print_dim("Use 'history [N]' for a plain list of recent commands.")
             return
-        if not self.nl_handler.llm_enabled:
-            print_dim("LLM not configured. Semantic search requires an AI provider.")
-            print_dim("Run 'setup-llm' to configure one for free (Groq, Gemini, Ollama).")
+        use_embeddings = self.config.get("semantic_history_use_embeddings", False)
+        can_embed = self.nl_handler.supports_embedding_api()
+        llm = self.nl_handler.llm_enabled
+        if not can_embed and not llm:
+            print_dim("Semantic search needs embeddings (OpenAI API key or Ollama) and/or a chat LLM.")
+            print_dim("Set OPENAI_API_KEY for vector-only search, or run 'setup-llm' for text-based search.")
             print_dim("Use 'history [N]' for a plain list.")
             return
-        use_embeddings = self.config.get("semantic_history_use_embeddings", False)
+        if not use_embeddings and not llm:
+            print_dim("Text-based history search needs a chat LLM. Run 'setup-llm', or enable semantic_history_use_embeddings with OpenAI/Ollama.")
+            print_dim("Use 'history [N]' for a plain list.")
+            return
         entries = store.get_all() if use_embeddings else store.get_recent(100)
         if not entries:
             print_dim("No matching commands found. Try a different phrase or run more commands.")
@@ -2186,8 +2192,8 @@ class CliaraShell:
         matches: list = []
         if use_embeddings:
             matches = self.nl_handler.search_history_by_embeddings(entries, query.strip())
-            if not matches:
-                # No embeddings stored yet — fall back to summary-based search
+            if not matches and llm:
+                # No embeddings stored yet or no similarity — fall back to summary-based search
                 entries_recent = store.get_recent(100)
                 matches = self.nl_handler.search_history_by_intent(entries_recent, query.strip())
         else:

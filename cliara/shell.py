@@ -1962,8 +1962,31 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash")
         }
         from rich.status import Status
-        with Status(f"[dim]Thinking about:[/dim] {query}", spinner="dots", console=_cliara_console()):
-            commands, explanation, danger_level = self.nl_handler.process_query(query, context, stream_callback=None)
+        with Status(f"[dim]Thinking about:[/dim] {query}", spinner="dots", console=_cliara_console()) as status:
+            progress_chars = 0
+            progress_tick = 0
+            query_label = query if len(query) <= 48 else (query[:45] + "...")
+
+            def _nl_progress_callback(chunk: str) -> None:
+                nonlocal progress_chars, progress_tick
+                progress_chars += len(chunk or "")
+                next_tick = progress_chars // 120
+                if next_tick > progress_tick:
+                    progress_tick = next_tick
+                    status.update(
+                        f"[dim]Thinking about:[/dim] {query_label} "
+                        f"[dim](LLM streaming... {progress_chars} chars)[/dim]"
+                    )
+
+            # Mark this callback as safe for JSON agents: it only updates the
+            # status line and never prints raw streamed chunks.
+            setattr(_nl_progress_callback, "__cliara_json_safe__", True)
+
+            commands, explanation, danger_level = self.nl_handler.process_query(
+                query,
+                context,
+                stream_callback=_nl_progress_callback,
+            )
         
         if not commands:
             print_error(f"[Error] {explanation}")

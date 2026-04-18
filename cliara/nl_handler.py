@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,22 @@ _STREAMING_SAFE_AGENTS = frozenset({
     "copilot_explain",
     "readme",
     "chat_polish",
+})
+
+# Cliara built-ins (and common shortcuts) so NL can treat "what does mc do"
+# as a Cliara command-help intent rather than a host-shell lookup.
+_CLIARA_BUILTIN_COMMANDS = frozenset({
+    "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "upgrade-cliara",
+    "explain", "lint", "push", "session", "deploy", "macro", "config", "theme", "themes",
+    "setup-ollama", "setup-llm", "cliara-login", "cliara-logout", "use",
+    # Macro shortcuts
+    "m", "mc", "ml", "mr", "ma", "me", "md", "ms", "mst", "msh", "msr", "mch", "mrn", "mh",
+    # Session shortcuts
+    "ss", "se",
+})
+
+_CLIARA_MACRO_ALIASES = frozenset({
+    "m", "mc", "ml", "mr", "ma", "me", "md", "ms", "mst", "msh", "msr", "mch", "mrn", "mh", "macro",
 })
 
 
@@ -151,6 +168,8 @@ class NLHandler:
         self.provider = None
         # Lazy OpenAI client for embeddings when chat uses another provider (e.g. Groq).
         self._openai_embedding_client: Optional[Any] = None
+        # Small TTL cache to avoid re-scanning the same directory tree on every NL query.
+        self._dir_listing_cache: Dict[str, Tuple[float, str]] = {}
 
     # ------------------------------------------------------------------
     # Provider initialisation
@@ -282,15 +301,31 @@ class NLHandler:
         """
         if not self.llm_enabled:
             return self._stub_response(query)
+
+        builtin_fastpath = self._cliara_builtin_help_fastpath(query)
+        if builtin_fastpath is not None:
+            commands, explanation = builtin_fastpath
+            level, _dangerous = self.safety.check_commands(commands)
+            return commands, explanation, level
         
         try:
-            context_info = self._build_context(context, include_directory_listing=True)
+            include_listing = self._should_include_directory_listing(query, context)
+            context_info = self._build_context(context, include_directory_listing=include_listing)
             prompt = self._create_prompt(query, context_info)
             response = self._call_llm_stream("nl_to_commands", prompt, stream_callback)
             commands, explanation = self._parse_response(response)
 
             if not commands:
-                return [], "Could not generate commands from query", DangerLevel.SAFE
+                retry_response = self._retry_nl_to_commands_json(prompt)
+                if retry_response:
+                    retry_commands, retry_explanation = self._parse_response(retry_response)
+                    if retry_commands:
+                        commands, explanation = retry_commands, retry_explanation
+                    else:
+                        explanation = retry_explanation
+
+            if not commands:
+                return [], explanation or "Could not parse LLM output into runnable commands", DangerLevel.SAFE
 
             level, dangerous = self.safety.check_commands(commands)
             return commands, explanation, level
@@ -298,6 +333,62 @@ class NLHandler:
         except Exception as e:
             print(f"[Error] LLM processing failed: {e}")
             return [], f"Error: {str(e)}", DangerLevel.SAFE
+
+    @staticmethod
+    def _extract_command_help_subject(query: str) -> Optional[str]:
+        """Extract candidate command token from help/explain-style NL questions."""
+        q = (query or "").strip().lower()
+        if not q:
+            return None
+
+        patterns = (
+            r"(?:what\s+does|what\s+is|explain|describe|help\s+with|usage\s+of)\s+[`'\"]?([a-z0-9][a-z0-9._-]*)",
+            r"^[`'\"]?([a-z0-9][a-z0-9._-]*)[`'\"]?\s+(?:help|usage|meaning)\b",
+        )
+        for pat in patterns:
+            m = re.search(pat, q)
+            if m:
+                return m.group(1).strip("`'\"")
+        return None
+
+    def _cliara_builtin_help_fastpath(self, query: str) -> Optional[Tuple[List[str], str]]:
+        """Map built-in help questions to deterministic Cliara commands."""
+        subject = self._extract_command_help_subject(query)
+        if not subject or subject not in _CLIARA_BUILTIN_COMMANDS:
+            return None
+
+        if subject in _CLIARA_MACRO_ALIASES:
+            cmd = "mh"
+        elif subject == "session" or subject in {"ss", "se"}:
+            cmd = "session help"
+        elif subject == "deploy":
+            cmd = "deploy help"
+        elif subject in {"theme", "themes"}:
+            cmd = "themes"
+        elif subject == "status":
+            cmd = "status"
+        else:
+            cmd = "help"
+
+        explanation = (
+            f"Detected '{subject}' as a Cliara built-in command. "
+            f"Using Cliara-native help flow ({cmd}) instead of host-shell lookup."
+        )
+        return [cmd], explanation
+
+    def _retry_nl_to_commands_json(self, prompt: str) -> str:
+        """One-shot repair call when initial nl_to_commands output is malformed."""
+        strict_prompt = (
+            prompt
+            + "\n\nIMPORTANT: Your previous response was invalid for execution. "
+            + "Return ONLY valid JSON with exactly these top-level keys: "
+            + "commands (array of non-empty command strings) and explanation (short string). "
+            + "No markdown, no prose outside JSON, no trailing commas."
+        )
+        try:
+            return self._call_llm("nl_to_commands", strict_prompt)
+        except Exception:
+            return ""
     
     # ------------------------------------------------------------------
     # Shell detection helpers
@@ -324,6 +415,31 @@ class NLHandler:
     })
     _SKIP_SUFFIXES = (".egg-info", ".dist-info")
 
+    @staticmethod
+    def _looks_path_or_listing_intent(text: str) -> bool:
+        """Heuristic: True when the query likely needs filesystem disambiguation."""
+        q = (text or "").strip().lower()
+        if not q:
+            return False
+        if "/" in q or "\\" in q or q.startswith("."):
+            return True
+        if "what is in" in q or "what's in" in q:
+            return True
+        return re.search(
+            r"\b(folder|directory|dir|path|paths|file|files|list|listing|tree|inside|under|locate|where)\b",
+            q,
+        ) is not None
+
+    def _should_include_directory_listing(
+        self,
+        query: str,
+        context: Optional[dict] = None,
+    ) -> bool:
+        """Include directory listing only when likely helpful for path resolution."""
+        if context and context.get("directory_listing"):
+            return True
+        return self._looks_path_or_listing_intent(query)
+
     def _gather_directory_listing(
         self, cwd_path: str, max_depth: int = 2, max_entries: int = 80,
     ) -> str:
@@ -335,6 +451,12 @@ class NLHandler:
         root = Path(cwd_path)
         if not root.is_dir():
             return ""
+
+        cache_key = str(root)
+        now = time.monotonic()
+        cached = self._dir_listing_cache.get(cache_key)
+        if cached and (now - cached[0]) <= 5.0:
+            return cached[1]
 
         lines: List[str] = []
         count = 0
@@ -375,7 +497,9 @@ class NLHandler:
         if count >= max_entries:
             lines.append(f"  ... ({count}+ entries, truncated)")
 
-        return "\n".join(lines)
+        listing = "\n".join(lines)
+        self._dir_listing_cache[cache_key] = (now, listing)
+        return listing
 
     # ------------------------------------------------------------------
     # Context builder
@@ -397,6 +521,7 @@ class NLHandler:
         ctx.setdefault("os", platform.system())
         ctx.setdefault("shell", self._detect_shell_fallback())
         ctx.setdefault("cwd", str(Path.cwd()))
+        ctx.setdefault("runtime", "Cliara")
 
         # Detect project type
         cwd = Path(ctx["cwd"])
@@ -416,6 +541,16 @@ class NLHandler:
             ctx["directory_listing"] = self._gather_directory_listing(ctx["cwd"])
 
         return ctx
+
+    @staticmethod
+    def _mentioned_cliara_builtins(query: str) -> List[str]:
+        """Return built-in command tokens explicitly present in the NL query."""
+        tokens = re.findall(r"[a-z0-9][a-z0-9._-]*", (query or "").lower())
+        seen = []
+        for tok in tokens:
+            if tok in _CLIARA_BUILTIN_COMMANDS and tok not in seen:
+                seen.append(tok)
+        return seen
     
     def _create_prompt(self, query: str, context: dict) -> str:
         """Create the user message for the NL-to-commands agent.
@@ -425,14 +560,25 @@ class NLHandler:
         """
         os_name = context.get("os", "Unknown")
         shell = context.get("shell", "unknown")
+        runtime = context.get("runtime", "Cliara")
         cwd = context.get("cwd", "")
         project_type = context.get("project_type", "")
         dir_listing = context.get("directory_listing", "")
+        mentioned_builtins = self._mentioned_cliara_builtins(query)
 
         prompt = f"User's request: {query}\n\nContext:\n"
         prompt += f"- Operating System: {os_name}\n"
-        prompt += f"- Shell: {shell}\n"
+        prompt += f"- Runtime: {runtime} interactive shell (Cliara intercepts built-ins before host shell)\n"
+        prompt += f"- Host Shell: {shell}\n"
         prompt += f"- Current Directory: {cwd}\n"
+        prompt += "- Cliara built-ins include: help, explain, push, deploy, session, config, theme, setup-llm, setup-ollama, macro aliases (mc/ml/ma/mr/mh).\n"
+
+        if mentioned_builtins:
+            prompt += (
+                "- Built-in tokens found in this request: "
+                + ", ".join(mentioned_builtins)
+                + ". For help/meaning requests, prefer Cliara-native help commands.\n"
+            )
 
         if project_type:
             prompt += f"- Project Type: {project_type}\n"
@@ -454,9 +600,10 @@ class NLHandler:
     ) -> str:
         """Call the LLM; optionally stream tokens to *stream_callback*.
 
-        *stream_callback* should only be supplied for agents in
-        ``_STREAMING_SAFE_AGENTS`` (plain-text output).  JSON-returning agents
-        must not stream to the console.
+        *stream_callback* streams for plain-text agents in
+        ``_STREAMING_SAFE_AGENTS`` by default. For JSON-returning agents,
+        streaming remains disabled unless the callback is explicitly marked as
+        JSON-safe progress-only (attribute ``__cliara_json_safe__ = True``).
 
         Returns the full assistant reply as a single string.
         """
@@ -467,9 +614,15 @@ class NLHandler:
         temperature: float = cfg["temperature"]
         max_tokens: int = cfg["max_tokens"]
         model: str = self._resolve_model(agent_type)
+        max_tokens = self._effective_max_tokens(agent_type, max_tokens)
 
-        # Enforce safety: never stream JSON agents to the console
-        safe_cb = stream_callback if agent_type in _STREAMING_SAFE_AGENTS else None
+        # Enforce safety: JSON agents can only stream to explicitly-marked
+        # progress callbacks (no raw token rendering by default).
+        allow_json_progress = bool(
+            stream_callback is not None
+            and getattr(stream_callback, "__cliara_json_safe__", False)
+        )
+        safe_cb = stream_callback if (agent_type in _STREAMING_SAFE_AGENTS or allow_json_progress) else None
 
         if self.provider in _OPENAI_COMPAT_PROVIDERS:
             return self._call_openai_compat(
@@ -481,6 +634,36 @@ class NLHandler:
             )
         else:
             raise Exception(f"Unsupported provider: {self.provider}")
+
+    def _effective_max_tokens(self, agent_type: str, default_max_tokens: int) -> int:
+        """Apply provider-specific caps so local models return faster by default."""
+        base = max(1, int(default_max_tokens))
+        if self.provider != "ollama":
+            return base
+
+        cap_raw: Any = None
+        if self.config is not None:
+            if agent_type == "nl_to_commands":
+                cap_raw = self.config.get("ollama_max_tokens_nl", 320)
+            elif agent_type == "nl_macro_propose":
+                cap_raw = self.config.get("ollama_max_tokens_macro", 500)
+            else:
+                cap_raw = self.config.get("ollama_max_tokens_cap", 768)
+        else:
+            if agent_type == "nl_to_commands":
+                cap_raw = 320
+            elif agent_type == "nl_macro_propose":
+                cap_raw = 500
+            else:
+                cap_raw = 768
+
+        try:
+            cap = int(cap_raw)
+        except (TypeError, ValueError):
+            return base
+        if cap <= 0:
+            return base
+        return min(base, cap)
 
     def _openai_compat_error_message(self, err: Exception) -> str:
         """Turn upstream errors into a short message; add hints for known platform failures."""
@@ -506,18 +689,45 @@ class NLHandler:
         stream_callback: Optional[Callable[[str], None]],
     ) -> str:
         """OpenAI / Ollama (OpenAI-compatible) completion — with optional streaming."""
+        request_kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        if self.provider == "ollama":
+            extra_body: Dict[str, Any] = {}
+            options: Dict[str, Any] = {}
+
+            keep_alive_raw = "15m"
+            num_ctx_raw: Any = 4096
+            if self.config is not None:
+                keep_alive_raw = self.config.get("ollama_keep_alive", "15m")
+                num_ctx_raw = self.config.get("ollama_num_ctx", 4096)
+
+            keep_alive = str(keep_alive_raw or "").strip()
+            if keep_alive:
+                extra_body["keep_alive"] = keep_alive
+
+            try:
+                num_ctx = int(num_ctx_raw)
+                if num_ctx > 0:
+                    options["num_ctx"] = num_ctx
+            except (TypeError, ValueError):
+                pass
+
+            if options:
+                extra_body["options"] = options
+            if extra_body:
+                request_kwargs["extra_body"] = extra_body
+
         try:
             if stream_callback is not None:
-                stream = self.llm_client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_message},
-                    ],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=True,
-                )
+                stream = self.llm_client.chat.completions.create(stream=True, **request_kwargs)
                 full_content: List[str] = []
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
@@ -526,15 +736,7 @@ class NLHandler:
                         full_content.append(delta)
                 return "".join(full_content).strip()
             else:
-                response = self.llm_client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_message},
-                    ],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                response = self.llm_client.chat.completions.create(**request_kwargs)
                 return response.choices[0].message.content.strip()
         except Exception as e:
             raise Exception(self._openai_compat_error_message(e)) from e
@@ -677,6 +879,49 @@ class NLHandler:
             search_from = start + 1
         return None
 
+    @staticmethod
+    def _response_snippet(text: str, max_chars: int = 220) -> str:
+        """Compact single-line sample of model output for error reporting."""
+        if not text:
+            return "(empty response)"
+        one = re.sub(r"\s+", " ", text).strip()
+        if len(one) <= max_chars:
+            return one
+        return one[: max_chars - 3] + "..."
+
+    @staticmethod
+    def _looks_like_shell_command_line(line: str) -> bool:
+        """Heuristic for extracting command lines from malformed plain-text replies."""
+        s = (line or "").strip().strip("`")
+        if not s:
+            return False
+        if s.startswith("#"):
+            return False
+
+        low = s.lower()
+        if low.startswith(("commands", "explanation", "note", "output", "json", "here")):
+            return False
+        if "{" in s or "}" in s:
+            return False
+
+        # Remove list markers: "1.", "-", "*"
+        s = re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", s).strip()
+        if not s:
+            return False
+
+        first = s.split()[0].strip().strip('"\'')
+        if not re.match(r"^[A-Za-z][A-Za-z0-9._-]*$", first):
+            return False
+
+        stop = {
+            "the", "this", "that", "these", "those", "it", "you", "we", "i", "a", "an", "to", "for",
+            "because", "please", "use", "run", "then", "and", "or", "if", "when", "return", "valid", "json",
+        }
+        if first.lower() in stop:
+            return False
+
+        return True
+
     def _parse_response(self, response: str) -> Tuple[List[str], str]:
         """Parse LLM response and extract commands.
 
@@ -690,26 +935,29 @@ class NLHandler:
                 explanation = data.get("explanation", "Generated commands")
                 if isinstance(commands, str):
                     commands = [commands]
-                return commands, explanation
+                if isinstance(commands, list):
+                    commands = [str(c).strip() for c in commands if str(c).strip()]
+                else:
+                    commands = []
+                if commands:
+                    return commands, explanation
             except (json.JSONDecodeError, AttributeError):
                 pass
 
         # Last-resort: pull shell-looking lines from plain text
         lines = response.split("\n")
-        commands = []
+        commands: List[str] = []
         for line in lines:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if any(kw in line.lower() for kw in [
-                "echo", "ls", "get-childitem", "dir", "cd", "git",
-                "npm", "docker", "python", "node", "pip", "mv", "cp",
-                "rm", "mkdir", "curl", "wget", "find", "grep",
-            ]):
-                commands.append(line)
+            cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", line).strip().strip("`")
+            if self._looks_like_shell_command_line(cleaned):
+                commands.append(cleaned)
         if commands:
             return commands, "Generated from natural language query"
-        return [], "Could not parse LLM response"
+        sample = self._response_snippet(response)
+        return [], f"Could not parse LLM output into commands. Model output sample: {sample}"
     
     def generate_commands_from_nl(self, nl_description: str, context: Optional[dict] = None) -> List[str]:
         """
@@ -726,7 +974,8 @@ class NLHandler:
             return [f"# LLM not configured: {nl_description}"]
         
         try:
-            context_info = self._build_context(context, include_directory_listing=True)
+            include_listing = self._should_include_directory_listing(nl_description, context)
+            context_info = self._build_context(context, include_directory_listing=include_listing)
             prompt = self._create_prompt(nl_description, context_info)
             response = self._call_llm("nl_to_commands", prompt)
             commands, _ = self._parse_response(response)
@@ -834,7 +1083,8 @@ class NLHandler:
             return None, [], "", "LLM not configured"
 
         try:
-            context_info = self._build_context(context, include_directory_listing=True)
+            include_listing = self._should_include_directory_listing(nl_description, context)
+            context_info = self._build_context(context, include_directory_listing=include_listing)
             prompt = self._create_prompt(nl_description, context_info)
             response = self._call_llm("nl_macro_propose", prompt)
             name, commands, desc, expl = self._parse_macro_proposal_loose(

@@ -319,6 +319,27 @@ def _is_explain_last_rest(rest: str) -> bool:
     return rest.strip().lower() == "last"
 
 
+def _nl_query_plain_history_arg(query: str) -> Optional[str]:
+    """
+    If *query* is the built-in ``history [N]`` form (after the NL prefix), return
+    the argument for :meth:`CliaraShell.handle_history` (``\"\"`` or a numeric
+    string). Otherwise return None.
+
+    Keeps ``? history 20`` as a plain list, not semantic search or LLM routing.
+    """
+    q = query.strip()
+    if not q:
+        return None
+    low = q.lower()
+    if low == "history":
+        return ""
+    if low.startswith("history "):
+        rest = q[len("history "):].strip()
+        if rest.isdigit():
+            return rest
+    return None
+
+
 def _is_semantic_history_search_intent(query: str) -> bool:
     """Return True if the query looks like a search over past commands by intent."""
     q = query.strip().lower()
@@ -336,8 +357,14 @@ def _is_semantic_history_search_intent(query: str) -> bool:
         return True
     if q.startswith("search history"):
         return True
-    if q.startswith("history ") and len(q) > 8:
-        return True
+    # ``history <N>`` is the plain list command; semantic forms use search/find.
+    if q.startswith("history "):
+        rest = q[len("history "):].strip()
+        if not rest or rest.isdigit():
+            return False
+        if rest.startswith("search ") or rest.startswith("find "):
+            return True
+        return False
     return False
 
 
@@ -1902,6 +1929,12 @@ class CliaraShell:
         q_low = query.strip().lower()
         if q_low.startswith("explain ") and _is_explain_last_rest(q_low[8:].strip()):
             self.handle_explain_last()
+            return
+
+        # ── ``? history`` / ``? history N`` — same as built-in history (not NL / not semantic)
+        _hist_arg = _nl_query_plain_history_arg(query)
+        if _hist_arg is not None:
+            self.handle_history(_hist_arg)
             return
 
         # ── Semantic history search: ? find ... / ? when did I ... / ? what did I run ... ──

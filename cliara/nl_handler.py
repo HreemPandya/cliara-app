@@ -1174,11 +1174,77 @@ Command: {cmd_for_prompt}"""
         except Exception:
             return None
 
+    @staticmethod
+    def history_entry_key(e: Dict[str, Any]) -> Tuple[str, str]:
+        """Stable id for deduping history rows."""
+        return (str(e.get("command", "")), str(e.get("timestamp", "")))
+
+    def keyword_history_candidates(
+        self,
+        entries: List[Dict[str, Any]],
+        query: str,
+        top_m: int = 24,
+    ) -> List[Dict[str, Any]]:
+        """
+        Rank entries by simple token overlap between *query* and command+summary.
+        """
+        q = (query or "").strip().lower()
+        if not q or not entries:
+            return []
+        tokens = [t for t in re.findall(r"[a-z0-9]+", q) if len(t) > 1]
+        if not tokens:
+            return []
+
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for e in entries:
+            cmd = (e.get("command") or "").strip().lower()
+            summary = (e.get("summary") or "").strip().lower()
+            hay = f"{cmd} {summary}"
+            score = 0.0
+            for t in tokens:
+                if t in hay:
+                    score += 1.0 + min(hay.count(t), 4) * 0.15
+            if score > 0:
+                scored.append((score, e))
+        scored.sort(key=lambda x: -x[0])
+        return [e for _, e in scored[: max(1, top_m)]]
+
+    def merge_embedding_keyword_results(
+        self,
+        vector_matches: List[Dict[str, Any]],
+        all_entries: List[Dict[str, Any]],
+        query: str,
+        target_k: int,
+        keyword_pool: int = 24,
+    ) -> List[Dict[str, Any]]:
+        """
+        Keep vector ordering, then pad with keyword candidates not already present
+        until *target_k*. If vectors are empty, return keyword hits only.
+        """
+        target_k = max(1, int(target_k))
+        seen = {self.history_entry_key(e) for e in vector_matches}
+        out: List[Dict[str, Any]] = list(vector_matches)
+        if len(out) >= target_k:
+            return out[:target_k]
+        extra = self.keyword_history_candidates(all_entries, query, top_m=keyword_pool)
+        for e in extra:
+            k = self.history_entry_key(e)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(e)
+            if len(out) >= target_k:
+                break
+        return out[:target_k]
+
     def search_history_by_embeddings(
         self,
         entries: List[Dict[str, Any]],
         query: str,
         top_k: int = 10,
+        min_score: float = 0.30,
+        adaptive: bool = False,
+        adaptive_frac: float = 0.82,
     ) -> List[Dict[str, Any]]:
         """
         Vector-similarity search over semantic history entries.
@@ -1189,6 +1255,8 @@ Command: {cmd_for_prompt}"""
         enabled).
 
         Returns up to *top_k* entries in descending similarity order.
+        *min_score* is the minimum cosine similarity; if *adaptive* is True,
+        the cutoff is ``max(min_score, best_score * adaptive_frac)``.
         Returns an empty list if no embeddings are stored yet or the API call
         fails (caller should fall back to summary-only search).
         """
@@ -1222,11 +1290,19 @@ Command: {cmd_for_prompt}"""
         scores = M_norm @ q_norm
 
         order = np.argsort(-scores)
-        threshold = 0.30
+        top_k = max(1, int(top_k))
+        if order.size == 0:
+            return []
+        best = float(scores[int(order[0])])
+        if adaptive and adaptive_frac > 0:
+            threshold = max(float(min_score), best * float(adaptive_frac))
+        else:
+            threshold = float(min_score)
         out: List[Dict[str, Any]] = []
-        for i in order[:top_k]:
-            if scores[i] >= threshold:
-                out.append(with_emb[int(i)])
+        for rank in range(min(top_k, int(order.size))):
+            i = int(order[rank])
+            if float(scores[i]) >= threshold:
+                out.append(with_emb[i])
         return out
 
     # ------------------------------------------------------------------

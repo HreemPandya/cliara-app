@@ -11,7 +11,7 @@ import threading
 from cliara.file_lock import with_file_lock
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
 
 # Dedupe window: same command within this many seconds is considered duplicate
@@ -201,6 +201,56 @@ class SemanticHistoryStore:
             copy = [dict(e) for e in self._entries]
         copy.sort(key=lambda x: x.get("timestamp", ""), reverse=False)
         return copy
+
+    def backfill_missing_embeddings(
+        self,
+        embed_fn: Callable[[str], Optional[List[float]]],
+        max_entries: int = 32,
+    ) -> int:
+        """
+        Compute embeddings for up to *max_entries* newest rows that lack vectors.
+        Persists once if any row was updated. Network I/O runs outside the store lock.
+        """
+        max_entries = max(0, int(max_entries))
+        if max_entries == 0:
+            return 0
+        with self._lock:
+            pending_idx: List[int] = []
+            for i in range(len(self._entries) - 1, -1, -1):
+                e = self._entries[i]
+                if e.get("embedding"):
+                    continue
+                pending_idx.append(i)
+                if len(pending_idx) >= max_entries:
+                    break
+            snapshots: List[tuple] = []
+            for i in pending_idx:
+                e = self._entries[i]
+                snapshots.append(
+                    (i, str(e.get("command", "")), str(e.get("summary", "")), str(e.get("timestamp", "")))
+                )
+        updated = 0
+        for i, cmd, summary, ts in snapshots:
+            text = f"{cmd} {summary}".strip()
+            if not text:
+                continue
+            vec = embed_fn(text)
+            if vec is None:
+                continue
+            with self._lock:
+                if 0 <= i < len(self._entries):
+                    cur = self._entries[i]
+                    if str(cur.get("timestamp", "")) != ts:
+                        continue
+                    if str(cur.get("command", "")) != cmd:
+                        continue
+                    new_e = {**cur, "embedding": list(vec)}
+                    self._entries[i] = self._normalize_entry(new_e)
+                    updated += 1
+        if updated:
+            with self._lock:
+                self._save()
+        return updated
 
     def is_empty(self) -> bool:
         with self._lock:

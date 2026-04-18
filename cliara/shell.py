@@ -2183,21 +2183,69 @@ class CliaraShell:
             print_dim("Text-based history search needs a chat LLM. Run 'setup-llm', or enable semantic_history_use_embeddings with OpenAI/Ollama.")
             print_dim("Use 'history [N]' for a plain list.")
             return
-        entries = store.get_all() if use_embeddings else store.get_recent(100)
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(self.config.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def _cfg_float(key: str, default: float) -> float:
+            try:
+                return float(self.config.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        top_k = max(1, min(_cfg_int("semantic_history_top_k", 10), 100))
+        min_score = max(0.0, min(_cfg_float("semantic_history_embedding_min_score", 0.30), 1.0))
+        adaptive = bool(self.config.get("semantic_history_embedding_adaptive", True))
+        adaptive_frac = max(0.1, min(_cfg_float("semantic_history_embedding_adaptive_frac", 0.82), 1.0))
+        hybrid_kw = bool(self.config.get("semantic_history_hybrid_keyword", True))
+        kw_pool = max(4, min(_cfg_int("semantic_history_hybrid_keyword_pool", 24), 200))
+        backfill_n = max(0, min(_cfg_int("semantic_history_backfill_per_search", 32), 200))
+        intent_max = max(20, min(_cfg_int("semantic_history_intent_max_entries", 200), 500))
+
+        entries = store.get_all() if use_embeddings else store.get_recent(intent_max)
         if not entries:
             print_dim("No matching commands found. Try a different phrase or run more commands.")
             return
         print_info(f"\n[Searching] {query.strip()}\n")
 
         matches: list = []
+        qstrip = query.strip()
         if use_embeddings:
-            matches = self.nl_handler.search_history_by_embeddings(entries, query.strip())
+            if can_embed and backfill_n > 0:
+                store.backfill_missing_embeddings(self.nl_handler.get_embedding, max_entries=backfill_n)
+                entries = store.get_all()
+            matches = self.nl_handler.search_history_by_embeddings(
+                entries,
+                qstrip,
+                top_k=top_k,
+                min_score=min_score,
+                adaptive=adaptive,
+                adaptive_frac=adaptive_frac,
+            )
+            if hybrid_kw:
+                matches = self.nl_handler.merge_embedding_keyword_results(
+                    matches,
+                    entries,
+                    qstrip,
+                    target_k=top_k,
+                    keyword_pool=kw_pool,
+                )
             if not matches and llm:
-                # No embeddings stored yet or no similarity — fall back to summary-based search
-                entries_recent = store.get_recent(100)
-                matches = self.nl_handler.search_history_by_intent(entries_recent, query.strip())
+                entries_recent = store.get_recent(intent_max)
+                matches = self.nl_handler.search_history_by_intent(
+                    entries_recent,
+                    qstrip,
+                    max_entries_in_prompt=intent_max,
+                )
         else:
-            matches = self.nl_handler.search_history_by_intent(entries, query.strip())
+            matches = self.nl_handler.search_history_by_intent(
+                entries,
+                qstrip,
+                max_entries_in_prompt=intent_max,
+            )
         if not matches:
             print_dim("No matching commands found. Try a different phrase or run more commands.")
             return

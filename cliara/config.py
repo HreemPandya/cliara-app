@@ -75,6 +75,18 @@ class Config:
         "semantic_history_max_entries": 500,
         "semantic_history_use_embeddings": True,
         "semantic_history_summary_on_add": True,
+        # Embedding search (? find …): result size, cosine floor, optional adaptive floor
+        "semantic_history_top_k": 10,
+        "semantic_history_embedding_min_score": 0.30,
+        "semantic_history_embedding_adaptive": True,
+        "semantic_history_embedding_adaptive_frac": 0.82,
+        # Backfill missing vectors (old rows / failed embeds) before each search
+        "semantic_history_backfill_per_search": 32,
+        # Merge vector hits with keyword overlap on command+summary
+        "semantic_history_hybrid_keyword": True,
+        "semantic_history_hybrid_keyword_pool": 24,
+        # Intent (LLM) fallback: how many recent entries to include in the prompt
+        "semantic_history_intent_max_entries": 200,
         # Copilot Gate — AI-command interception layer
         "copilot_gate": True,
         "copilot_gate_mode": "auto",            # "auto" | "explicit" | "all"

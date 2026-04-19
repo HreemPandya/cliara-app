@@ -1962,34 +1962,45 @@ class CliaraShell:
             "shell": self.shell_path or os.environ.get("SHELL", "bash")
         }
 
+        route = "commands"
+        if self.nl_handler.llm_enabled:
+            from rich.status import Status
+            with Status(f"[dim]Understanding intent:[/dim] {query}", spinner="dots", console=_cliara_console()):
+                route = self.nl_handler.route_query_mode(query, context)
+
         # Informational intent: answer directly, don't force command execution.
-        if self.nl_handler.should_answer_directly(query):
+        if route == "answer":
             if save_as_name:
                 print_warning("[Cancelled] --save-as is only valid for executable command generation.")
                 return
 
             stream_cb = None
-            answer_stream_chars = 0
-            if self.config.get("stream_llm", True):
-                base_cb = self._stream_callback_for_console()
-
-                def _answer_stream_cb(chunk: str) -> None:
-                    nonlocal answer_stream_chars
-                    answer_stream_chars += len(chunk or "")
-                    base_cb(chunk)
-
-                stream_cb = _answer_stream_cb
-
             from rich.status import Status
-            with Status(f"[dim]Answering:[/dim] {query}", spinner="dots", console=_cliara_console()):
+            with Status(f"[dim]Answering:[/dim] {query}", spinner="dots", console=_cliara_console()) as status:
+                answer_chars = 0
+
+                if self.config.get("stream_llm", True):
+                    query_label = query if len(query) <= 48 else (query[:45] + "...")
+
+                    def _answer_stream_cb(chunk: str) -> None:
+                        nonlocal answer_chars
+                        answer_chars += len(chunk or "")
+                        # Keep streaming UX via status updates only; printing tokens while
+                        # Status is active can be overwritten by live-render refresh.
+                        if answer_chars and answer_chars % 120 == 0:
+                            status.update(
+                                f"[dim]Answering:[/dim] {query_label} "
+                                f"[dim](LLM streaming... {answer_chars} chars)[/dim]"
+                            )
+
+                    stream_cb = _answer_stream_cb
+
                 answer = self.nl_handler.answer_query(query, context, stream_callback=stream_cb)
 
             print_header("\n" + "=" * 60)
             print_info("ANSWER")
             print_header("=" * 60)
-            if answer_stream_chars > 0:
-                print()
-            elif (answer or "").strip():
+            if (answer or "").strip():
                 print(answer)
             else:
                 print_error("[Error] No answer content returned from the LLM.")

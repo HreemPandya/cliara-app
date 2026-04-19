@@ -34,6 +34,8 @@ def _format_size(size_bytes: int) -> str:
 def _dir_size(path: Path) -> int:
     """Total size of every file beneath *path*, recursively."""
     total = 0
+    scanned_files = 0
+    max_files = 5000
     try:
         for entry in path.rglob("*"):
             if entry.is_file():
@@ -41,9 +43,26 @@ def _dir_size(path: Path) -> int:
                     total += entry.stat().st_size
                 except OSError:
                     pass
+                scanned_files += 1
+                if scanned_files >= max_files:
+                    break
     except OSError:
         pass
     return total
+
+
+def _is_root_like_path(path: Path) -> bool:
+    """True for filesystem root targets where recursive scans can be very expensive."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+
+    anchor = resolved.anchor
+    if anchor and resolved == Path(anchor):
+        return True
+
+    return str(path).strip() in {"/", "\\"}
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +152,7 @@ class DiffPreview:
 
         # Expand globs / literal paths
         matched: List[Tuple[str, int, bool]] = []  # (path, size, is_dir)
+        skipped_size_scan = False
         for pattern in file_args:
             expanded = glob.glob(pattern)
             if not expanded:
@@ -143,7 +163,12 @@ class DiffPreview:
             for path_str in expanded:
                 p = Path(path_str)
                 if p.is_dir():
-                    size = _dir_size(p) if is_recursive else 0
+                    if is_recursive and not _is_root_like_path(p):
+                        size = _dir_size(p)
+                    else:
+                        size = 0
+                        if is_recursive:
+                            skipped_size_scan = True
                     matched.append((path_str, size, True))
                 elif p.is_file():
                     try:
@@ -172,6 +197,11 @@ class DiffPreview:
             remaining_size = sum(s for _, s, _ in matched[MAX_SHOW:])
             lines.append(
                 f"    ... {remaining} more ({_format_size(remaining_size)})"
+            )
+
+        if skipped_size_scan:
+            lines.append(
+                "  Note: Skipped deep size scan for broad recursive target(s)."
             )
 
         parts: List[str] = []

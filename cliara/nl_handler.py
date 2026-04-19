@@ -66,163 +66,6 @@ _CLIARA_BUILTIN_COMMANDS = frozenset({
     "ss", "se",
 })
 
-_CLIARA_MACRO_ALIASES = frozenset({
-    "m", "mc", "ml", "mr", "ma", "me", "md", "ms", "mst", "msh", "msr", "mch", "mrn", "mh", "macro",
-})
-
-_CLIARA_BUILTIN_HELP: Dict[str, Dict[str, str]] = {
-    "macro": {
-        "canonical": "macro",
-        "purpose": "Namespace for managing reusable command workflows.",
-        "usage": "macro help | macro list | macro run <name>",
-        "related": "mc, ma, mr, mh",
-    },
-    "m": {
-        "canonical": "m",
-        "purpose": "Short alias entrypoint for macro subcommands.",
-        "usage": "m <subcommand> ...",
-        "related": "macro, mh",
-    },
-    "mc": {
-        "canonical": "macro create",
-        "purpose": "Create a macro from plain-English workflow text.",
-        "usage": "mc [description...]",
-        "related": "ma --nl, mh, macro help",
-    },
-    "ma": {
-        "canonical": "macro add",
-        "purpose": "Add a named macro with explicit steps (or NL mode with --nl).",
-        "usage": "ma <name> [--nl]",
-        "related": "mc, ml, mr, me, md",
-    },
-    "ml": {
-        "canonical": "macro list",
-        "purpose": "List saved macros.",
-        "usage": "ml",
-        "related": "msh <name>, mr <name>",
-    },
-    "mr": {
-        "canonical": "macro run",
-        "purpose": "Run a saved macro by name.",
-        "usage": "mr <name>",
-        "related": "ml, msh <name>",
-    },
-    "me": {
-        "canonical": "macro edit",
-        "purpose": "Edit an existing macro definition.",
-        "usage": "me <name>",
-        "related": "ma, md, mrn",
-    },
-    "md": {
-        "canonical": "macro delete",
-        "purpose": "Delete a macro by name.",
-        "usage": "md <name>",
-        "related": "ml",
-    },
-    "ms": {
-        "canonical": "macro save last as",
-        "purpose": "Save the most recently executed command chain as a macro.",
-        "usage": "ms <name>",
-        "related": "ma, ml",
-    },
-    "mst": {
-        "canonical": "macro stats",
-        "purpose": "Show macro usage statistics.",
-        "usage": "mst",
-        "related": "ml",
-    },
-    "msh": {
-        "canonical": "macro show",
-        "purpose": "Show the steps of a macro.",
-        "usage": "msh <name>",
-        "related": "ml, mr",
-    },
-    "msr": {
-        "canonical": "macro search",
-        "purpose": "Search macros by name/description.",
-        "usage": "msr <query>",
-        "related": "ml",
-    },
-    "mch": {
-        "canonical": "macro chain",
-        "purpose": "Chain multiple macros in sequence.",
-        "usage": "mch <name1> <name2> ...",
-        "related": "mr",
-    },
-    "mrn": {
-        "canonical": "macro rename",
-        "purpose": "Rename a macro.",
-        "usage": "mrn <old> <new>",
-        "related": "me, md",
-    },
-    "mh": {
-        "canonical": "macro help",
-        "purpose": "Show all macro commands and examples.",
-        "usage": "mh",
-        "related": "macro help, mc, ml, mr, ma",
-    },
-    "session": {
-        "canonical": "session",
-        "purpose": "Manage task sessions (start, resume, end, list, show, note).",
-        "usage": "session help",
-        "related": "ss <name>, se [--reflect], session list",
-    },
-    "deploy": {
-        "canonical": "deploy",
-        "purpose": "Run project deploy workflow with detection and saved config.",
-        "usage": "deploy help",
-        "related": "deploy config, deploy history, deploy reset",
-    },
-    "explain": {
-        "canonical": "explain",
-        "purpose": "Explain a command (or last run output) in plain English.",
-        "usage": "explain <command> | explain last",
-        "related": "? fix, ? why",
-    },
-    "push": {
-        "canonical": "push",
-        "purpose": "Smart push flow with AI commit message and branch detection.",
-        "usage": "push",
-        "related": "status, deploy",
-    },
-    "setup-llm": {
-        "canonical": "setup-llm",
-        "purpose": "Interactive LLM provider setup wizard.",
-        "usage": "setup-llm",
-        "related": "setup-ollama, status",
-    },
-    "setup-ollama": {
-        "canonical": "setup-ollama",
-        "purpose": "Set up and connect local Ollama models.",
-        "usage": "setup-ollama",
-        "related": "setup-llm, status",
-    },
-    "theme": {
-        "canonical": "theme",
-        "purpose": "List or change the active Cliara theme.",
-        "usage": "theme [name] | themes",
-        "related": "themes",
-    },
-    "themes": {
-        "canonical": "themes",
-        "purpose": "List available themes.",
-        "usage": "themes",
-        "related": "theme <name>",
-    },
-    "status": {
-        "canonical": "status",
-        "purpose": "Show current auth/provider and LLM setup state.",
-        "usage": "status",
-        "related": "setup-llm, setup-ollama",
-    },
-}
-
-_CLIARA_HELP_KEY_ALIASES: Dict[str, str] = {
-    "ss": "session",
-    "se": "session",
-}
-
-
 def _default_session_reflect_plan() -> List[Dict[str, Any]]:
     """Offline reflection flow when LLM is unavailable or JSON parse fails."""
     return [
@@ -481,30 +324,39 @@ class NLHandler:
             print(f"[Error] LLM processing failed: {e}")
             return [], f"Error: {str(e)}", DangerLevel.SAFE
 
+    def route_query_mode(self, query: str, context: Optional[dict] = None) -> str:
+        """Route `?` query via LLM: returns either "answer" or "commands"."""
+        if not self.llm_enabled:
+            return "commands"
+
+        try:
+            ctx = self._build_context(context, include_directory_listing=False)
+            prompt = self._create_router_prompt(query, ctx)
+            response = self._call_llm("nl_router", prompt)
+            return self._parse_router_route(response)
+        except Exception:
+            # Safe fallback: keep legacy executable path if routing fails.
+            return "commands"
+
     @staticmethod
-    def should_answer_directly(query: str) -> bool:
-        """True when a `?` query is informational and should be answered, not executed."""
-        q = (query or "").strip().lower()
-        if not q:
-            return False
+    def _parse_router_route(response: str) -> str:
+        """Parse nl_router output and return normalized route string."""
+        raw = NLHandler._extract_json(response)
+        if raw:
+            try:
+                data = json.loads(raw)
+                route = str(data.get("route", "")).strip().lower()
+                if route in {"answer", "commands"}:
+                    return route
+            except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                pass
 
-        # "what is in X" / "list folder" style prompts are operational requests.
-        if NLHandler._looks_path_or_listing_intent(q):
-            return False
-
-        info_patterns = (
-            r"^(what\s+does|what\s+is|explain|describe)\b",
-            r"^(how\s+do\s+i\s+use|how\s+to\s+use|usage\s+of|meaning\s+of)\b",
-            r"\b(help\s+with|what\s+is\s+the\s+difference\s+between)\b",
-        )
-        if any(re.search(p, q) for p in info_patterns):
-            return True
-
-        subject = NLHandler._extract_command_help_subject(q)
-        if subject and subject in _CLIARA_BUILTIN_COMMANDS:
-            return True
-
-        return False
+        text = (response or "").strip().lower()
+        if re.search(r"\broute\b[^a-z]+answer\b", text):
+            return "answer"
+        if re.search(r"\broute\b[^a-z]+commands\b", text):
+            return "commands"
+        return "commands"
 
     def answer_query(
         self,
@@ -513,10 +365,6 @@ class NLHandler:
         stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Answer informational questions directly in plain text (no command execution)."""
-        deterministic = self._builtin_answer_fastpath(query)
-        if deterministic:
-            return deterministic
-
         if not self.llm_enabled:
             return "LLM is not configured. Run setup-llm to enable direct natural-language answers."
 
@@ -526,42 +374,6 @@ class NLHandler:
             return self._call_llm_stream("cliara_qa", prompt, stream_callback).strip()
         except Exception as e:
             return f"Error while answering query: {e}"
-
-    @staticmethod
-    def _extract_command_help_subject(query: str) -> Optional[str]:
-        """Extract candidate command token from help/explain-style NL questions."""
-        q = (query or "").strip().lower()
-        if not q:
-            return None
-
-        patterns = (
-            r"(?:what\s+does|what\s+is|explain|describe|help\s+with|usage\s+of)\s+[`'\"]?([a-z0-9][a-z0-9._-]*)",
-            r"^[`'\"]?([a-z0-9][a-z0-9._-]*)[`'\"]?\s+(?:help|usage|meaning)\b",
-        )
-        for pat in patterns:
-            m = re.search(pat, q)
-            if m:
-                return m.group(1).strip("`'\"")
-        return None
-
-    def _builtin_answer_fastpath(self, query: str) -> Optional[str]:
-        """Return deterministic direct answers for known Cliara built-in help questions."""
-        subject = self._extract_command_help_subject(query)
-        if not subject or subject not in _CLIARA_BUILTIN_COMMANDS:
-            return None
-
-        key = _CLIARA_HELP_KEY_ALIASES.get(subject, subject)
-
-        data = _CLIARA_BUILTIN_HELP.get(key)
-        if data is None:
-            return None
-
-        return (
-            f"{subject} is a Cliara built-in command (canonical: {data['canonical']}).\n"
-            f"- Purpose: {data['purpose']}\n"
-            f"- Usage: {data['usage']}\n"
-            f"- Related: {data['related']}"
-        )
 
     def _retry_nl_to_commands_json(self, prompt: str) -> str:
         """One-shot repair call when initial nl_to_commands output is malformed."""
@@ -801,6 +613,30 @@ class NLHandler:
         prompt += (
             "\nAnswer directly and autonomously. If asked about a Cliara command, explain it plainly "
             "with purpose, usage, and related commands. Do not ask the user to run a help command as the primary answer."
+        )
+        return prompt
+
+    def _create_router_prompt(self, query: str, context: dict) -> str:
+        """Create intent-routing prompt for the nl_router agent."""
+        os_name = context.get("os", "Unknown")
+        shell = context.get("shell", "unknown")
+        runtime = context.get("runtime", "Cliara")
+        cwd = context.get("cwd", "")
+        project_type = context.get("project_type", "")
+
+        prompt = f"User query: {query}\n\nContext:\n"
+        prompt += f"- Runtime: {runtime}\n"
+        prompt += f"- Host shell: {shell}\n"
+        prompt += f"- OS: {os_name}\n"
+        prompt += f"- CWD: {cwd}\n"
+        if project_type:
+            prompt += f"- Project type: {project_type}\n"
+        prompt += (
+            "- Cliara built-ins include: help, explain, push, deploy, session, config, theme/themes, "
+            "setup-llm, setup-ollama, status, macro aliases (mc/ml/ma/mr/mh).\n"
+        )
+        prompt += (
+            "\nClassify this into route=answer or route=commands and return strict JSON only."
         )
         return prompt
     

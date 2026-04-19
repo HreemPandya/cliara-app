@@ -1997,14 +1997,25 @@ class CliaraShell:
 
                 answer = self.nl_handler.answer_query(query, context, stream_callback=stream_cb)
 
-            print_header("\n" + "=" * 60)
-            print_info("ANSWER")
-            print_header("=" * 60)
-            if (answer or "").strip():
-                print(answer)
+            from rich.panel import Panel
+            from rich.markdown import Markdown
+            from rich.text import Text
+
+            accent = _ui_accent_style()
+            body = (answer or "").strip()
+            if body:
+                renderable = Markdown(body)
+                _cliara_console().print(
+                    Panel(
+                        renderable,
+                        title=Text("Answer", style=accent),
+                        subtitle=Text(f"? {query}", style="dim"),
+                        border_style=accent,
+                        padding=(0, 1),
+                    )
+                )
             else:
                 print_error("[Error] No answer content returned from the LLM.")
-            print_header("=" * 60 + "\n")
             return
 
         from rich.status import Status
@@ -2037,12 +2048,47 @@ class CliaraShell:
         if not commands:
             print_error(f"[Error] {explanation}")
             return
-        
-        # Show generated commands first, then explanation
-        _cliara_console().print("Generated commands:", style="magenta")
+
+        # Show generated commands and explanation with themed Rich UI.
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.syntax import Syntax
+        from rich.text import Text
+        from cliara.highlighting import ShellLexer
+
+        accent = _ui_accent_style()
+        theme_name = (self.config.get("theme") or "dracula").strip().lower()
+        _pygments_theme_map = {
+            "solarized": "solarized-dark",
+            "light": "native",
+            "nord": "dracula",
+            "catppuccin": "dracula",
+        }
+        pygments_theme = _pygments_theme_map.get(theme_name, theme_name)
+
+        cmd_table = Table(show_header=True, box=None, padding=(0, 1), header_style=accent)
+        cmd_table.add_column("#", style="dim", width=3)
+        cmd_table.add_column("Command", min_width=20)
         for i, cmd in enumerate(commands, 1):
-            _cliara_console().print(f"  {i}. {cmd}", style="magenta")
-        _cliara_console().print(f"\n[Explanation] {explanation}\n", style="magenta")
+            cmd_table.add_row(str(i), Syntax(cmd, lexer=ShellLexer(), theme=pygments_theme))
+
+        _cliara_console().print(
+            Panel(
+                cmd_table,
+                title=Text("Generated Commands", style=accent),
+                subtitle=Text(f"? {query}", style="dim"),
+                border_style=accent,
+                padding=(0, 1),
+            )
+        )
+        _cliara_console().print(
+            Panel(
+                (explanation or "").strip() or "No explanation provided.",
+                title=Text("Explanation", style=accent),
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
         
         # --save-as: save as macro instead of executing
         if save_as_name:
@@ -2082,13 +2128,20 @@ class CliaraShell:
             return
         
         # Execute commands
-        print_header("\n" + "="*60)
-        print_header("EXECUTING COMMANDS")
-        print_header("="*60 + "\n")
+        from rich.panel import Panel
+        from rich.text import Text
+        _cliara_console().print(
+            Panel(
+                Text("Executing generated commands", style="dim"),
+                title=Text("Execution", style=_ui_accent_style()),
+                border_style=_ui_accent_style(),
+                padding=(0, 1),
+            )
+        )
         
         for i, cmd in enumerate(commands, 1):
             print_info(f"[{i}/{len(commands)}] {cmd}")
-            print("-" * 60)
+            _cliara_console().rule(style="dim")
             success = self._execute_nl_generated_command(cmd)
             print()
             

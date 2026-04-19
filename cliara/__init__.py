@@ -11,7 +11,7 @@ A shell wrapper that lets you:
 __version__ = "0.4.5"
 __author__ = "Cliara Contributors"
 
-from cliara.shell import CliaraShell
+from cliara.shell_app.orchestrator import CliaraShell
 from cliara.macros import MacroManager
 from cliara.safety import SafetyChecker
 

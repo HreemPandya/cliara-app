@@ -56,18 +56,21 @@ railway domain
 
 ### 4. Wire up the Cliara client
 
-After Railway gives you a URL (e.g. `https://cliara-cloud.up.railway.app`), update two places in the client repo:
-
-**`cliara/nl_handler.py`** — change the `cliara` base URL:
-```python
-"cliara": "https://cliara-cloud.up.railway.app/v1",
-```
+After Railway gives you a URL (e.g. `https://cliara-cloud.up.railway.app`), configure the client gateway URL in `cliara/auth.py` (or via env vars):
 
 **`cliara/auth.py`** — fill in the Supabase constants:
 ```python
 _SUPABASE_URL = "https://xxx.supabase.co"
 _SUPABASE_ANON_KEY = "eyJ..."   # anon/public key — safe to ship in client
 _CLIARA_GATEWAY_URL = "https://cliara-cloud.up.railway.app/v1"
+```
+
+You can also override these at runtime with environment variables:
+
+```bash
+CLIARA_SUPABASE_URL=https://xxx.supabase.co
+CLIARA_SUPABASE_ANON_KEY=eyJ...
+CLIARA_GATEWAY_URL=https://cliara-cloud.up.railway.app/v1
 ```
 
 ### 5. Test end-to-end

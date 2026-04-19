@@ -34,7 +34,7 @@ from rich.text import Text
 from cliara.console import get_console
 
 if TYPE_CHECKING:
-    from cliara.shell import CliaraShell
+    from cliara.shell_app.orchestrator import CliaraShell
 
 # ---------------------------------------------------------------------------
 # Model catalogue
@@ -352,7 +352,7 @@ def _print_recommended_models_table(already_have: Set[str]) -> None:
 def run(shell: "CliaraShell") -> None:  # noqa: C901  (wizard flow is inherently long)
     """Run the interactive Ollama setup wizard."""
     # Import shell print helpers lazily to avoid circular imports
-    from cliara.shell import (
+    from cliara.shell_app.orchestrator import (
         print_dim, print_error, print_header, print_info,
         print_success, print_warning,
     )

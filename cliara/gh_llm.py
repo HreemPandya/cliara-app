@@ -9,7 +9,7 @@ import re
 from typing import Any, Dict, Optional, Tuple
 
 from cliara.config import Config
-from cliara.nl_handler import NLHandler
+from cliara.nl.service import NLHandler
 from cliara.safety import SafetyChecker
 
 _CLOUD_MODEL_PREFIXES = ("gpt-", "claude-", "llama-3.", "gemini-", "mixtral-", "text-")

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Natural Language handler for Cliara (Phase 2).
 Converts natural language queries to shell commands using LLM.
 """
@@ -16,134 +16,35 @@ from typing import List, Tuple, Optional, Dict, Any, Callable
 
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.agents import AGENT_REGISTRY
-from cliara.auth import get_gateway_url
+from cliara.nl.constants import (
+    CLIARA_BUILTIN_COMMANDS,
+    EMBEDDING_MODEL,
+    OPENAI_COMPAT_PROVIDERS,
+    PROVIDER_BASE_URLS,
+    PROVIDER_DEFAULT_MODELS,
+    STREAMING_SAFE_AGENTS,
+)
+from cliara.nl.session_reflect import (
+    default_session_reflect_plan,
+    validate_session_reflect_steps,
+)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+# Backward-compatible aliases expected by existing imports/tests.
+_CLIARA_BUILTIN_COMMANDS = CLIARA_BUILTIN_COMMANDS
+_OPENAI_COMPAT_PROVIDERS = OPENAI_COMPAT_PROVIDERS
+_PROVIDER_BASE_URLS = PROVIDER_BASE_URLS
+_PROVIDER_DEFAULT_MODELS = PROVIDER_DEFAULT_MODELS
+_STREAMING_SAFE_AGENTS = STREAMING_SAFE_AGENTS
 
-# Default model used when no per-task or global override is configured.
-_PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
-    "openai":    "gpt-4o-mini",
-    "anthropic": "claude-3-haiku-20240307",
-    "ollama":    "gemma4",
-    "groq":      "llama-3.3-70b-versatile",
-    "gemini":    "gemini-1.5-flash",
-    "cliara":    "llama-3.3-70b-versatile",  # Gateway picks the best available model
-}
-
-# Providers that use the OpenAI-compatible client (openai SDK with custom base_url)
-_OPENAI_COMPAT_PROVIDERS = frozenset({"openai", "ollama", "groq", "gemini", "cliara"})
-
-# Base URLs for OpenAI-compatible cloud providers (not ollama — that's dynamic)
-# Cliara URL comes from auth.py (single source of truth; respects CLIARA_GATEWAY_URL env).
-_PROVIDER_BASE_URLS: Dict[str, str] = {
-    "groq":   "https://api.groq.com/openai/v1",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    "cliara": get_gateway_url(),
-}
-
-# Agents whose output is plain text and can be streamed token-by-token to the
-# console.  JSON-returning agents must NOT stream to the console because raw
-# JSON appearing mid-parse gives broken UX.
-_STREAMING_SAFE_AGENTS = frozenset({
-    "explain",
-    "explain_output",
-    "commit_message",
-    "copilot_explain",
-    "readme",
-    "chat_polish",
-    "cliara_qa",
-})
-
-# Cliara built-ins (and common shortcuts) so NL can treat "what does mc do"
-# as a Cliara command-help intent rather than a host-shell lookup.
-_CLIARA_BUILTIN_COMMANDS = frozenset({
-    "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "upgrade-cliara",
-    "explain", "lint", "push", "session", "deploy", "macro", "config", "theme", "themes",
-    "setup-ollama", "setup-llm", "cliara-login", "cliara-logout", "use",
-    # Macro shortcuts
-    "m", "mc", "ml", "mr", "ma", "me", "md", "ms", "mst", "msh", "msr", "mch", "mrn", "mh",
-    # Session shortcuts
-    "ss", "se",
-})
 
 def _default_session_reflect_plan() -> List[Dict[str, Any]]:
-    """Offline reflection flow when LLM is unavailable or JSON parse fails."""
-    return [
-        {
-            "id": "session_shape",
-            "kind": "choice",
-            "question": "How would you describe this session for someone who only reads your reflection later?",
-            "hint": "Pick the closest fit.",
-            "options": [
-                "Exploring or learning — no single deliverable yet",
-                "Made progress — more work planned for later",
-                "Completed a concrete task or milestone",
-                "Blocked, interrupted, or mostly troubleshooting",
-            ],
-        },
-        {
-            "id": "what_mattered",
-            "kind": "long_text",
-            "question": "In plain language, what did you accomplish or learn, and why does it matter?",
-            "hint": "This is the main story — not a list of commands.",
-        },
-        {
-            "id": "risks_or_deps",
-            "kind": "text",
-            "question": "Any blockers, dependencies, or risks the next person should know? (one line, or skip)",
-            "hint": "Optional.",
-        },
-        {
-            "id": "next_move",
-            "kind": "text",
-            "question": "What is the single most useful next step when work resumes?",
-            "hint": "Be specific if you can.",
-        },
-    ]
+    """Backward-compatible wrapper for session_reflect default plan."""
+    return default_session_reflect_plan()
 
 
 def _validate_session_reflect_steps(data: Any) -> Optional[List[Dict[str, Any]]]:
-    """Validate LLM JSON for session_reflect; return sanitized steps or None."""
-    if not isinstance(data, dict):
-        return None
-    steps_in = data.get("steps")
-    if not isinstance(steps_in, list):
-        return None
-    out: List[Dict[str, Any]] = []
-    for raw in steps_in:
-        if not isinstance(raw, dict):
-            continue
-        kind = raw.get("kind")
-        if kind not in ("choice", "text", "long_text"):
-            continue
-        q = raw.get("question")
-        if not isinstance(q, str) or not q.strip():
-            continue
-        sid = raw.get("id")
-        if not isinstance(sid, str) or not sid.strip():
-            sid = "step_%d" % len(out)
-        step: Dict[str, Any] = {
-            "id": sid.strip()[:80],
-            "kind": kind,
-            "question": q.strip()[:1200],
-        }
-        hint = raw.get("hint")
-        if isinstance(hint, str) and hint.strip():
-            step["hint"] = hint.strip()[:400]
-        if kind == "choice":
-            opts = raw.get("options")
-            if not isinstance(opts, list):
-                continue
-            clean = [str(o).strip()[:500] for o in opts if str(o).strip()]
-            if len(clean) < 2:
-                continue
-            step["options"] = clean[:6]
-        out.append(step)
-        if len(out) >= 8:
-            break
-    if len(out) < 2:
-        return None
-    return out
+    """Backward-compatible wrapper for session_reflect step validation."""
+    return validate_session_reflect_steps(data)
 
 
 class NLHandler:
@@ -216,7 +117,7 @@ class NLHandler:
                 if provider == "ollama":
                     url = base_url or "http://localhost:11434"
                     kwargs["base_url"] = url.rstrip("/") + "/v1"
-                    # Probe Ollama before marking as ready — fail fast with a
+                    # Probe Ollama before marking as ready ΓÇö fail fast with a
                     # clear message rather than hanging on the first query.
                     import urllib.request
                     import urllib.error
@@ -719,10 +620,10 @@ class NLHandler:
         out = f"{self.provider} API error: {err}"
         if "Application not found" in msg and "404" in msg:
             out += (
-                "\n  Hint: The hosted API (often Railway) returned “Application not found”. "
+                "\n  Hint: The hosted API (often Railway) returned ΓÇ£Application not foundΓÇ¥. "
                 "That usually means the gateway URL is wrong, the service is not reachable, "
-                "or public networking was misconfigured — not a problem with your macro text. "
-                "Check CLIARA_GATEWAY_URL, try GET …/health on the gateway host, or set "
+                "or public networking was misconfigured ΓÇö not a problem with your macro text. "
+                "Check CLIARA_GATEWAY_URL, try GET ΓÇª/health on the gateway host, or set "
                 "OPENAI_API_KEY / GROQ_API_KEY to use a provider directly."
             )
         return out
@@ -736,7 +637,7 @@ class NLHandler:
         max_tokens: int,
         stream_callback: Optional[Callable[[str], None]],
     ) -> str:
-        """OpenAI / Ollama (OpenAI-compatible) completion — with optional streaming."""
+        """OpenAI / Ollama (OpenAI-compatible) completion ΓÇö with optional streaming."""
         request_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": [
@@ -798,7 +699,7 @@ class NLHandler:
         max_tokens: int,
         stream_callback: Optional[Callable[[str], None]],
     ) -> str:
-        """Anthropic completion — with optional streaming."""
+        """Anthropic completion ΓÇö with optional streaming."""
         try:
             if stream_callback is not None:
                 with self.llm_client.messages.stream(
@@ -1139,7 +1040,7 @@ class NLHandler:
                 response, nl_description
             )
             if not commands:
-                # Model returned unusable text — fall back to command-only agent
+                # Model returned unusable text ΓÇö fall back to command-only agent
                 commands_fb = self.generate_commands_from_nl(nl_description, context)
                 if (
                     commands_fb
@@ -1184,7 +1085,7 @@ class NLHandler:
             os_name = context_info.get("os", "Unknown")
             shell = context_info.get("shell", "bash")
 
-            prompt = f"""Explain this command briefly. Use short bullet points (plain "-" dashes) to break it down so it's easy to scan. No markdown formatting like bold, headers, or code blocks. Keep it concise — no long paragraphs. If it's dangerous, mention that too.
+            prompt = f"""Explain this command briefly. Use short bullet points (plain "-" dashes) to break it down so it's easy to scan. No markdown formatting like bold, headers, or code blocks. Keep it concise ΓÇö no long paragraphs. If it's dangerous, mention that too.
 
 OS: {os_name}, Shell: {shell}
 
@@ -1200,7 +1101,7 @@ Command: {command}"""
         """Provide a basic stub explanation when LLM is not available."""
         parts = command.split()
         if not parts:
-            return "Empty command — nothing to explain."
+            return "Empty command ΓÇö nothing to explain."
 
         base = parts[0]
         explanations = {
@@ -1226,7 +1127,7 @@ Command: {command}"""
 
         hint = explanations.get(base, f"'{base}' is a shell command.")
         return (
-            f"LLM not configured — showing basic info only.\n\n"
+            f"LLM not configured ΓÇö showing basic info only.\n\n"
             f"  Command: {command}\n"
             f"  Base program: {base}\n"
             f"  {hint}\n\n"
@@ -1323,19 +1224,19 @@ Context:
         stderr: str,
     ) -> str:
         lines = [
-            "LLM not configured — stub summary only.",
+            "LLM not configured ΓÇö stub summary only.",
             f"- Command: {command}",
             f"- Exit code: {exit_code}",
         ]
         o = (stdout or "").strip()
         e = (stderr or "").strip()
         if o:
-            snippet = o[:400] + ("…" if len(o) > 400 else "")
+            snippet = o[:400] + ("ΓÇª" if len(o) > 400 else "")
             lines.append(f"- Stdout ({len(o)} chars): {snippet!r}")
         else:
             lines.append("- Stdout: (empty)")
         if e:
-            snippet = e[:400] + ("…" if len(e) > 400 else "")
+            snippet = e[:400] + ("ΓÇª" if len(e) > 400 else "")
             lines.append(f"- Stderr ({len(e)} chars): {snippet!r}")
         else:
             lines.append("- Stderr: (empty)")
@@ -1661,9 +1562,9 @@ Rules (Conventional Commits):
   docs (documentation only), style (formatting/lint, no logic), test (tests), chore (misc/deps/config)
 - Extras: perf (performance), ci (CI/CD), build (build/packaging/deps), revert (undo a commit)
 - Prefer the primary change type (usually feat or fix) when several apply
-- Keep the line reasonably short (~50–72 chars when practical)
+- Keep the line reasonably short (~50ΓÇô72 chars when practical)
 - Be specific about what the diff actually changes
-- Return ONLY the commit message — one line, no quotes, no explanation"""
+- Return ONLY the commit message ΓÇö one line, no quotes, no explanation"""
 
             response = self._call_llm_stream("commit_message", prompt, stream_callback)
             # Strip any surrounding quotes the model might add
@@ -1741,7 +1642,7 @@ Rules (Conventional Commits):
         return f"{prefix}: update {len(files)} files"
 
     # ------------------------------------------------------------------
-    # Deploy steps (no platform detected — user describes, deploy agent suggests steps)
+    # Deploy steps (no platform detected ΓÇö user describes, deploy agent suggests steps)
     # ------------------------------------------------------------------
 
     def generate_deploy_steps(
@@ -1832,7 +1733,7 @@ Each step is a single shell command. Be concise and project-appropriate."""
             return None
 
     # ------------------------------------------------------------------
-    # Error Translation (intercept stderr → plain-English explanation)
+    # Error Translation (intercept stderr ΓåÆ plain-English explanation)
     # ------------------------------------------------------------------
 
     def translate_error(
@@ -2016,7 +1917,7 @@ Rules:
 
         elif "syntaxerror" in stderr_lower:
             explanation = (
-                "Python encountered a syntax error — there is likely a typo, "
+                "Python encountered a syntax error ΓÇö there is likely a typo, "
                 "missing colon, or unmatched bracket in the source code."
             )
 
@@ -2036,7 +1937,7 @@ Rules:
 
         elif "merge conflict" in stderr_lower or "conflict" in stderr_lower and "git" in command:
             explanation = (
-                "Git encountered merge conflicts — the same lines were changed in "
+                "Git encountered merge conflicts ΓÇö the same lines were changed in "
                 "both branches. You need to resolve them manually."
             )
 
@@ -2055,7 +1956,7 @@ Rules:
             )
 
         else:
-            # No pattern matched — give a generic message
+            # No pattern matched ΓÇö give a generic message
             # Pull the last non-empty stderr line as a summary
             last_line = ""
             for line in reversed(stderr.strip().splitlines()):

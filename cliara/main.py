@@ -11,13 +11,18 @@ from typing import Optional
 
 from cliara import __version__
 from cliara.config import Config
-from cliara.shell import CliaraShell
+from cliara.shell_app.orchestrator import CliaraShell
 
 
 def _run_login():
     """Run OAuth login flow (standalone, no REPL)."""
     from cliara.auth import login
-    from cliara.shell import print_success, print_error, print_warning, print_dim
+    from cliara.shell_app.orchestrator import (
+        print_success,
+        print_error,
+        print_warning,
+        print_dim,
+    )
 
     print()
     print_dim("  Cliara Login — Zero-Friction Cloud Access")
@@ -67,7 +72,7 @@ def _run_logout():
 def _run_status(config_dir=None):
     """Show auth and LLM status (standalone, no REPL)."""
     from cliara.auth import load_token, get_valid_token
-    from cliara.shell import print_success, print_warning, print_dim
+    from cliara.shell_app.orchestrator import print_success, print_warning, print_dim
 
     print()
     print_dim("  Cliara Status")
@@ -115,7 +120,7 @@ def _init_nl_handler_headless(config: Config):
     Build an NLHandler with LLM ready for one-shot queries (no REPL, no wizard).
     Returns NLHandler or None if the LLM could not be initialized.
     """
-    from cliara.nl_handler import NLHandler
+    from cliara.nl.service import NLHandler
     from cliara.safety import SafetyChecker
 
     safety = SafetyChecker()

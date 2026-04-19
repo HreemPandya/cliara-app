@@ -36,7 +36,7 @@ from rich.text import Text
 from cliara import icons
 
 if TYPE_CHECKING:
-    from cliara.shell import CliaraShell
+    from cliara.shell_app.orchestrator import CliaraShell
 
 
 def _wiz_console():
@@ -195,7 +195,7 @@ def auto_detect_ollama(shell: "CliaraShell") -> bool:
     ok = _apply_env_and_reinit(shell, "ollama", "OLLAMA_BASE_URL", _OLLAMA_DEFAULT_URL)
     if ok:
         try:
-            from cliara.shell import print_success
+            from cliara.shell_app.orchestrator import print_success
             model = shell.nl_handler.resolved_model_for_display()
             print_success(
                 f"  LLM: OLLAMA · {model} auto-detected and connected  "

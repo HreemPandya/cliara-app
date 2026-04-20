@@ -4,6 +4,7 @@ import platform
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cliara import icons
 from cliara import regression
 from cliara.chat_export import (
     default_shell_label,
@@ -185,7 +186,7 @@ class SessionCommandMixin:
         if s.commands:
             print_dim("  Last commands:")
             for c in s.commands[-8:]:
-                status = "OK" if c.exit_code == 0 else "X"
+                status = icons.OK if c.exit_code == 0 else icons.FAIL
                 short = c.command[:60] + "..." if len(c.command) > 60 else c.command
                 print(f"    {status} {short}")
         if s.notes:
@@ -259,7 +260,7 @@ class SessionCommandMixin:
         if s.commands:
             lines.append("Recent commands (newest last):")
             for c in s.commands[-25:]:
-                st = "ok" if c.exit_code == 0 else f"exit {c.exit_code}"
+                st = "success" if c.exit_code == 0 else f"exit {c.exit_code}"
                 cmd = c.command[:160] + "..." if len(c.command) > 160 else c.command
                 lines.append(f"  [{st}] {cmd}")
         if s.notes:
@@ -339,7 +340,7 @@ class SessionCommandMixin:
         if s.commands:
             summary_body.append("\nLast commands:\n", style="dim")
             for c in s.commands[-5:]:
-                mark = "OK " if c.exit_code == 0 else "X "
+                mark = f"{icons.OK} " if c.exit_code == 0 else f"{icons.FAIL} "
                 cmd = c.command[:76] + "..." if len(c.command) > 76 else c.command
                 summary_body.append(mark, style="green" if c.exit_code == 0 else "yellow")
                 summary_body.append(cmd + "\n", style="dim")

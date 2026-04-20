@@ -353,8 +353,6 @@ class _StartupProgress:
         self.current = 0
         self._label = ""
         self._finished = False
-        # Check mark / cross  -  keep it simple for all terminals
-        self._check = _c("32", "OK") if _COLOR else "OK"
 
     # -- internal helpers ---------------------------------------------------
     def _render(self):

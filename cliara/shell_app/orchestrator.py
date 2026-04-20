@@ -838,7 +838,7 @@ class CliaraShell(
                             message.append(("class:prompt-exit-fail", f"X {self.last_exit_code}"))
                             message.append(("class:prompt-sep", " "))
                         elif self.last_command:
-                            message.append(("class:prompt-exit-success", "OK"))
+                            message.append(("class:prompt-exit-success", icons.OK))
                             message.append(("class:prompt-sep", " "))
                     message.append(("class:prompt-name", "cliara"))
                     message.append(("class:prompt-sep", " "))
@@ -863,7 +863,7 @@ class CliaraShell(
                         if self.last_exit_code != 0:
                             exit_indicator = f"X {self.last_exit_code} "
                         elif self.last_command:
-                            exit_indicator = "OK "
+                            exit_indicator = f"{icons.OK} "
 
                     # Duration in plain mode: show on its own line (we can't right-align without prompt_toolkit)
                     if self._last_command_elapsed is not None:
@@ -1105,7 +1105,7 @@ class CliaraShell(
                 return
             description = input("Description (optional): ").strip() or query
             self.macros.add(save_as_name, commands, description)
-            print_success(f"[OK] Macro '{save_as_name}' saved with {len(commands)} command(s)")
+            print_success(f"[{icons.OK}] Macro '{save_as_name}' saved with {len(commands)} command(s)")
             return
         
         # Safety check with copy-to-clipboard option
@@ -1155,7 +1155,7 @@ class CliaraShell(
                 break
         else:
             print_header("="*60)
-            print_success("[OK] All commands completed successfully")
+            print_success(f"[{icons.OK}] All commands completed successfully")
             print_header("="*60 + "\n")
         
         # Save to history for "save last"
@@ -1840,7 +1840,7 @@ class CliaraShell(
                 padding=(0, 1),
             ))
         except Exception:
-            console.print(f"[green]OK Theme set to '{name}'.[/green]")
+            console.print(f"[green]{icons.OK} Theme set to '{name}'.[/green]")
         console.print()
     
     def _run_theme_picker(self, themes: list, current: str):
@@ -1903,7 +1903,7 @@ class CliaraShell(
                 rows.append((f"{bg}fg:{fg} bold", swatch))
                 rows.append((f"{bg}bold" if is_sel else f"fg:{fg}", f" {name:<13}"))
                 if is_cur:
-                    rows.append((f"{bg}fg:ansiyellow bold", " OK active"))
+                    rows.append((f"{bg}fg:ansiyellow bold", f" {icons.OK} active"))
                 rows.append(("", "\n"))
             return rows
 

@@ -1567,9 +1567,20 @@ Rules (Conventional Commits):
 - Return ONLY the commit message ΓÇö one line, no quotes, no explanation"""
 
             response = self._call_llm_stream("commit_message", prompt, stream_callback)
-            # Strip any surrounding quotes the model might add
-            msg = (response or "").strip().strip("\"'")
-            return msg
+
+            # Normalise model output to a single conventional-commit line.
+            raw = (response or "").strip()
+            if raw:
+                # Keep the first non-empty line and remove wrapper characters
+                # that models sometimes add around short text responses.
+                first_line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
+                msg = first_line.strip().strip("`\"'")
+                if msg:
+                    return msg
+
+            # If the model returns an empty/blank response, fall back so push
+            # can still proceed instead of aborting after staging.
+            return self._stub_commit_message(files, context)
 
         except Exception as e:
             # Fall back to stub on any failure

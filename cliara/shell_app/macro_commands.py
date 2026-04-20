@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from cliara import icons
 from cliara.safety import DangerLevel
 from cliara.translation.core import command_exists
 from cliara.shell_app.runtime import (
@@ -253,7 +254,7 @@ class MacroCommandMixin:
             return
         self.macros.add(name, commands, description, params=params or None)
         param_hint = f" [{', '.join(params)}]" if params else ""
-        print_success(f"\n[OK] Macro '{name}' created with {len(commands)} command(s){param_hint}")
+        print_success(f"\n[{icons.OK}] Macro '{name}' created with {len(commands)} command(s){param_hint}")
 
     def macro_create(self, raw: str):
         """Create a macro from plain English; LLM suggests name, description, and ordered commands."""
@@ -374,7 +375,7 @@ class MacroCommandMixin:
             print_warning("[Cancelled]")
             return
         self.macros.add(name, commands, description)
-        print_success(f"\n[OK] Macro '{name}' saved with {len(commands)} command(s)")
+        print_success(f"\n[{icons.OK}] Macro '{name}' saved with {len(commands)} command(s)")
 
     def macro_add_nl(self, name: Optional[str] = None):
         """Create a macro using natural language.
@@ -625,7 +626,7 @@ class MacroCommandMixin:
 
         self.macros.add(name, commands, description, params=params or None)
         param_hint = f" [{', '.join(params)}]" if params else ""
-        print_success(f"\n[OK] Macro '{name}' updated with {len(commands)} command(s){param_hint}")
+        print_success(f"\n[{icons.OK}] Macro '{name}' updated with {len(commands)} command(s){param_hint}")
 
     def macro_delete(self, name: str):
         """Delete a macro."""
@@ -640,7 +641,7 @@ class MacroCommandMixin:
         confirm = input(f"Delete macro '{name}'? (y/n): ").strip().lower()
         if confirm in ['y', 'yes']:
             self.macros.delete(name)
-            print_success(f"[OK] Macro '{name}' deleted")
+            print_success(f"[{icons.OK}] Macro '{name}' deleted")
         else:
             print_warning("[Cancelled]")
     
@@ -669,7 +670,7 @@ class MacroCommandMixin:
         # Re-create under new name, then delete old
         self.macros.add(new_name, macro.commands, macro.description, tags=macro.tags)
         self.macros.delete(old_name)
-        print_success(f"[OK] Macro '{old_name}' renamed to '{new_name}'")
+        print_success(f"[{icons.OK}] Macro '{old_name}' renamed to '{new_name}'")
 
     def macro_save_last(self, args: str):
         """Save last executed commands as a macro."""
@@ -702,7 +703,7 @@ class MacroCommandMixin:
             return
         description = input("Description (optional): ").strip()
         self.macros.add(name, last_commands, description)
-        print_success(f"[OK] Macro '{name}' saved!")
+        print_success(f"[{icons.OK}] Macro '{name}' saved!")
     
     def macro_help(self):
         """Show macro help (short forms are the default; ``macro ...`` is optional)."""
@@ -840,7 +841,7 @@ class MacroCommandMixin:
                 break
         else:
             print_header("="*60)
-            print_success(f"[OK] Macro '{name}' completed successfully")
+            print_success(f"[{icons.OK}] Macro '{name}' completed successfully")
             print_header("="*60 + "\n")
             macro.mark_run()
             self.macros.storage.add(macro, user_id=self.macros.user_id)
@@ -1008,12 +1009,12 @@ class MacroCommandMixin:
 
             macro.mark_run()
             self.macros.storage.add(macro, user_id=self.macros.user_id)
-            print_success(f"[OK] {macro.name} completed")
+            print_success(f"[{icons.OK}] {macro.name} completed")
             print()
 
         print_header("=" * 60)
         print_success(
-            f"[OK] Chain complete  -  {len(macros)} macros, {total_cmds} commands"
+            f"[{icons.OK}] Chain complete  -  {len(macros)} macros, {total_cmds} commands"
         )
         print_header("=" * 60 + "\n")
 

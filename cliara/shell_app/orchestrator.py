@@ -495,14 +495,14 @@ class CliaraShell(
             "",
             M("heading", "Quick tips"),
             "",
-            f"  ... {M('kbd', f'{nl} <query>')}{M('body', '   Plain English  ->  shell commands  ')}{M('hint', _nl_hint)}",
-            f"  ... {M('kbd', f'{nl} fix')}{M('body', '            After error  -  what broke + how to fix')}",
-            f"  ... {M('kbd', 'explain last')}{M('body', '     Last run  -  output + exit code  ')}{M('hint', f'({nl} explain last)')}",
-            f"  ... {M('kbd', f'{nl} find ...')}{M('body', '     Search history by meaning  ')}{M('hint', f'({nl} when did I ...)')}",
-            f"  ... {M('kbd', 'mc · ma · ml · ms')}{M('body', ' Default macro commands  -  create, add, list, save last run')}",
-            f"  ... {M('kbd', 'push')}{M('body', '               Smart git  -  suggest commit + push')}",
-            f"  ... {M('kbd', 'ss / se · chat copy')}{M('body', ' Start/end task sessions; copy last run for AI editors')}",
-            f"  ... {M('kbd', 'help · tips · exit')}{M('body', ' Full command list · show tips again · quit')}",
+            f"  {M('kbd', f'{nl} <query>')}{M('body', '   Plain English  ->  shell commands  ')}{M('hint', _nl_hint)}",
+            f"  {M('kbd', f'{nl} fix')}{M('body', '            After error  -  what broke + how to fix')}",
+            f"  {M('kbd', 'explain last')}{M('body', '     Last run  -  output + exit code  ')}{M('hint', f'({nl} explain last)')}",
+            f"  {M('kbd', f'{nl} find ...')}{M('body', '     Search history by meaning  ')}{M('hint', f'({nl} when did I ...)')}",
+            f"  {M('kbd', 'mc · ma · ml · ms')}{M('body', ' Default macro commands  -  create, add, list, save last run')}",
+            f"  {M('kbd', 'push')}{M('body', '               Smart git  -  suggest commit + push')}",
+            f"  {M('kbd', 'ss / se · chat copy')}{M('body', ' Start/end task sessions; copy last run for AI editors')}",
+            f"  {M('kbd', 'help · tips · exit')}{M('body', ' Full command list · show tips again · quit')}",
             "",
             rule,
             "",
@@ -1882,6 +1882,8 @@ class CliaraShell(
         # "?"? State "?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?
         selected_index = [themes.index(current) if current in themes else 0]
         n = len(themes)
+        enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+        swatch = "██████" if ("utf" in enc or "65001" in enc) else "******"
 
         def _fg(theme_name: str) -> str:
             """Return the plain ANSI fg color for a theme (strips 'bold')."""
@@ -1898,8 +1900,8 @@ class CliaraShell(
                 bg = "bg:ansibrightblack " if is_sel else ""
 
                 rows.append((f"{bg}fg:ansiwhite bold" if is_sel else "", " ❯ " if is_sel else "   "))
-                rows.append((f"{bg}fg:{fg} bold", "####"))
-                rows.append((f"{bg}bold" if is_sel else f"fg:{fg}", f"  {name:<13}"))
+                rows.append((f"{bg}fg:{fg} bold", swatch))
+                rows.append((f"{bg}bold" if is_sel else f"fg:{fg}", f" {name:<13}"))
                 if is_cur:
                     rows.append((f"{bg}fg:ansiyellow bold", " OK active"))
                 rows.append(("", "\n"))

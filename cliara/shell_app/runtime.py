@@ -97,7 +97,22 @@ def print_info(msg: str):
 
 
 def print_header(msg: str):
-    """Print a bold header message."""
+    """Print a bold header message; render ASCII rulers as Rich rules."""
+    text = str(msg)
+    m = re.fullmatch(r"(\n*)([=-])\2{2,}(\n*)", text)
+    if m:
+        from rich.rule import Rule
+
+        lead, char, tail = m.groups()
+        console = _cliara_console()
+        if lead:
+            console.print("\n" * lead.count("\n"), end="")
+        style = _ui_accent_style() if char == "=" else "dim"
+        console.print(Rule(style=style))
+        if tail:
+            console.print("\n" * tail.count("\n"), end="")
+        return
+
     _cliara_console().print(msg, style="bold")
 
 

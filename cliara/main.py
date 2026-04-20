@@ -14,6 +14,32 @@ from cliara.config import Config
 from cliara.shell_app.orchestrator import CliaraShell
 
 
+def _ensure_utf8_runtime() -> None:
+    """Best-effort UTF-8 setup for all Cliara command paths."""
+    import os
+
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleCP(65001)
+            kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+
+
 def _run_login():
     """Run OAuth login flow (standalone, no REPL)."""
     from cliara.auth import login
@@ -194,6 +220,8 @@ def _run_ask(query: str, *, config_dir: Optional[str] = None, shell_override: Op
 
 def main():
     """Main entry point for Cliara."""
+    _ensure_utf8_runtime()
+
     parser = argparse.ArgumentParser(
         description="Cliara - AI-powered shell with natural language and macros",
         formatter_class=argparse.RawDescriptionHelpFormatter,

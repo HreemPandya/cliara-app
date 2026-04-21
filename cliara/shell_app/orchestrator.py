@@ -1234,8 +1234,7 @@ class CliaraShell(
         styles = get_tips_panel_styles(theme_name)
         console = _cliara_console()
 
-        # Keep output rendering stable across themes by mapping known aliases to
-        # dark-friendly Pygments themes used elsewhere in Cliara.
+        # Keep syntax rendering consistent with other command views.
         _pygments_theme_map = {
             "solarized": "solarized-dark",
             "light": "native",
@@ -1287,23 +1286,6 @@ class CliaraShell(
             if idx < len(raw_lines) - 1:
                 explanation_text.append("\n")
 
-        exit_ok = self.last_exit_code == 0
-        exit_icon = icons.OK if exit_ok else icons.FAIL
-        exit_style = "bold green" if exit_ok else "bold red"
-
-        exit_text = Text()
-        exit_text.append("Exit: ", style=styles["meta"])
-        exit_text.append(f"{exit_icon} {self.last_exit_code}", style=exit_style)
-
-        output_text = Text()
-        output_text.append("Captured output: ", style=styles["meta"])
-        output_parts = []
-        if stdout.strip():
-            output_parts.append(f"stdout {len(stdout)} chars")
-        if stderr.strip():
-            output_parts.append(f"stderr {len(stderr)} chars")
-        output_text.append(", ".join(output_parts) if output_parts else "none", style=styles["hint"])
-
         short_cmd = self.last_command.strip()
         if len(short_cmd) > 88:
             short_cmd = short_cmd[:85] + "..."
@@ -1315,9 +1297,6 @@ class CliaraShell(
         body = Group(
             Text("Command", style=styles["heading"]),
             Syntax(self.last_command, lexer=ShellLexer(), theme=pygments_theme, word_wrap=True),
-            Text("-" * 36, style=styles["rule"]),
-            exit_text,
-            output_text,
             Text(""),
             Text("What it means", style=styles["heading"]),
             explanation_text,

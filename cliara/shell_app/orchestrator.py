@@ -75,6 +75,7 @@ from cliara.shell_app.runtime import (
     _NullTimer,
     _LiveTimer,
     _cliara_console,
+    _ui_accent_style,
     _fmt_path,
     _is_explain_last_rest,
     _is_semantic_history_search_intent,

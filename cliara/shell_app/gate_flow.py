@@ -60,7 +60,6 @@ class GateFlowMixin:
 
         if non_interactive:
             if level == DangerLevel.SAFE:
-                print_warning(f"  -> {ra.explanation}")
                 return True
             print_warning("  [Skipped] Non-interactive (no TTY); risky commands are not run.")
             return False
@@ -69,6 +68,4 @@ class GateFlowMixin:
             self._inline_skip_once = False
             return True
 
-        return self._copilot_gate.confirm_command(
-            command, ra, source_label="typed",
-        )
+        return self._copilot_gate.confirm_command(command, ra)

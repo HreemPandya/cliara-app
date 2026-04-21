@@ -1222,34 +1222,118 @@ class CliaraShell(
             self.handle_explain(self.last_command, offer_run=False)
             return
 
-        print_info("\n[Explain last]")
-        print_dim(f"         Command:   {self.last_command}")
-        print_dim(f"         Exit code: {self.last_exit_code}\n")
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.status import Status
+        from rich.syntax import Syntax
+        from rich.text import Text
+        from cliara.console import get_ui_theme
+        from cliara.highlighting import ShellLexer, get_tips_panel_styles
+
+        theme_name = get_ui_theme()
+        styles = get_tips_panel_styles(theme_name)
+        console = _cliara_console()
+
+        # Keep output rendering stable across themes by mapping known aliases to
+        # dark-friendly Pygments themes used elsewhere in Cliara.
+        _pygments_theme_map = {
+            "solarized": "solarized-dark",
+            "light": "native",
+            "nord": "dracula",
+            "catppuccin": "dracula",
+        }
+        pygments_theme = _pygments_theme_map.get(theme_name, theme_name)
 
         context = {
             "cwd": str(Path.cwd()),
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
-        stream_cb = (
-            self._stream_callback_for_console()
-            if self.config.get("stream_llm", True)
-            else None
+
+        # Render once at the end so the output stays readable and consistent.
+        with Status("[dim]Analyzing last command output...[/dim]", spinner="dots", console=console):
+            explanation = self.nl_handler.explain_terminal_output(
+                self.last_command,
+                self.last_exit_code,
+                stdout,
+                stderr,
+                context,
+                stream_callback=None,
+            )
+
+        raw_lines = [ln.strip() for ln in (explanation or "").splitlines() if ln.strip()]
+        if not raw_lines:
+            raw_lines = ["No explanation was returned."]
+
+        has_bullets = any(ln.startswith(("-", "*", "•")) for ln in raw_lines)
+        if not has_bullets and len(raw_lines) == 1:
+            sentence_parts = [
+                s.strip()
+                for s in re.split(r"(?<=[.!?])\s+", raw_lines[0])
+                if s.strip()
+            ]
+            if len(sentence_parts) > 1:
+                raw_lines = [f"- {s}" for s in sentence_parts]
+
+        explanation_text = Text()
+        for idx, line in enumerate(raw_lines):
+            is_bullet = line.startswith(("-", "*", "•"))
+            if is_bullet:
+                cleaned = line.lstrip("-*• ").strip()
+                explanation_text.append("  • ", style=styles["kbd"])
+                explanation_text.append(cleaned, style=styles["body"])
+            else:
+                explanation_text.append(line, style=styles["body"])
+            if idx < len(raw_lines) - 1:
+                explanation_text.append("\n")
+
+        exit_ok = self.last_exit_code == 0
+        exit_icon = icons.OK if exit_ok else icons.FAIL
+        exit_style = "bold green" if exit_ok else "bold red"
+
+        exit_text = Text()
+        exit_text.append("Exit: ", style=styles["meta"])
+        exit_text.append(f"{exit_icon} {self.last_exit_code}", style=exit_style)
+
+        output_text = Text()
+        output_text.append("Captured output: ", style=styles["meta"])
+        output_parts = []
+        if stdout.strip():
+            output_parts.append(f"stdout {len(stdout)} chars")
+        if stderr.strip():
+            output_parts.append(f"stderr {len(stderr)} chars")
+        output_text.append(", ".join(output_parts) if output_parts else "none", style=styles["hint"])
+
+        short_cmd = self.last_command.strip()
+        if len(short_cmd) > 88:
+            short_cmd = short_cmd[:85] + "..."
+
+        title = Text()
+        title.append(f"{icons.INFO} ", style=styles["title_brand"])
+        title.append("Explain last", style=styles["title_tagline"])
+
+        body = Group(
+            Text("Command", style=styles["heading"]),
+            Syntax(self.last_command, lexer=ShellLexer(), theme=pygments_theme, word_wrap=True),
+            Text("-" * 36, style=styles["rule"]),
+            exit_text,
+            output_text,
+            Text(""),
+            Text("What it means", style=styles["heading"]),
+            explanation_text,
         )
-        explanation = self.nl_handler.explain_terminal_output(
-            self.last_command,
-            self.last_exit_code,
-            stdout,
-            stderr,
-            context,
-            stream_callback=stream_cb,
+
+        console.print()
+        console.print(
+            Panel(
+                body,
+                title=title,
+                subtitle=Text(short_cmd, style=styles["hint"]),
+                border_style=styles["border"],
+                padding=(0, 1),
+            )
         )
-        print_header("-" * 60)
-        if stream_cb is None:
-            print(explanation)
-        else:
-            print()
-        print_header("-" * 60)
+        console.print()
 
     def handle_why(self):
         """

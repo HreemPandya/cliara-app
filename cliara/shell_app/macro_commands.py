@@ -274,6 +274,88 @@ class MacroCommandMixin:
                 return
         self._macro_from_nl_auto(nl_description)
 
+    def _macro_create_styles(self) -> Dict[str, str]:
+        """Theme-derived styles for macro creation panels."""
+        from cliara.console import get_ui_theme
+        from cliara.highlighting import get_tips_panel_styles
+
+        styles = get_tips_panel_styles(get_ui_theme())
+        return {
+            "border": styles.get("border", "dim"),
+            "title": styles.get("title_brand", "bold"),
+            "label": styles.get("meta", "dim"),
+            "heading": styles.get("heading", "bold"),
+            "body": styles.get("body", "white"),
+            "hint": styles.get("hint", "dim"),
+        }
+
+    def _render_macro_proposal_panel(
+        self,
+        *,
+        name: str,
+        commands: List[str],
+        description: str,
+        notes: str,
+    ) -> None:
+        """Render the NL-generated proposal in a theme-aware panel."""
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+
+        styles = self._macro_create_styles()
+        details = Table.grid(expand=True)
+        details.add_column(style=styles["label"], no_wrap=True, width=12)
+        details.add_column(style=styles["body"])
+        details.add_row("Name", Text(name or "(choose a name)", style=styles["heading"]))
+        if description:
+            details.add_row("Description", Text(description, style=styles["body"]))
+        if notes:
+            details.add_row("Notes", Text(notes, style=styles["hint"]))
+
+        steps = Table.grid(expand=True)
+        steps.add_column(style=styles["label"], justify="right", no_wrap=True, width=4)
+        steps.add_column(style=styles["body"])
+        for i, cmd in enumerate(commands, 1):
+            steps.add_row(f"{i}.", Text(cmd, style=styles["body"]))
+
+        _cliara_console().print()
+        _cliara_console().print(
+            Panel(
+                Group(
+                    details,
+                    Text("\nCommands", style=styles["heading"]),
+                    steps,
+                ),
+                title=Text("Macro Proposal", style=styles["title"]),
+                border_style=styles["border"],
+                padding=(0, 1),
+            )
+        )
+
+    def _render_macro_commands_panel(self, title: str, commands: List[str]) -> None:
+        """Render command list in a compact, theme-aware panel."""
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+
+        styles = self._macro_create_styles()
+        steps = Table.grid(expand=True)
+        steps.add_column(style=styles["label"], justify="right", no_wrap=True, width=4)
+        steps.add_column(style=styles["body"])
+        for i, cmd in enumerate(commands, 1):
+            steps.add_row(f"{i}.", Text(cmd, style=styles["body"]))
+
+        _cliara_console().print()
+        _cliara_console().print(
+            Panel(
+                steps,
+                title=Text(title, style=styles["title"]),
+                border_style=styles["border"],
+                padding=(0, 1),
+            )
+        )
+
     def _macro_from_nl_auto(self, nl_description: str) -> None:
         """LLM proposes macro name + commands + description; user confirms then saves."""
         context = {
@@ -290,23 +372,23 @@ class MacroCommandMixin:
             print_error(f"[Error] {expl or 'Could not generate commands'}")
             return
 
-        print(f"\nProposed macro name: {name or '(choose a name)'}")
-        if desc:
-            print_dim(f"Description: {desc}")
-        if expl:
-            print_dim(f"Notes: {expl}")
-        print("\nCommands:")
-        for i, cmd in enumerate(commands, 1):
-            print(f"  {i}. {cmd}")
+        self._render_macro_proposal_panel(
+            name=name,
+            commands=commands,
+            description=desc,
+            notes=expl,
+        )
 
         final_name = name
         try:
             if final_name:
-                ok = input(f"\nKeep macro name '{final_name}'? (y/n): ").strip().lower()
+                print_info("\nUse the suggested name or provide a custom one.")
+                ok = input("Keep suggested name? [Y/n]: ").strip().lower()
                 if ok in ("n", "no"):
                     final_name = input("Macro name: ").strip()
             else:
-                final_name = input("\nMacro name: ").strip()
+                print_info("\nChoose a name for this macro.")
+                final_name = input("Macro name: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             print_warning("[Cancelled]")
@@ -332,13 +414,13 @@ class MacroCommandMixin:
     ) -> None:
         """Optional command edit, safety check, description prompt, save."""
         if not commands_already_listed:
-            print("\nCommands to save:")
-            for i, cmd in enumerate(commands, 1):
-                print(f"  {i}. {cmd}")
+            self._render_macro_commands_panel("Commands to Save", commands)
         try:
-            edit = input("\nEdit commands? (y/n): ").strip().lower()
+            print_info("\nReview commands before saving.")
+            edit = input("Edit commands? (y/n): ").strip().lower()
             if edit in ("y", "yes"):
-                print("\nEnter commands (one per line, empty line to finish):")
+                print_info("\nUpdate each command or press Enter to keep it.")
+                print_dim("Add extra commands after the list, then submit an empty line to finish.")
                 new_commands: List[str] = []
                 for i, cmd in enumerate(commands, 1):
                     new_cmd = input(f"  {i}. [{cmd}] ").strip()
@@ -364,7 +446,8 @@ class MacroCommandMixin:
 
         default_desc = (suggested_description or "").strip() or nl_source
         try:
-            desc_in = input(f"\nDescription [{default_desc}]: ").strip()
+            print_info("\nProvide a description, or press Enter to keep the default.")
+            desc_in = input(f"Description [{default_desc}]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             print_warning("[Cancelled]")

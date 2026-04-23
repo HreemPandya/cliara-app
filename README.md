@@ -125,8 +125,8 @@ Cliara is designed to help you move fast without blindly executing dangerous com
 ## Docs
 
 - [Quick Start](docs/QUICKSTART.md)
-- [Full Docs](docs/README.md)
-- [Architecture](docs/ARCHITECTURE.md)
+- [Cliara Cloud Deployment](docs/CLIARA_CLOUD_DEPLOYMENT.md)
+- [Postgres Setup](docs/POSTGRES_SETUP.md)
 
 ## Troubleshooting
 

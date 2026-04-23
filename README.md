@@ -1,4 +1,6 @@
-# cliara
+<p align="center">
+	<img src="images/image.png" alt="Cliara" width="1000" />
+</p>
 
 <p align="center">
 	<strong>AI shell assistant for real terminal work.</strong><br/>

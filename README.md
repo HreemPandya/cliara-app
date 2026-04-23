@@ -1,224 +1,140 @@
-# Cliara
+# cliara
 
-**An AI-powered shell that understands natural language and macros.**
+<p align="center">
+	<strong>AI shell assistant for real terminal work.</strong><br/>
+	Natural language, macros, smart git/deploy helpers, and safer execution flow.
+</p>
 
-[![PyPI version](https://badge.fury.io/py/cliara.svg)](https://pypi.org/project/cliara/)
-[![Python 3.8+](https://img.shields.io/pypi/pyversions/cliara)](https://pypi.org/project/cliara/)
+<p align="center">
+	<a href="https://pypi.org/project/cliara/"><img src="https://badge.fury.io/py/cliara.svg" alt="PyPI version"></a>
+	<a href="https://pypi.org/project/cliara/"><img src="https://img.shields.io/pypi/pyversions/cliara" alt="Python 3.8+"></a>
+	<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
 
----
-
-## What is Cliara?
-
-Cliara wraps your existing shell (bash, zsh, PowerShell, cmd) and adds:
-
-| Feature | Description |
-|---------|-------------|
-| **Natural language** | `? <query>` — describe what you want, get shell commands |
-| **Cliara Cloud** | Sign in with GitHub, 150 free queries/month, no API key |
-| **Macros** | Create, edit, run reusable command sequences |
-| **Semantic history** | `? find when I fixed the login` — search past commands by meaning |
-| **Smart push** | `push` — auto-commit message, branch detection, one command |
-| **Smart deploy** | `deploy` — auto-detect Vercel, Netlify, Docker, PyPI, and deploy |
-| **Safety checks** | Destructive commands show a diff preview before running |
-| **Fix failed commands** | `? fix` — AI suggests corrections after a command fails |
-
-All your normal commands work unchanged. Cliara is a thin layer on top of your shell.
+<p align="center">
+	<a href="#why-cliara">Why</a> •
+	<a href="#before--after">Before/After</a> •
+	<a href="#install">Install</a> •
+	<a href="#quick-start-60-seconds">Quick Start</a> •
+	<a href="#core-workflows">Workflows</a> •
+	<a href="#safety-by-default">Safety</a> •
+	<a href="#docs">Docs</a>
+</p>
 
 ---
 
-## Installation
+Cliara wraps your existing shell (bash, zsh, PowerShell, cmd).
 
-### Option 1: pipx (recommended)
+- Normal commands still run as-is.
+- `?` turns intent into shell commands.
+- Macros turn repeated command chains into reusable commands.
+- `push`, `deploy`, and `? fix` speed up common dev loops.
 
-Best for CLI tools — installs in an isolated environment and adds to PATH automatically.
+No new terminal to learn. You keep your shell habits and get an AI layer on top.
 
-```bash
-pip install pipx
-pipx ensurepath   # Add pipx bin to PATH (restart terminal if needed)
-pipx install cliara
-```
+## Why Cliara
 
-### Option 2: pip
+Most AI terminal tools are great in demos and weak in daily workflows.
+Cliara is built for repetitive, error-prone, real development loops.
+
+| Daily pain | Cliara flow | What backs it up |
+|---|---|---|
+| Too many command lookups | Ask with `?` in plain English | Natural-language command mode |
+| Repeating the same multi-step tasks | Save and re-run as macros | Macro aliases (`ma`, `mc`, `ms`, `ml`) |
+| Failed command context switching | Run `? fix` in-place | Error-aware fix flow |
+| Messy release command chains | Use `push` and `deploy` helpers | Built-in smart commands |
+| Risky destructive commands | Confirmation and previews | Safety checks + diff preview |
+
+## Before / After
+
+| Task | Plain shell approach | Cliara approach |
+|---|---|---|
+| Free port 3000 | Find process, inspect, then kill | `? kill whatever is using port 3000` |
+| Recover from failed command | Copy error, search docs/issues, retry | `? fix` |
+| Re-run release routine | Find old notes or shell history | Save macro once, run by name |
+| Push + deploy flow | Multiple manual git/platform steps | `push` then `deploy` |
+
+The point is not replacing shell skills. The point is reducing repetitive glue work.
+
+## Install
 
 ```bash
 pip install cliara
 ```
 
-If `cliara` isn't recognized, use:
+## Run
+
+```bash
+cliara
+```
+
+First launch opens GitHub sign-in once for cloud features. After that, run `cliara` normally.
+
+## Quick Start (60 seconds)
+
+```text
+cliara ~/projects/myapp ❯ ? kill whatever is using port 3000
+✓ cliara ~/projects/myapp ❯ ma deploy-prod
+✓ cliara [deploy-prod] ~/projects/myapp ❯ push
+✓ cliara [deploy-prod] ~/projects/myapp ❯ deploy
+X 1 cliara [deploy-prod] ~/projects/myapp ❯ ? fix
+cliara [deploy-prod] ~/projects/myapp ❯ help
+```
+
+## Core Workflows
+
+### 1) Natural language to commands
+
+```text
+cliara ~/myapp ❯ ? show largest files in this folder
+cliara ~/myapp ❯ ? find when I last changed docker config
+cliara ~/myapp ❯ ? explain this command output
+```
+
+### 2) Macros for repeated routines
+
+```text
+cliara ~/myapp ❯ ma release-check
+cliara ~/myapp ❯ mc
+cliara ~/myapp ❯ release-check
+cliara ~/myapp ❯ ml
+```
+
+### 3) Built-in helpers for shipping
+
+```text
+cliara ~/myapp ❯ push
+cliara ~/myapp ❯ deploy
+cliara ~/myapp ❯ ? fix
+```
+
+## Safety By Default
+
+Cliara is designed to help you move fast without blindly executing dangerous commands.
+
+- Risky commands trigger stronger confirmation flow.
+- Potentially destructive operations can show a diff preview before execution.
+- You can still inspect and control what gets run.
+
+## Who It Fits
+
+- Developers who live in terminal all day
+- Teams with repeated setup/release/debug routines
+- People who want shell speed without command memorization overhead
+
+## Docs
+
+- [Quick Start](docs/QUICKSTART.md)
+- [Full Docs](docs/README.md)
+- [Architecture](docs/ARCHITECTURE.md)
+
+## Troubleshooting
+
+If `cliara` is not recognized:
 
 ```bash
 python -m cliara.main
 ```
-
-### Option 3: From source (development)
-
-```bash
-git clone https://github.com/HreemPandya/cliara-app.git
-cd cliara-app
-pip install -e .
-```
-
-### Optional Dependencies
-
-To enable PostgreSQL support, install with:
-
-```bash
-pip install cliara[postgres]
-```
-
----
-
-## First Run / Setup
-
-1. **Start Cliara:** `cliara`
-2. **First time?** A browser opens for GitHub login. Authorize once.
-3. **Done.** Your token is saved to `~/.cliara/token.json` and loads automatically on every start.
-
-### Authentication / Cloud Login Flow
-
-- The OAuth login flow opens your browser to sign in with GitHub.
-- Once authenticated, your token is stored at `~/.cliara/token.json`.
-
-### Alternative: Bring Your Own API Key
-
-Prefer Groq, Gemini, Ollama, or OpenAI? Run `setup-llm` inside Cliara to configure. Free options include [Groq](https://console.groq.com) and [Google AI Studio](https://aistudio.google.com).
-
----
-
-## Usage
-
-### Normal Commands (Pass-Through)
-
-Just type commands as usual - they go straight to your shell:
-
-```bash
-cliara:proj ❯ ls -la
-cliara:proj ❯ cd myproject
-cliara:proj ❯ git status
-cliara:proj ❯ npm install
-```
-
-### Natural Language Commands
-
-Use `?` prefix for natural language:
-
-```bash
-cliara:proj ❯ ? list files in this directory
-cliara:proj ❯ ? kill process on port 3000
-cliara:proj ❯ ? find when I ran the deploy
-cliara:proj ❯ ? fix                    # Fix the last failed command
-```
-
-### Macros
-
-Short commands are the default (`macro …` works the same).
-
-```bash
-cliara:proj ❯ ma build                 # Create a macro (line-by-line commands)
-cliara:proj ❯ mc                       # Create from English (suggested name + steps)
-cliara:proj ❯ build                    # Run it — type the macro name
-cliara:proj ❯ ms test                  # Save last run as macro named test
-cliara:proj ❯ ml                       # List macros  (same as macro list)
-```
-
-### Smart Commands
-
-```bash
-cliara:proj ❯ push                     # Smart push (auto-commit message + branch)
-cliara:proj ❯ deploy                   # Smart deploy (auto-detect project type)
-```
-
-### Help
-
-```bash
-cliara:proj ❯ help                     # Full command reference
-```
-
----
-
-## Database Setup and Migration
-
-If using PostgreSQL as your backend, follow these steps:
-
-1. **Install PostgreSQL** (see [PostgreSQL Setup Guide](docs/POSTGRES_SETUP.md)).
-2. **Create Database and User:**
-
-```bash
-# Connect to PostgreSQL
-psql postgres
-
-# Create database
-CREATE DATABASE cliara;
-
-# Create user
-CREATE USER cliara WITH PASSWORD 'your_password_here';
-
-# Grant privileges
-GRANT ALL PRIVILEGES ON DATABASE cliara TO cliara;
-
-# Exit
-\q
-```
-
-3. **Install Python Dependencies:**
-
-```bash
-pip install psycopg2-binary
-```
-
-4. **Configure Cliara:**
-
-Edit `~/.cliara/config.json`:
-
-```json
-{
-  "storage_backend": "postgres",
-  "postgres": {
-    "host": "localhost",
-    "port": 5432,
-    "database": "cliara",
-    "user": "cliara"
-  }
-}
-```
-
----
-
-## Required Environment Variables
-
-Copy `.env.example` to `.env` and fill in the values for your chosen provider. Only ONE LLM provider should be active at a time.
-
-```plaintext
-# ── Option A: OpenAI (cloud, requires API key) ────────────────────────────────
-OPENAI_API_KEY=sk-proj-your-key-here
-
-# ── Option B: Anthropic Claude (cloud, requires API key) ─────────────────────
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-
-# ── Option C: Ollama (local, free, no key needed) ────────────────────────────
-OLLAMA_BASE_URL=http://localhost:11434
-```
-
----
-
-## Documentation
-
-- [Complete Guide](docs/README.md) — Full documentation
-- [Quick Start](docs/QUICKSTART.md) — Get started in 5 minutes
-- [Cliara Cloud Deployment](docs/CLIARA_CLOUD_DEPLOYMENT.md) — Self-host the backend
-- [PostgreSQL Setup](docs/POSTGRES_SETUP.md) — Scalable macro storage
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| `cliara` not recognized | Use `python -m cliara.main` or install with `pipx install cliara` |
-| Connection error | Check network/firewall; try `$env:CLIARA_GATEWAY_URL = "https://cliara-cloud-production.up.railway.app/v1"` |
-| Want BYOK instead | Run `setup-llm` inside Cliara for Groq, Gemini, Ollama, OpenAI |
-
----
 
 ## License
 

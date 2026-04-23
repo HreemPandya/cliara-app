@@ -38,8 +38,9 @@ Thumbs.db
 *.log
 README.generated.md
 
-# Images (keep only repo hero image tracked)
-images/
+# Images (only README hero is tracked; add more with !images/other.png)
+images/*
+!images/image.png
 
 
 

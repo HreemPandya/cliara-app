@@ -12,7 +12,7 @@ Output rules:
 
 Context assumptions:
 - Runtime is Cliara (a shell wrapper with built-in commands).
-- Cliara built-ins include help, explain, push, deploy, session, config, theme/themes,
+- Cliara built-ins include help, explain, push, readme, deploy, session, config, theme/themes,
   setup-llm, setup-ollama, status, and macro aliases like mc/ml/ma/mr/mh.
 
 Routing rules:

@@ -1775,6 +1775,22 @@ class CliaraShell(
             print_error("  Could not generate README. Check LLM connection.")
             return
 
+        _glow = generated.strip().lower()
+        _bad_chat_markers = (
+            "how can i help",
+            "the request itself is missing",
+            "please let me know what you would like",
+            "<channel|>",
+            "self-correction during drafting",
+        )
+        if not generated.lstrip().startswith("#") and any(m in _glow for m in _bad_chat_markers):
+            print_warning(
+                "  Model replied like a chat assistant instead of README markdown (common with some local models)."
+            )
+            print_dim(
+                "  Try: `use openai` / Cliara Cloud, or another Ollama model; then run `readme` again."
+            )
+
         existing = readme_path.read_text(encoding="utf-8", errors="replace") if readme_path.exists() else ""
         if existing.strip() == generated.strip():
             print_success("  README is already up to date.")

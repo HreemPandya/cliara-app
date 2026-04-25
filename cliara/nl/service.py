@@ -471,7 +471,7 @@ class NLHandler:
         prompt += f"- Runtime: {runtime} interactive shell (Cliara intercepts built-ins before host shell)\n"
         prompt += f"- Host Shell: {shell}\n"
         prompt += f"- Current Directory: {cwd}\n"
-        prompt += "- Cliara built-ins include: help, explain, push, deploy, session, config, theme, setup-llm, setup-ollama, macro aliases (mc/ml/ma/mr/mh).\n"
+        prompt += "- Cliara built-ins include: help, explain, push, readme, deploy, session, config, theme, setup-llm, setup-ollama, macro aliases (mc/ml/ma/mr/mh).\n"
 
         if mentioned_builtins:
             prompt += (
@@ -508,7 +508,7 @@ class NLHandler:
         if project_type:
             prompt += f"- Project type: {project_type}\n"
         prompt += (
-            "- Cliara built-ins include: help, explain, push, deploy, session, config, theme/themes, "
+            "- Cliara built-ins include: help, explain, push, readme, deploy, session, config, theme/themes, "
             "setup-llm, setup-ollama, macro aliases (mc/ml/ma/mr/mh).\n"
         )
         prompt += (
@@ -533,7 +533,7 @@ class NLHandler:
         if project_type:
             prompt += f"- Project type: {project_type}\n"
         prompt += (
-            "- Cliara built-ins include: help, explain, push, deploy, session, config, theme/themes, "
+            "- Cliara built-ins include: help, explain, push, readme, deploy, session, config, theme/themes, "
             "setup-llm, setup-ollama, status, macro aliases (mc/ml/ma/mr/mh).\n"
         )
         prompt += (
@@ -575,7 +575,13 @@ class NLHandler:
 
         if self.provider in _OPENAI_COMPAT_PROVIDERS:
             return self._call_openai_compat(
-                system, user_message, model, temperature, max_tokens, safe_cb
+                system,
+                user_message,
+                model,
+                temperature,
+                max_tokens,
+                safe_cb,
+                agent_type,
             )
         elif self.provider == "anthropic":
             return self._call_anthropic(
@@ -596,6 +602,8 @@ class NLHandler:
                 cap_raw = self.config.get("ollama_max_tokens_nl", 320)
             elif agent_type == "nl_macro_propose":
                 cap_raw = self.config.get("ollama_max_tokens_macro", 500)
+            elif agent_type == "readme":
+                cap_raw = self.config.get("ollama_max_tokens_readme", 8192)
             else:
                 cap_raw = self.config.get("ollama_max_tokens_cap", 768)
         else:
@@ -603,6 +611,8 @@ class NLHandler:
                 cap_raw = 320
             elif agent_type == "nl_macro_propose":
                 cap_raw = 500
+            elif agent_type == "readme":
+                cap_raw = 8192
             else:
                 cap_raw = 768
 
@@ -636,6 +646,7 @@ class NLHandler:
         temperature: float,
         max_tokens: int,
         stream_callback: Optional[Callable[[str], None]],
+        agent_type: str,
     ) -> str:
         """OpenAI / Ollama (OpenAI-compatible) completion ΓÇö with optional streaming."""
         request_kwargs: Dict[str, Any] = {
@@ -657,6 +668,17 @@ class NLHandler:
             if self.config is not None:
                 keep_alive_raw = self.config.get("ollama_keep_alive", "15m")
                 num_ctx_raw = self.config.get("ollama_num_ctx", 4096)
+                if agent_type == "readme":
+                    try:
+                        base_ctx = int(num_ctx_raw)
+                    except (TypeError, ValueError):
+                        base_ctx = 4096
+                    readme_ctx_raw = self.config.get("ollama_num_ctx_readme", 32768)
+                    try:
+                        readme_ctx = int(readme_ctx_raw)
+                    except (TypeError, ValueError):
+                        readme_ctx = base_ctx
+                    num_ctx_raw = max(base_ctx, readme_ctx)
 
             keep_alive = str(keep_alive_raw or "").strip()
             if keep_alive:

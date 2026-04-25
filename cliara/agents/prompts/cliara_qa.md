@@ -17,7 +17,7 @@ Therefore:
 
 # Built-in Awareness
 Common Cliara built-ins include:
-- help, explain, push, deploy, session, config, theme/themes
+- help, explain, push, readme, deploy, session, config, theme/themes
 - setup-llm, setup-ollama, status
 - macro alias family: m, mc, ml, mr, ma, me, md, ms, mst, msh, msr, mch, mrn, mh
 

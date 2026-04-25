@@ -293,11 +293,87 @@ def _print_choice_prompt() -> None:
     console.print(line, end="")
 
 
-def _read_masked(prompt: str) -> str:
-    """Read a line with masking on terminals that support getpass; fall back to plain input."""
+def _read_masked_windows_asterisk(prompt: str) -> str:
+    """Read a line on Windows; echo ``*`` per character (including paste)."""
+    import msvcrt
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    chars: list[str] = []
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\r", "\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            break
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        if ch in ("\x08", "\x7f"):
+            if chars:
+                chars.pop()
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+        else:
+            chars.append(ch)
+            sys.stdout.write("*")
+            sys.stdout.flush()
+    return "".join(chars)
+
+
+def _read_masked_unix_asterisk(prompt: str) -> str:
+    """Read a line on POSIX; echo ``*`` per character (including paste)."""
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    chars: list[str] = []
     try:
-        import getpass
-        return getpass.getpass(prompt)
+        tty.setraw(fd)
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                break
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch in ("\x7f", "\x08"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+            elif ch:
+                chars.append(ch)
+                sys.stdout.write("*")
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return "".join(chars)
+
+
+def _read_masked(prompt: str) -> str:
+    """Read a line; echo each character as ``*`` so length and paste are visible."""
+    if not sys.stdin.isatty():
+        return input(prompt)
+    # Prefer OS-native readers: prompt_toolkit + is_password often shows no echo and
+    # mishandles paste in VS Code / Cursor integrated terminals.
+    if sys.platform == "win32":
+        try:
+            return _read_masked_windows_asterisk(prompt)
+        except Exception:
+            pass
+    else:
+        try:
+            return _read_masked_unix_asterisk(prompt)
+        except Exception:
+            pass
+    try:
+        from prompt_toolkit import prompt as pt_prompt
+
+        return pt_prompt(prompt, is_password=True)
     except Exception:
         return input(prompt)
 
@@ -406,6 +482,10 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
         )
     )
     c.print()
+    c.print(
+        "   [dim]Keys stay private: each character shows as * (typing and paste). "
+        "Press Enter when the full key is in.[/]"
+    )
 
     try:
         api_key = _read_masked(f"   {key_hint}").strip()

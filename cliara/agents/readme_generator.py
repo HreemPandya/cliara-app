@@ -2,7 +2,7 @@
 
 AGENTS = {
     "readme": {
-        "temperature": 0.3,
-        "max_tokens": 4000,
+        "temperature": 0.25,
+        "max_tokens": 12000,
     },
 }

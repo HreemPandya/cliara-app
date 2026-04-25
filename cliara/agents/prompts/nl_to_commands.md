@@ -46,7 +46,7 @@ You must output only valid JSON, never markdown or free‑form prose. The JSON m
 
 2b. Cliara built-in command awareness
 - If the user asks about a Cliara built-in command (meaning, help, usage, what it does), generate a Cliara built-in help command, not a host-shell lookup like Get-Command.
-- Common built-ins include: help, explain, push, session, deploy, config, theme/themes, setup-llm, setup-ollama, and macro aliases like mc/ml/ma/mr/mh.
+- Common built-ins include: help, explain, push, readme, session, deploy, config, theme/themes, setup-llm, setup-ollama, and macro aliases like mc/ml/ma/mr/mh.
 - When built-in tokens are present in context/request, prefer Cliara-native commands.
 - Prefer canonical built-in forms over short aliases so execution is unambiguous (for example, use `macro help` instead of `mh`).
 - Examples:

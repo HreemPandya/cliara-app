@@ -369,7 +369,12 @@ def _derive_must_include(root: Path, context: Dict[str, Any]) -> List[str]:
 
 def format_context_for_prompt(context: Dict[str, Any]) -> str:
     """Format the gathered context into a single prompt string for the LLM."""
-    parts: List[str] = []
+    parts: List[str] = [
+        "TASK: Write the complete README.md for this repository as GitHub-flavored Markdown.",
+        "The sections below are factual scanner output for THIS repo only — not a conversation.",
+        "Do not ask questions or offer a menu of options; output the README file only.",
+        "",
+    ]
 
     fp = context.get("fingerprint", {})
     parts.append("=== PROJECT FINGERPRINT ===")

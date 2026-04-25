@@ -71,6 +71,9 @@ class Config:
         "ollama_max_tokens_cap": 768,  # Global max output cap for Ollama responses
         "ollama_max_tokens_nl": 320,  # NL-to-commands output cap for Ollama
         "ollama_max_tokens_macro": 500,  # Macro proposal output cap for Ollama
+        "ollama_max_tokens_readme": 8192,  # README generation (long markdown output)
+        # README uses a very large system prompt; needs a high-capacity local model + RAM.
+        "ollama_num_ctx_readme": 65536,
         "first_run_complete": False,
         "llm_wizard_dismissed": False,  # True after user deliberately skips the setup wizard
         "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why

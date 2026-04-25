@@ -16,6 +16,37 @@ PROVIDER_DEFAULT_MODELS: Dict[str, str] = {
     "cliara": "llama-3.3-70b-versatile",  # Gateway picks the best available model
 }
 
+
+def model_id_matches_provider(model: str, provider: str) -> bool:
+    """True if *model* looks like a valid id for *provider* (avoids e.g. gemma4 on OpenAI)."""
+    if not (model and provider):
+        return False
+    if provider == "ollama":
+        return True
+    m = model.strip().lower()
+    if provider == "openai":
+        return (
+            m.startswith("gpt-")
+            or m.startswith("o1")
+            or m.startswith("o2")
+            or m.startswith("o3")
+            or m.startswith("o4")
+            or m.startswith("chatgpt-")
+            or m.startswith("ft:")
+            or m.startswith("text-embedding-")
+        )
+    if provider == "anthropic":
+        return m.startswith("claude-")
+    if provider == "groq":
+        return m.startswith(
+            ("llama", "mixtral", "gemma2", "gemma-", "compound", "openai/", "meta-llama/")
+        )
+    if provider == "gemini":
+        return m.startswith("gemini") or m.startswith("models/gemini")
+    if provider == "cliara":
+        return True
+    return True
+
 # Providers that use the OpenAI-compatible client (openai SDK with custom base_url)
 OPENAI_COMPAT_PROVIDERS = frozenset({"openai", "ollama", "groq", "gemini", "cliara"})
 

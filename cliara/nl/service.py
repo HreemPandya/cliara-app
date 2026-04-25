@@ -15,6 +15,7 @@ from shutil import which
 from typing import List, Tuple, Optional, Dict, Any, Callable
 
 from cliara.safety import SafetyChecker, DangerLevel
+from cliara.shell_app.runtime import print_dim
 from cliara.agents import AGENT_REGISTRY
 from cliara.nl.constants import (
     CLIARA_BUILTIN_COMMANDS,
@@ -23,6 +24,7 @@ from cliara.nl.constants import (
     PROVIDER_BASE_URLS,
     PROVIDER_DEFAULT_MODELS,
     STREAMING_SAFE_AGENTS,
+    model_id_matches_provider,
 )
 from cliara.nl.session_reflect import (
     default_session_reflect_plan,
@@ -171,7 +173,7 @@ class NLHandler:
         """
         if self.config is not None:
             model = self.config.get_llm_model(agent_type)
-            if model:
+            if model and model_id_matches_provider(model, self.provider or ""):
                 return model
         return _PROVIDER_DEFAULT_MODELS.get(self.provider or "", "gpt-4o-mini")
 
@@ -708,7 +710,8 @@ class NLHandler:
                 return "".join(full_content).strip()
             else:
                 response = self.llm_client.chat.completions.create(**request_kwargs)
-                return response.choices[0].message.content.strip()
+                content = response.choices[0].message.content
+                return (content or "").strip()
         except Exception as e:
             raise Exception(self._openai_compat_error_message(e)) from e
 
@@ -1602,10 +1605,17 @@ Rules (Conventional Commits):
 
             # If the model returns an empty/blank response, fall back so push
             # can still proceed instead of aborting after staging.
+            print_dim(
+                "  LLM returned no usable commit line; using heuristic message "
+                "(check API key, model id, or rate limits)."
+            )
             return self._stub_commit_message(files, context)
 
         except Exception as e:
-            # Fall back to stub on any failure
+            err = str(e).strip()
+            if len(err) > 160:
+                err = err[:157] + "..."
+            print_dim(f"  Commit message LLM failed ({err}); using heuristic message.")
             return self._stub_commit_message(files, context)
 
 

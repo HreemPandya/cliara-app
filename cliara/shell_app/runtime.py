@@ -303,6 +303,8 @@ def _nl_query_plain_history_arg(query: str) -> Optional[str]:
         rest = q[len("history "):].strip()
         if rest.isdigit():
             return rest
+        if rest.lower() == "clear":
+            return "clear"
     return None
 
 
@@ -751,6 +753,31 @@ class CommandHistory:
     def get_recent(self, n: int = 10) -> List[str]:
         """Get n most recent commands."""
         return self.history[-n:] if n < len(self.history) else self.history.copy()
+
+    def clear_all(self) -> None:
+        """Remove all command history from memory, disk, and readline (if active)."""
+        self.history.clear()
+        self.exit_meta.clear()
+        self.last_commands.clear()
+        if self.history_file:
+            try:
+                self.history_file.parent.mkdir(parents=True, exist_ok=True)
+                with with_file_lock(self.history_file):
+                    self.history_file.write_text("", encoding="utf-8")
+            except Exception:
+                pass
+        if self._meta_file:
+            try:
+                self._meta_file.parent.mkdir(parents=True, exist_ok=True)
+                with with_file_lock(self._meta_file):
+                    self._meta_file.write_text("[]", encoding="utf-8")
+            except Exception:
+                pass
+        if self._readline:
+            try:
+                self._readline.clear_history()
+            except Exception:
+                pass
 
     def __len__(self) -> int:
         """Number of commands in history (so len(shell.history) works)."""

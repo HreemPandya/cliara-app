@@ -55,7 +55,13 @@ class InputRoutingMixin:
             self._inline_skip_once = False
 
         if user_input.strip():
-            self.history.add(user_input.strip())
+            s = user_input.strip()
+            low = s.lower()
+            nl_p = (self.config.get("nl_prefix", "?") or "?").strip().lower()
+            rest_after_nl = low[len(nl_p) :].lstrip() if low.startswith(nl_p) else ""
+            _skip_hist = low in ("history clear", "clear-history") or rest_after_nl == "history clear"
+            if not _skip_hist:
+                self.history.add(s)
 
         if user_input.startswith("@run "):
             user_input = user_input[5:].strip()
@@ -110,6 +116,10 @@ class InputRoutingMixin:
 
         if user_input.strip().lower() == "doctor":
             self._handle_doctor()
+            return
+
+        if user_input.strip().lower() == "clear-history":
+            self._handle_clear_command_history()
             return
 
         _u_strip = user_input.strip()
@@ -296,6 +306,10 @@ class InputRoutingMixin:
             return True
         if low == "setup-ollama":
             self._handle_setup_ollama()
+            return True
+
+        if low == "history clear" or low == "clear-history":
+            self.handle_history("clear")
             return True
 
         if low == "session" or low.startswith("session "):

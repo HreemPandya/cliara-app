@@ -2558,11 +2558,29 @@ class CliaraShell(
         for s in suggestions[:3]:
             print_dim(f"      {s}")
 
+    def _handle_clear_command_history(self) -> None:
+        """Clear persisted command history (~/.cliara/history.txt) and in-session recall."""
+        n = len(self.history.history)
+        self.history.clear_all()
+        if self._prompt_session is not None:
+            try:
+                self._prompt_session = self._create_prompt_session()
+            except Exception:
+                pass
+        print_success(
+            f"  {icons.OK} Cleared command history"
+            + (f" ({n} entries removed)." if n else ".")
+        )
+
     def handle_history(self, arg: str = ""):
         """
         Show recent command history with exit codes, timestamps, and syntax highlighting.
-        Usage: history [N]. Default: last 20 commands.
+        Usage: history [N]. Default: last 20 commands. Use ``history clear`` to wipe history.
         """
+        if (arg or "").strip().lower() == "clear":
+            self._handle_clear_command_history()
+            return
+
         default_n = 20
         max_n = min(500, self.config.get("history_size", 1000))
         n = default_n
@@ -2571,8 +2589,8 @@ class CliaraShell(
                 n = int(arg.strip())
                 n = max(1, min(n, max_n))
             except ValueError:
-                print_error("[Error] history expects an optional number")
-                print_dim("Usage: history   or   history 10")
+                print_error("[Error] history expects a number, 'clear', or no argument")
+                print_dim("Usage: history   or   history 10   or   history clear")
                 return
         rows = self.history.get_recent_with_meta(n)
         if not rows:
@@ -2902,6 +2920,7 @@ class CliaraShell(
             pad_to=36,
         )
         print_help_cmd("history [N]", "Show last N commands (default 20)")
+        print_help_cmd("history clear", "Wipe command history (also: clear-history)")
         print_help_cmd(
             f"{nl} find / when did I ...",
             "Search history by meaning (semantic)",

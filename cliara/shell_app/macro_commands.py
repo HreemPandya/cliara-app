@@ -1107,7 +1107,7 @@ class MacroCommandMixin:
 
     # Built-in names that a macro would shadow
     _BUILTIN_NAMES = frozenset({
-        "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "upgrade-cliara",
+        "exit", "quit", "q", "help", "version", "status", "readme", "last", "doctor", "clear-history", "upgrade-cliara",
         "explain", "lint", "push", "session", "deploy",
         "macro", "cd", "clear", "cls", "fix", "config", "theme", "themes", "setup-ollama", "setup-llm",
         "cliara-login", "cliara login", "cliara-logout", "cliara logout", "use",

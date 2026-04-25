@@ -157,6 +157,8 @@ def _mask_key(key: str) -> str:
 def _apply_env_and_reinit(shell: "CliaraShell", provider_id: str, env_var: str, key: str) -> bool:
     """Set the env var in the current process and re-initialise the LLM client."""
     os.environ[env_var] = key
+    # Persist choice so OLLAMA_BASE_URL in ~/.cliara/.env does not shadow this provider.
+    shell.config.settings["llm_provider"] = provider_id
 
     # Reload config settings from env
     shell.config._load_env_vars()
@@ -535,8 +537,9 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
                 padding=(0, 1),
             )
         )
-        # Clear the dismissed flag in case it was set before
+        # Clear the dismissed flag in case it was set before; persist active provider
         shell.config.settings["llm_wizard_dismissed"] = False
+        shell.config.settings["llm_provider"] = pid
         shell.config.save()
     else:
         c.print(

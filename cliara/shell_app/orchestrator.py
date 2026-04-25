@@ -1640,10 +1640,14 @@ class CliaraShell(
                 print_error(f"[Error] {_ENV_VAR_MAP[target]} is not set.")
                 print_dim(f"  Add it to ~/.cliara/.env or run 'setup-llm' to configure {target}.")
                 return
-            # Clear stored model override when switching away from ollama
+            if current == "ollama":
+                _clear_incompatible_model(self)
             ok = self.nl_handler.initialize_llm(target, api_key)
 
         if ok:
+            self.config.settings["llm_provider"] = target
+            self.config._load_env_vars()
+            self.config.save()
             model = self.nl_handler._resolve_model("nl_to_commands")
             print_success(f"  Switched to {target.upper()}  (model: {model})")
         else:

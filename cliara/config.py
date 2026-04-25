@@ -290,113 +290,107 @@ class Config:
         macro_path = self.settings.get("macro_storage", "~/.cliara/macros.json")
         return Path(macro_path).expanduser()
     
-    def _load_env_vars(self):
-        """Load environment variables into config.
-
-        Provider priority (first match wins):
-          0. CLIARA_TOKEN env var — explicit override to force the gateway
-          1. Ollama  — local, no key needed
-          2. Anthropic  (BYOK)
-          3. Groq        (BYOK)
-          4. Gemini      (BYOK)
-          5. OpenAI      (BYOK)
-          6. ~/.cliara/token.json — set by `cliara login`; used when no BYOK key
-             is configured so logged-in users get the gateway automatically
-
-        BYOK keys (2-5) intentionally rank above the token file so that a
-        power user who sets OPENAI_API_KEY bypasses the cloud proxy without
-        any extra configuration.
+    def _credentials_for_preference(
+        self, preferred: Optional[str]
+    ) -> Optional[tuple[str, str, Optional[str]]]:
+        """If *preferred* provider has credentials in the environment, return
+        ``(provider, api_key, ollama_base_url_or_none)``. Otherwise return None.
         """
-        # Explicit env var override always wins — useful for CI or forcing the gateway
-        cliara_token = os.getenv("CLIARA_TOKEN")
-        if cliara_token:
-            self.settings["llm_provider"] = "cliara"
-            self.settings["llm_api_key"] = cliara_token
-            return
+        if not preferred:
+            return None
+        if preferred == "ollama":
+            ollama_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+            if ollama_url:
+                u = ollama_url.rstrip("/")
+                return ("ollama", "ollama", u)  # pragma: allowlist secret
+            return None
+        if preferred == "cliara":
+            try:
+                from cliara.auth import get_valid_token
+                token = get_valid_token()
+                if token:
+                    return ("cliara", token, None)
+            except Exception:
+                pass
+            return None
+        env_map = {
+            "anthropic": "ANTHROPIC_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }
+        env_name = env_map.get(preferred)
+        if env_name:
+            key = os.getenv(env_name)
+            if key:
+                return (preferred, key, None)
+        return None
 
-        # Ollama takes precedence when OLLAMA_BASE_URL or OLLAMA_HOST is set —
-        # no API key required (uses a dummy value so the client initialises).
+    def _resolve_llm_credentials(self) -> Optional[tuple[str, str, Optional[str]]]:
+        """Pick active LLM from env + ``llm_provider`` preference in config.
+
+        Order:
+          1. ``CLIARA_TOKEN`` env (force gateway)
+          2. Stored ``llm_provider`` if its credentials exist (``setup-llm``, ``use``)
+          3. First available BYOK key (Anthropic, Groq, Gemini, OpenAI)
+          4. Ollama URL if set (after BYOK so an auto-written ``OLLAMA_BASE_URL``
+             does not shadow a key the user just added)
+          5. Cliara Cloud token file from ``cliara login``
+        """
+        if os.getenv("CLIARA_TOKEN"):
+            return ("cliara", os.getenv("CLIARA_TOKEN"), None)
+
+        preferred = self.settings.get("llm_provider")
+        picked = self._credentials_for_preference(preferred)
+        if picked:
+            return picked
+
+        for env_var, prov in (
+            ("ANTHROPIC_API_KEY", "anthropic"),
+            ("GROQ_API_KEY", "groq"),
+            ("GEMINI_API_KEY", "gemini"),
+            ("OPENAI_API_KEY", "openai"),
+        ):
+            key = os.getenv(env_var)
+            if key:
+                return (prov, key, None)
+
         ollama_url = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
         if ollama_url:
-            self.settings["llm_provider"] = "ollama"
-            self.settings["ollama_base_url"] = ollama_url.rstrip("/")
-            self.settings["llm_api_key"] = "ollama"  # pragma: allowlist secret
-            return
+            u = ollama_url.rstrip("/")
+            return ("ollama", "ollama", u)  # pragma: allowlist secret
 
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-        if anthropic_key:
-            self.settings["llm_provider"] = "anthropic"
-            self.settings["llm_api_key"] = anthropic_key
-            return
-
-        groq_key = os.getenv("GROQ_API_KEY")
-        if groq_key:
-            self.settings["llm_provider"] = "groq"
-            self.settings["llm_api_key"] = groq_key
-            return
-
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key:
-            self.settings["llm_provider"] = "gemini"
-            self.settings["llm_api_key"] = gemini_key
-            return
-
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
-            self.settings["llm_provider"] = "openai"
-            self.settings["llm_api_key"] = openai_key
-            return
-
-        # No BYOK key found — check whether the user has logged in via
-        # `cliara login`.  This is intentionally last so BYOK always wins.
-        self._try_load_cliara_token()
-
-    def _try_load_cliara_token(self) -> None:
-        """
-        Attempt to load a stored Cliara Cloud token from ~/.cliara/token.json.
-
-        On success, sets provider to "cliara" with the token as the API key.
-        Silently does nothing on any failure so startup is never blocked.
-        """
         try:
             from cliara.auth import get_valid_token
             token = get_valid_token()
             if token:
-                self.settings["llm_provider"] = "cliara"
-                self.settings["llm_api_key"] = token
+                return ("cliara", token, None)
         except Exception:
-            # Import error, file corruption, network error during refresh, etc.
-            # Never crash startup over a missing/bad token file.
             pass
-    
+        return None
+
+    def _load_env_vars(self):
+        """Load environment variables into config (see _resolve_llm_credentials)."""
+        resolved = self._resolve_llm_credentials()
+        if resolved:
+            prov, key, o_url = resolved
+            self.settings["llm_provider"] = prov
+            self.settings["llm_api_key"] = key
+            if o_url:
+                self.settings["ollama_base_url"] = o_url
+
     def get_llm_api_key(self) -> Optional[str]:
         """Get LLM API key from environment or config (including token file)."""
-        if os.getenv("CLIARA_TOKEN"):
-            return os.getenv("CLIARA_TOKEN")
-        if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
-            return "ollama"
-        for env_var in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):
-            val = os.getenv(env_var)
-            if val:
-                return val
-        # Fall back to what _load_env_vars resolved (may be a Cliara token)
+        resolved = self._resolve_llm_credentials()
+        if resolved:
+            return resolved[1]
         return self.settings.get("llm_api_key")
 
     def get_llm_provider(self) -> Optional[str]:
         """Get LLM provider name (including Cliara Cloud from token file)."""
-        if os.getenv("CLIARA_TOKEN"):
-            return "cliara"
-        if os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST"):
-            return "ollama"
-        if os.getenv("ANTHROPIC_API_KEY"):
-            return "anthropic"
-        if os.getenv("GROQ_API_KEY"):
-            return "groq"
-        if os.getenv("GEMINI_API_KEY"):
-            return "gemini"
-        if os.getenv("OPENAI_API_KEY"):
-            return "openai"
-        # Fall back to what _load_env_vars resolved (may be "cliara" from token file)
+        resolved = self._resolve_llm_credentials()
+        if resolved:
+            return resolved[0]
         return self.settings.get("llm_provider")
 
     def get_ollama_base_url(self) -> str:

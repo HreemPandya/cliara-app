@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -69,6 +70,8 @@ class NLHandler:
         self._openai_embedding_client: Optional[Any] = None
         # Small TTL cache to avoid re-scanning the same directory tree on every NL query.
         self._dir_listing_cache: Dict[str, Tuple[float, str]] = {}
+        # Read-only git snapshot is cheap; short TTL avoids duplicate work in one session burst.
+        self._git_snapshot_cache: Dict[str, Tuple[float, str]] = {}
 
     # ------------------------------------------------------------------
     # Provider initialisation
@@ -342,6 +345,24 @@ class NLHandler:
             return True
         return self._looks_path_or_listing_intent(query)
 
+    def _should_include_directory_listing_for_macro(
+        self,
+        query: str,
+        context: Optional[dict] = None,
+    ) -> bool:
+        """Like :meth:`_should_include_directory_listing`, plus build/test/project hints for macros."""
+        if self._should_include_directory_listing(query, context):
+            return True
+        q = (query or "").strip().lower()
+        if not q:
+            return False
+        return re.search(
+            r"\b(tests?|test\s|build|lint|pyproject|cargo\.toml|makefile|"
+            r"src/|app/|dist/|package\.json|project|package|monorepo|"
+            r"module|import|script|eslint|prettier|pytest|jest)\b",
+            q,
+        ) is not None
+
     def _gather_directory_listing(
         self, cwd_path: str, max_depth: int = 2, max_entries: int = 80,
     ) -> str:
@@ -404,6 +425,74 @@ class NLHandler:
         return listing
 
     # ------------------------------------------------------------------
+    # Read-only git snapshot (grounding for NL / macros — not prescriptive)
+    # ------------------------------------------------------------------
+
+    def _gather_git_readonly_snapshot(self, cwd_path: str) -> str:
+        """
+        Run a few read-only ``git`` commands in *cwd_path* and return a short
+        text block for the LLM. Fails empty if not a git work tree or ``git``
+        is unavailable. Cached briefly to avoid repeated subprocess work.
+        """
+        root = Path(cwd_path).expanduser().resolve()
+        if not (root / ".git").exists():
+            return ""
+
+        cache_key = str(root)
+        now = time.monotonic()
+        ttl = 3.0
+        max_len = 3500
+        cmd_timeout = 4.0
+
+        cached = self._git_snapshot_cache.get(cache_key)
+        if cached and (now - cached[0]) <= ttl:
+            return cached[1]
+
+        def _run(args: List[str]) -> str:
+            try:
+                r = subprocess.run(
+                    ["git", *args],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=cmd_timeout,
+                )
+                if r.returncode != 0:
+                    return ""
+                return (r.stdout or "").strip()
+            except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+                return ""
+
+        parts: List[str] = []
+        st = _run(["status", "-sb"])
+        if st:
+            parts.append(f"git status -sb:\n{st}")
+        br = _run(["branch", "--show-current"])
+        if br:
+            parts.append(f"current branch (name): {br}")
+        head = _run(["log", "-1", "--oneline"])
+        if head:
+            parts.append(f"HEAD (latest commit on this branch): {head}")
+        rem = _run(["remote"])
+        if rem:
+            names = [x for x in rem.split() if x]
+            if names:
+                parts.append(f"git remotes: {', '.join(names)}")
+        ab = _run(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        if ab:
+            m = re.match(r"^(\d+)\s+(\d+)$", ab.strip())
+            if m:
+                parts.append(
+                    f"vs upstream (ahead/behind): {m.group(1)} ahead, {m.group(2)} behind"
+                )
+
+        out = "\n\n".join(parts)
+        if len(out) > max_len:
+            out = out[:max_len] + "\n... (truncated)"
+        self._git_snapshot_cache[cache_key] = (now, out)
+        return out
+
+    # ------------------------------------------------------------------
     # Context builder
     # ------------------------------------------------------------------
 
@@ -411,12 +500,18 @@ class NLHandler:
         self,
         context: Optional[dict] = None,
         include_directory_listing: bool = False,
+        include_git_snapshot: bool = False,
     ) -> dict:
         """Build context information for LLM.
 
         When *include_directory_listing* is True a compact filesystem
         snapshot of the cwd (depth 2) is included so the model can
         resolve ambiguous / fuzzy path references.
+
+        When *include_git_snapshot* is True and the cwd is a git work tree, a
+        read-only **git** snapshot (status, branch, last commit, remotes) is
+        added under ``git_snapshot`` for grounding. The model still chooses
+        commands; this is not a hard-coded macro.
         """
         ctx = context.copy() if context else {}
 
@@ -441,6 +536,11 @@ class NLHandler:
 
         if include_directory_listing and "directory_listing" not in ctx:
             ctx["directory_listing"] = self._gather_directory_listing(ctx["cwd"])
+
+        if include_git_snapshot and ctx.get("has_git"):
+            snap = self._gather_git_readonly_snapshot(ctx["cwd"])
+            if snap:
+                ctx["git_snapshot"] = snap
 
         return ctx
 
@@ -492,7 +592,30 @@ class NLHandler:
         if dir_listing:
             prompt += f"\nDirectory listing (depth 2 from cwd):\n{dir_listing}\n"
 
+        git_snap = (context.get("git_snapshot") or "").strip()
+        if git_snap:
+            prompt += (
+                "\nRead-only **git** snapshot in the current directory (grounding only):\n"
+                f"{git_snap}\n"
+            )
+
         return prompt
+
+    def _create_macro_prompt(self, query: str, context: dict) -> str:
+        """User message for ``nl_macro_propose`` — same facts as :meth:`_create_prompt` plus macro framing.
+
+        A git snapshot, when present, is already included in *base* via :meth:`_create_prompt`.
+        """
+        base = self._create_prompt(query, context)
+        block = (
+            "\n\n---\n"
+            "Macro design: output a **reusable** multi-step shell workflow the user can save and run again "
+            "in similar projects. Each command is one string in the JSON array, suitable for the host shell. "
+            "If a read-only git snapshot appears above, use it only to interpret vague wording (e.g. what "
+            '"latest", "clean", or "tip" might mean here); the suggested commands should still be generally '
+            "useful routines, not a copy-paste of the snapshot text.\n"
+        )
+        return base + block
 
     def _create_answer_prompt(self, query: str, context: dict) -> str:
         """Create informational-answer prompt for direct autonomous responses."""
@@ -933,13 +1056,20 @@ class NLHandler:
         sample = self._response_snippet(response)
         return [], f"Could not parse LLM output into commands. Model output sample: {sample}"
     
-    def generate_commands_from_nl(self, nl_description: str, context: Optional[dict] = None) -> List[str]:
+    def generate_commands_from_nl(
+        self,
+        nl_description: str,
+        context: Optional[dict] = None,
+        *,
+        include_git_snapshot: bool = False,
+    ) -> List[str]:
         """
         Generate commands from natural language description (for NL macros).
         
         Args:
             nl_description: Natural language description of what to do
             context: Optional context information
+            include_git_snapshot: When True, attach read-only git snapshot if cwd is a repo (macro fallback path).
         
         Returns:
             List of shell commands
@@ -949,7 +1079,11 @@ class NLHandler:
         
         try:
             include_listing = self._should_include_directory_listing(nl_description, context)
-            context_info = self._build_context(context, include_directory_listing=include_listing)
+            context_info = self._build_context(
+                context,
+                include_directory_listing=include_listing,
+                include_git_snapshot=include_git_snapshot,
+            )
             prompt = self._create_prompt(nl_description, context_info)
             response = self._call_llm("nl_to_commands", prompt)
             commands, _ = self._parse_response(response)
@@ -1057,16 +1191,24 @@ class NLHandler:
             return None, [], "", "LLM not configured"
 
         try:
-            include_listing = self._should_include_directory_listing(nl_description, context)
-            context_info = self._build_context(context, include_directory_listing=include_listing)
-            prompt = self._create_prompt(nl_description, context_info)
+            include_listing = self._should_include_directory_listing_for_macro(
+                nl_description, context
+            )
+            context_info = self._build_context(
+                context,
+                include_directory_listing=include_listing,
+                include_git_snapshot=True,
+            )
+            prompt = self._create_macro_prompt(nl_description, context_info)
             response = self._call_llm("nl_macro_propose", prompt)
             name, commands, desc, expl = self._parse_macro_proposal_loose(
                 response, nl_description
             )
             if not commands:
                 # Model returned unusable text ΓÇö fall back to command-only agent
-                commands_fb = self.generate_commands_from_nl(nl_description, context)
+                commands_fb = self.generate_commands_from_nl(
+                    nl_description, context_info, include_git_snapshot=True
+                )
                 if (
                     commands_fb
                     and not (len(commands_fb) == 1 and str(commands_fb[0]).startswith("#"))

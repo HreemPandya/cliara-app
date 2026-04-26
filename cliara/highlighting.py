@@ -24,6 +24,7 @@ from pygments.token import (
     Punctuation,
 )
 from pygments.style import Style as PygmentsStyle
+from typing import Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -263,12 +264,13 @@ THEMES = {
             "border": "bright_red",
             "title_brand": "bold bright_red",
             "title_sep": "dim",
-            "title_tagline": "bold ansiwhite",
+            # Rich (macro / tips panels) does not accept Pygments-style "ansiwhite"
+            "title_tagline": "bold white",
             "meta": "dim cyan",
             "heading": "bold cyan",
             "rule": "dim bright_black",
             "kbd": "bold bright_red",
-            "body": "ansiwhite",
+            "body": "white",
             "hint": "dim bright_black",
             "footer_icon": "bold yellow",
             "footer": "dim bright_cyan",
@@ -384,6 +386,40 @@ def get_ui_info_style(theme_name: str) -> str:
     return str(THEMES[name].get("ui_info", THEMES[DEFAULT_THEME].get("ui_info", "bold magenta")))
 
 
+# Pygments/prompt_toolkit use names like "ansiwhite"; Rich's Style.parse does not.
+# Longest tokens first so e.g. ansibrightblack replaces before ansiblack.
+_RICH_TIPS_PYGMENTS_TO_STD: Tuple[Tuple[str, str], ...] = (
+    ("ansibrightwhite", "bright_white"),
+    ("ansibrightblack", "bright_black"),
+    ("ansibrightmagenta", "bright_magenta"),
+    ("ansibrightcyan", "bright_cyan"),
+    ("ansibrightblue", "bright_blue"),
+    ("ansibrightgreen", "bright_green"),
+    ("ansibrightyellow", "bright_yellow"),
+    ("ansibrightred", "bright_red"),
+    ("ansiwhite", "white"),
+    ("ansiblack", "black"),
+    ("ansigray", "grey"),
+    ("ansimagenta", "magenta"),
+    ("ansicyan", "cyan"),
+    ("ansiblue", "blue"),
+    ("ansigreen", "green"),
+    ("ansiyellow", "yellow"),
+    ("ansired", "red"),
+)
+
+
+def _tips_panel_style_string_for_rich(style: str) -> str:
+    """Rewrite Pygments-style ansi* color tokens to Rich-accepted names."""
+    if not style or not isinstance(style, str):
+        return style
+    out = style
+    for pyg, rich_name in _RICH_TIPS_PYGMENTS_TO_STD:
+        if pyg in out:
+            out = out.replace(pyg, rich_name)
+    return out
+
+
 def get_tips_panel_styles(theme_name: str) -> dict:
     """
     Rich style map for the startup / ``tips`` panel (border, title, body tiers).
@@ -395,7 +431,7 @@ def get_tips_panel_styles(theme_name: str) -> dict:
     raw = THEMES[name].get("tips_panel")
     if not raw:
         raw = THEMES[DEFAULT_THEME]["tips_panel"]
-    return dict(raw)
+    return {k: _tips_panel_style_string_for_rich(v) if isinstance(v, str) else v for k, v in raw.items()}
 
 
 def get_style_for_theme(theme_name: str):

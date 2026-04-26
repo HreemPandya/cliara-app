@@ -492,7 +492,9 @@ class MacroCommandMixin:
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
-        commands = self.nl_handler.generate_commands_from_nl(nl_description, context)
+        commands = self.nl_handler.generate_commands_from_nl(
+            nl_description, context, include_git_snapshot=True
+        )
 
         if not commands or (len(commands) == 1 and commands[0].startswith("#")):
             print_error(f"[Error] Could not generate commands: {commands[0] if commands else 'Unknown error'}")

@@ -50,6 +50,89 @@ def _validate_session_reflect_steps(data: Any) -> Optional[List[Dict[str, Any]]]
     return validate_session_reflect_steps(data)
 
 
+def _openai_compat_text_from_content(content: Any) -> str:
+    """Turn ``message.content`` or a stream ``delta`` into a plain string.
+
+    Some OpenAI-compatible APIs (e.g. Gemini) return a list of part dicts; reading
+    only ``.content`` as *str* yields ``""`` and looks like a failed model call.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                out.append(block)
+            elif isinstance(block, dict):
+                t = block.get("text")
+                if t is None and isinstance(block.get("content"), str):
+                    t = block["content"]
+                if t:
+                    out.append(t)
+            else:
+                t = getattr(block, "text", None) or str(block) if block is not None else None
+                if t:
+                    out.append(t)
+        return "".join(out)
+    return str(content) if content else ""
+
+
+# Markdown code fences: first non-empty line is often only ```, which
+# ``.strip("`\`\"'")`` can erase entirely (false "empty" commit line).
+_MD_FENCE_LINE = re.compile(r"^`{3,}[a-zA-Z0-9_.-]*\s*$")
+# Conventional first line: optional bullet, type(scope)?: rest
+# MULTILINE: second-pass search finds a commit line not at the start of the blob.
+# \s* before ":" allows "chore : x"; \s* after ":" allows "chore:go" (no space).
+_CC_LINE = re.compile(
+    r"^\s*[-*]?\s*"
+    r"(revert|feat|fix|refactor|docs|style|test|chore|perf|ci|build)"
+    r"(?:\([^)]+\))?\s*:\s*\S.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _first_usable_commit_line(raw: str) -> str:
+    """Return one conventional commit line, or '' if the model output is unusable."""
+    s0 = (raw or "").strip()
+    if s0:
+        # Some models send reasoning in XML-like blocks; strip so the line scan sees the line.
+        s0 = re.sub(
+            r"<" + "thinking" + r">[\s\S]*?</" + "thinking" + r">\s*",
+            "",
+            s0,
+            flags=re.IGNORECASE,
+        )
+        s0 = re.sub(
+            r"<" + "redacted" + r"_thinking>[\s\S]*?" + r"</" + "redacted" + r"_thinking>\s*",
+            "",
+            s0,
+            flags=re.IGNORECASE,
+        )
+        s0 = s0.strip()
+    if not s0:
+        return ""
+    raw = s0
+    for ln in (raw or "").splitlines():
+        s = ln.strip()
+        if not s or _MD_FENCE_LINE.match(s):
+            continue
+        s = s.strip("'\"")  # do not use strip(\"'`\") — lone ``` lines break that
+        if s.startswith("`") and s.endswith("`") and s.count("`") == 2 and len(s) > 2:
+            s = s[1:-1].strip()  # inline `chore: ...`
+        m = _CC_LINE.match(s)
+        if m:
+            t = m.group(0).strip()
+            t = re.sub(r"^[-*]\s+", "", t, count=1)
+            return t
+    for m in _CC_LINE.finditer(raw or ""):
+        t = m.group(0).strip()
+        t = re.sub(r"^[-*]\s+", "", t, count=1)
+        return t
+    return ""
+
+
 class NLHandler:
     """Handles natural language to command conversion using LLM."""
 
@@ -826,15 +909,21 @@ class NLHandler:
                 stream = self.llm_client.chat.completions.create(stream=True, **request_kwargs)
                 full_content: List[str] = []
                 for chunk in stream:
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
-                    if delta:
-                        stream_callback(delta)
-                        full_content.append(delta)
+                    if not chunk.choices:
+                        continue
+                    delta_obj = chunk.choices[0].delta
+                    piece = _openai_compat_text_from_content(
+                        getattr(delta_obj, "content", None) if delta_obj else None
+                    )
+                    if piece:
+                        stream_callback(piece)
+                        full_content.append(piece)
                 return "".join(full_content).strip()
             else:
                 response = self.llm_client.chat.completions.create(**request_kwargs)
-                content = response.choices[0].message.content
-                return (content or "").strip()
+                msg = response.choices[0].message
+                text = _openai_compat_text_from_content(getattr(msg, "content", None))
+                return text.strip()
         except Exception as e:
             raise Exception(self._openai_compat_error_message(e)) from e
 
@@ -1729,27 +1818,24 @@ Rules (Conventional Commits):
   docs (documentation only), style (formatting/lint, no logic), test (tests), chore (misc/deps/config)
 - Extras: perf (performance), ci (CI/CD), build (build/packaging/deps), revert (undo a commit)
 - Prefer the primary change type (usually feat or fix) when several apply
-- Keep the line reasonably short (~50ΓÇô72 chars when practical)
+- Keep the line reasonably short (~50-72 chars when practical)
 - Be specific about what the diff actually changes
-- Return ONLY the commit message ΓÇö one line, no quotes, no explanation"""
+- Return ONLY the commit message (one line, no quotes, no explanation)
+- Do not use markdown, bullets, or code blocks (no ```); output the line as plain text only"""
 
-            response = self._call_llm_stream("commit_message", prompt, stream_callback)
-
-            # Normalise model output to a single conventional-commit line.
-            raw = (response or "").strip()
-            if raw:
-                # Keep the first non-empty line and remove wrapper characters
-                # that models sometimes add around short text responses.
-                first_line = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
-                msg = first_line.strip().strip("`\"'")
+            msg = ""
+            for attempt in range(3):
+                response = self._call_llm_stream("commit_message", prompt, stream_callback)
+                msg = _first_usable_commit_line(response)
                 if msg:
                     return msg
+                if attempt < 2:
+                    time.sleep(0.4)
 
-            # If the model returns an empty/blank response, fall back so push
-            # can still proceed instead of aborting after staging.
+            # Empty reply or unparseable output: fall back so push can proceed after staging.
             print_dim(
-                "  LLM returned no usable commit line; using heuristic message "
-                "(check API key, model id, or rate limits)."
+                "  No usable line from the model (retried); using heuristic message. "
+                "If this persists, check the API key, model id, and provider/gateway health."
             )
             return self._stub_commit_message(files, context)
 

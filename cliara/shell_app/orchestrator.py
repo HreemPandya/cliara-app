@@ -46,7 +46,6 @@ from cliara.translation.core import (
     translate_pipeline,
 )
 from cliara import regression
-from cliara.self_upgrade import is_cliara_pip_install_command
 from cliara.chat_export import (
     format_last_run_bundle,
     format_session_for_chat,
@@ -2127,73 +2126,6 @@ class CliaraShell(
         except Exception:
             pass
 
-    def _run_cliara_pip_self_upgrade(self, original: str) -> bool:
-        """
-        Run ``sys.executable -m pip install --upgrade cliara`` so the active
-        environment is updated. Skips the shell wrapper (PowerShell/cmd) so the
-        interpreter running Cliara is always the one pip targets.
-        """
-        from cliara.self_upgrade import (
-            build_pip_upgrade_cliara_argv,
-            stderr_suggests_file_in_use,
-            windows_replace_failure_hint,
-        )
-
-        argv = build_pip_upgrade_cliara_argv(original)
-        display = subprocess.list2cmdline(argv)
-        print_info(f"[Cliara] Upgrading Cliara: {display}")
-
-        self.last_stderr = ""
-        self.last_stdout = ""
-        self.last_command = original.strip()
-        self._persist_last_command()
-        start_time = time.time()
-
-        try:
-            r = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600,
-            )
-        except subprocess.TimeoutExpired:
-            print_error("[Cliara] pip timed out (10 minutes).")
-            self.last_exit_code = -1
-            self._session_record_command(display, False)
-            self.history.set_last_exit_ts(self.last_exit_code, start_time)
-            self.show_shell_exit_in_prompt = True
-            return False
-
-        if r.stdout:
-            print(r.stdout, end="")
-        if r.stderr:
-            print(r.stderr, end="", file=sys.stderr)
-
-        self.last_stdout = r.stdout or ""
-        self.last_stderr = r.stderr or ""
-        self.last_exit_code = r.returncode
-        ok = r.returncode == 0
-        elapsed = time.time() - start_time
-        self._last_command_elapsed = elapsed
-        self._session_record_command(display, ok)
-        self.history.set_last_exit_ts(self.last_exit_code, start_time)
-
-        if not ok and platform.system() == "Windows" and stderr_suggests_file_in_use(
-            self.last_stderr
-        ):
-            print()
-            print_warning("[Cliara] Could not replace files while Cliara is running.")
-            print_dim(windows_replace_failure_hint())
-        elif ok:
-            print_success(
-                "[Cliara] pip finished. Restart Cliara to load the new version."
-            )
-
-        self.show_shell_exit_in_prompt = True
-        return ok
-
     # ------------------------------------------------------------------
     # NL query confirmation with copy option
     # ------------------------------------------------------------------
@@ -2914,11 +2846,6 @@ class CliaraShell(
         print_help_cmd("tips", "Show quick-tips panel (startup banner)")
         print_help_cmd("last", "Repeat the last command")
         print_help_cmd("doctor", "Setup health check (shell, LLM, macros, config)")
-        print_help_cmd(
-            "upgrade-cliara [pip flags]",
-            "Same as pip install --upgrade cliara (this interpreter)",
-            pad_to=36,
-        )
         print_help_cmd("history [N]", "Show last N commands (default 20)")
         print_help_cmd("history clear", "Wipe command history (also: clear-history)")
         print_help_cmd(

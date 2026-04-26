@@ -85,7 +85,6 @@ CLIARA_BUILTIN_COMMANDS = frozenset(
         "readme",
         "last",
         "doctor",
-        "upgrade-cliara",
         "explain",
         "lint",
         "push",

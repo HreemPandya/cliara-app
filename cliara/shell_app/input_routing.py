@@ -4,7 +4,6 @@ import os
 import platform
 
 from cliara.copilot_gate import InputSource
-from cliara.self_upgrade import is_cliara_pip_install_command
 from cliara.shell_app.runtime import (
     _is_explain_last_rest,
     _looks_like_fix,
@@ -31,10 +30,6 @@ class InputRoutingMixin:
         import sys
 
         try:
-            if is_cliara_pip_install_command(command.strip()):
-                ok = self._run_cliara_pip_self_upgrade(command.strip())
-                return 0 if ok else (self.last_exit_code or 1)
-
             assessment = self._risk_engine.assess(command)
             non_interactive = not sys.stdin.isatty()
 
@@ -120,14 +115,6 @@ class InputRoutingMixin:
 
         if user_input.strip().lower() == "clear-history":
             self._handle_clear_command_history()
-            return
-
-        _u_strip = user_input.strip()
-        _u_low = _u_strip.lower()
-        if _u_low == "upgrade-cliara" or _u_low.startswith("upgrade-cliara "):
-            tail = _u_strip[14:].strip() if len(_u_strip) >= 14 else ""
-            synthetic = f"pip install --upgrade cliara {tail}".strip()
-            self._run_cliara_pip_self_upgrade(synthetic)
             return
 
         if user_input.strip().lower() in ("tips", "quick-tips", "quicktips"):
@@ -257,10 +244,6 @@ class InputRoutingMixin:
             os.system("cls" if platform.system() == "Windows" else "clear")
             if self.config.get("clear_show_header", True):
                 self._print_clear_status_line()
-            return
-
-        if is_cliara_pip_install_command(user_input.strip()):
-            self._run_cliara_pip_self_upgrade(user_input.strip())
             return
 
         if self.config.get("diff_preview", True) and self.diff_preview.should_preview(user_input):

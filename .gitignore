@@ -1,9 +1,11 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.so
 .Python
+pyvenv.cfg
 env/
 venv/
 ENV/
@@ -22,6 +24,13 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# If a Python environment accidentally gets bootstrapped into repo root
+Lib/
+Scripts/
+
+# If pip installs console scripts into the repo's scripts folder
+scripts/*.exe
 
 # IDEs
 .vscode/

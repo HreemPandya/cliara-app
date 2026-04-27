@@ -92,6 +92,24 @@ from cliara.shell_app.runtime import (
     print_warning,
 )
 
+
+def _git_run(args: List[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _git_ok(args: List[str]) -> bool:
+    return subprocess.run(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
 class CliaraShell(
     InputRoutingMixin,
     SessionCommandMixin,
@@ -2372,9 +2390,227 @@ class CliaraShell(
         if success:
             print_success(f"\n[Cliara] Successfully pushed to '{branch}'!")
 
+    # ------------------------------------------------------------------
+    # Prune branches  -  delete merged local branches + prune remotes
+    # ------------------------------------------------------------------
+    def handle_prune_branches(self) -> None:
+        """Delete merged local branches and prune stale remote-tracking branches."""
+        import sys
+        from cliara.shell_app.prune_branches import parse_selection_spec
+
+        if not sys.stdin.isatty():
+            print_error("[Cliara] 'prune branches' requires an interactive terminal.")
+            return
+
+        # 1) Must be in a git repo
+        if _git_run(["git", "rev-parse", "--is-inside-work-tree"]).returncode != 0:
+            print_error("[Cliara] Not inside a git repository.")
+            return
+
+        # 2) Determine remotes / default remote
+        remotes = [r for r in (_git_run(["git", "remote"]).stdout or "").splitlines() if r.strip()]
+        remote = "origin" if "origin" in remotes else (remotes[0] if remotes else "")
+
+        # 3) Determine a safe base ref to check merges against
+        base_ref, base_label = self._git_detect_default_base(remote)
+
+        # 4) Fetch/prune remote refs (non-destructive; improves accuracy)
+        if remote:
+            print_dim(f"Fetching latest refs from '{remote}'...")
+            subprocess.run(["git", "fetch", remote, "--prune"], check=False)
+
+        current_branch = ( _git_run(["git", "branch", "--show-current"]).stdout or "").strip()
+        if not current_branch:
+            print_error("[Cliara] Detached HEAD state  -  checkout a branch first.")
+            return
+
+        branches = self._git_list_local_branches()
+        candidates = [
+            b
+            for b in branches
+            if b["name"]
+            and b["name"] != current_branch
+            and b["name"] != base_label
+            and not self._git_branch_is_protected(b["name"])
+            and self._git_is_merged_into(b["name"], base_ref)
+        ]
+
+        from rich import box
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+        from rich.prompt import Prompt, Confirm
+
+        console = _cliara_console()
+
+        if not candidates:
+            print_info(f"[Cliara] No merged local branches found to delete (base: {base_label}).")
+            if remote and Confirm.ask("Prune remotes (remove stale remote-tracking branches)?", default=True):
+                self._git_prune_remotes(remotes)
+            return
+
+        # UI: show a numbered table
+        table = Table(
+            box=box.ROUNDED,
+            show_header=True,
+            header_style="bold cyan",
+            border_style="cyan",
+            pad_edge=False,
+            padding=(0, 1),
+        )
+        table.add_column("#", style="dim", justify="center", width=3)
+        table.add_column("Branch", style="bold white", no_wrap=True)
+        table.add_column("Upstream", style="cyan", no_wrap=True)
+        table.add_column("Last commit", min_width=18)
+        table.add_column("When", style="dim", width=16, no_wrap=True)
+
+        for i, b in enumerate(candidates, 1):
+            subj = (b.get("subject") or "").strip()
+            subj_t = Text(subj if subj else "(no subject)", style="white")
+            if b.get("sha"):
+                subj_t.append(f"  ({b['sha']})", style="dim")
+            table.add_row(
+                str(i),
+                b["name"],
+                b.get("upstream") or "",
+                subj_t,
+                b.get("when") or "",
+            )
+
+        panel = Panel(
+            table,
+            title=Text.from_markup(f"[bold white]Prune branches[/] [dim]·[/] [cyan]base[/] {base_label}"),
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+        console.print()
+        console.print(panel)
+        console.print()
+        print_dim("Select branches to delete: 'all' or '1-3,5' (Enter to cancel).")
+
+        spec = Prompt.ask("Delete", default="")
+        picks = parse_selection_spec(spec, max_index=len(candidates))
+        if not picks:
+            print_warning("[Cancelled]")
+            return
+
+        to_delete = [candidates[i] for i in picks]
+        names = [b["name"] for b in to_delete]
+
+        console.print()
+        console.print(Panel(
+            "\n".join(f"- {n}" for n in names),
+            title="Will delete",
+            border_style="cyan",
+            box=box.ROUNDED,
+        ))
+        console.print()
+
+        if not Confirm.ask(f"Delete {len(names)} local branch(es)?", default=False):
+            print_warning("[Cancelled]")
+            return
+
+        deleted: List[str] = []
+        failed: List[Tuple[str, str]] = []
+        for n in names:
+            r = _git_run(["git", "branch", "-d", n])
+            if r.returncode == 0:
+                deleted.append(n)
+            else:
+                err = (r.stderr or r.stdout or "").strip()
+                failed.append((n, err or "Failed"))
+
+        console.print()
+        if deleted:
+            print_success(f"[Cliara] Deleted {len(deleted)} branch(es).")
+        if failed:
+            print_warning(f"[Cliara] Could not delete {len(failed)} branch(es).")
+            for n, msg in failed:
+                print_dim(f"  - {n}: {msg}")
+
+        # Remotes prune (stale remote-tracking branches)
+        if remotes and Confirm.ask("Prune remotes (remove stale remote-tracking branches)?", default=True):
+            self._git_prune_remotes(remotes)
+
     def _unstage_all(self):
         """Reset the staging area (undo git add -A)."""
         subprocess.run(["git", "reset"], capture_output=True)
+
+    def _git_detect_default_base(self, remote: str) -> Tuple[str, str]:
+        """Return (base_ref, base_label).
+
+        base_ref is a commit-ish used for merge checks; base_label is a human label.
+        """
+        # Prefer remote HEAD, e.g. refs/remotes/origin/main
+        if remote:
+            r = _git_run(["git", "symbolic-ref", f"refs/remotes/{remote}/HEAD"])
+            ref = (r.stdout or "").strip()
+            if r.returncode == 0 and ref.startswith(f"refs/remotes/{remote}/"):
+                name = ref.split(f"refs/remotes/{remote}/", 1)[-1]
+                # Use origin/<name> if available, else fall back to local <name>
+                if _git_ok(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{name}"]):
+                    return f"{remote}/{name}", name
+                if _git_ok(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]):
+                    return name, name
+
+        # Fallback common branch names
+        for name in ("main", "master", "develop"):
+            if remote and _git_ok(["git", "show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{name}"]):
+                return f"{remote}/{name}", name
+            if _git_ok(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"]):
+                return name, name
+
+        # Last resort: whatever HEAD is right now
+        return "HEAD", "HEAD"
+
+    def _git_list_local_branches(self) -> List[Dict[str, str]]:
+        """Return local branches with minimal metadata for UI."""
+        fmt = "%(refname:short)\t%(objectname:short)\t%(committerdate:iso8601)\t%(upstream:short)\t%(subject)"
+        r = _git_run(["git", "for-each-ref", "refs/heads", f"--format={fmt}"])
+        out: List[Dict[str, str]] = []
+        for line in (r.stdout or "").splitlines():
+            parts = line.split("\t", 4)
+            if not parts:
+                continue
+            name = parts[0].strip() if len(parts) > 0 else ""
+            sha = parts[1].strip() if len(parts) > 1 else ""
+            when = parts[2].strip() if len(parts) > 2 else ""
+            upstream = parts[3].strip() if len(parts) > 3 else ""
+            subject = parts[4].strip() if len(parts) > 4 else ""
+            out.append(
+                {
+                    "name": name,
+                    "sha": sha,
+                    "when": when,
+                    "upstream": upstream,
+                    "subject": subject,
+                }
+            )
+        return out
+
+    def _git_is_merged_into(self, branch: str, base_ref: str) -> bool:
+        """True if branch tip is an ancestor of base_ref."""
+        if branch == base_ref:
+            return False
+        return _git_ok(["git", "merge-base", "--is-ancestor", branch, base_ref])
+
+    @staticmethod
+    def _git_branch_is_protected(name: str) -> bool:
+        low = (name or "").strip().lower()
+        if low in {"main", "master", "develop", "dev", "release"}:
+            return True
+        if low.startswith("release/") or low.startswith("hotfix/"):
+            return True
+        return False
+
+    def _git_prune_remotes(self, remotes: List[str]) -> None:
+        if not remotes:
+            return
+        for r in remotes:
+            print_dim(f"Pruning remote '{r}'...")
+            subprocess.run(["git", "remote", "prune", r], check=False)
+        print_success("[Cliara] Remotes pruned.")
 
     # ------------------------------------------------------------------
     # Task sessions  -  named, resumable workflow context
@@ -2748,6 +2984,11 @@ class CliaraShell(
         print_help_cmd("push", "Stage, auto-commit, and push")
         print_dim("  Detects branch, generates a conventional commit message")
         print_dim("  (feat:, fix:, docs:, ...) from the diff. Accept, edit, or cancel.\n")
+
+        print_info("  Prune Branches")
+        print_dim("  " + "-" * 38)
+        print_help_cmd("prune branches", "Delete merged local branches + prune remotes")
+        print_dim("  Shows a numbered list; pick 'all' or ranges like 1-3,5.\n")
 
         print_info("  Task Sessions")
         print_dim("  " + "-" * 38)

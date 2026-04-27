@@ -146,6 +146,10 @@ class InputRoutingMixin:
             self.handle_push()
             return
 
+        if user_input.strip().lower() == "prune branches":
+            self.handle_prune_branches()
+            return
+
         _sess_expanded = self._expand_session_shortcut(user_input)
         if _sess_expanded is not None:
             self.handle_session(_sess_expanded)

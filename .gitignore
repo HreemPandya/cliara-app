@@ -8,6 +8,7 @@ __pycache__/
 pyvenv.cfg
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/

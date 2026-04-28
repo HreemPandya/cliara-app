@@ -244,6 +244,11 @@ class InputRoutingMixin:
             self._handle_cd(user_input)
             return
 
+        if user_input.lower() == "jump" or user_input.lower().startswith("jump "):
+            query = user_input[4:].strip() if len(user_input) > 4 else ""
+            self.handle_jump(query)
+            return
+
         if user_input.lower() in ("clear", "cls"):
             os.system("cls" if platform.system() == "Windows" else "clear")
             if self.config.get("clear_show_header", True):

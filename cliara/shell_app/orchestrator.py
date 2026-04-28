@@ -58,6 +58,7 @@ from cliara.copilot_gate import (
     RiskEngine,
     CopilotGate,
 )
+from cliara.shell_app.jump import JumpDirectoryStore
 from cliara import icons
 
 
@@ -168,6 +169,13 @@ class CliaraShell(
             max_size=self.config.get("history_size", 1000),
             history_file=history_file,
         )
+
+        # Jump store  -  zoxide-style directory learning
+        try:
+            jump_store_path = self.config.config_dir / "jump_dirs.json"
+            self._jump_store = JumpDirectoryStore(store_path=jump_store_path)
+        except Exception:
+            self._jump_store = None
 
         self.running = True
         self.shell_path = self.config.get("shell")
@@ -2078,12 +2086,83 @@ class CliaraShell(
 
         try:
             os.chdir(target)
+            try:
+                store = getattr(self, "_jump_store", None)
+                if store is not None:
+                    store.record_visit(Path.cwd(), persist=True)
+            except Exception:
+                pass
         except FileNotFoundError:
             print_error(f"[Error] cd: no such directory: {args}")
         except PermissionError:
             print_error(f"[Error] cd: permission denied: {args}")
         except Exception as e:
             print_error(f"[Error] cd: {e}")
+
+    def handle_jump(self, query: str = ""):
+        """Jump to a learned directory (zoxide-style).
+
+        Usage:
+          jump <query>   Jump to best matching directory
+          jump           Jump to your top directory
+        """
+        store = getattr(self, "_jump_store", None)
+        if store is None:
+            print_error("[Error] jump store not initialized")
+            return
+
+        q = (query or "").strip()
+
+        # No query: jump to most-used/most-recent top.
+        if not q:
+            top = store.top(limit=1)
+            if top:
+                self._handle_cd(f"cd {top[0].path}")
+                return
+            print_warning("[No matches] jump")
+            return
+
+        # Path shortcut: if they provided a real directory, just cd there.
+        try:
+            p = Path(q).expanduser()
+            if not p.is_absolute():
+                p = (Path.cwd() / p)
+            if p.exists() and p.is_dir():
+                self._handle_cd(f"cd {str(p)}")
+                return
+        except Exception:
+            pass
+
+        # Exact subfolder scan: jump to the best matching directory path with
+        # trailing components exactly equal to the query segments.
+        try:
+            from cliara.shell_app.jump import find_best_exact_subdir
+
+            cwd = Path.cwd()
+            root_str = _get_project_root(cwd)
+            root = Path(root_str) if root_str else cwd
+            roots = [cwd]
+            if str(root) != str(cwd):
+                roots.append(root)
+
+            exact = find_best_exact_subdir(q, roots=roots)
+            if exact:
+                self._handle_cd(f"cd {exact}")
+                return
+        except Exception:
+            pass
+
+        # Learned fallback: auto-jump only when the top match is confident.
+        candidates = store.search(q, limit=2)
+        if candidates:
+            top = candidates[0]
+            second = candidates[1] if len(candidates) > 1 else None
+            second_match = second.match if second else 0
+            if top.match >= 88 and (second is None or (top.match - second_match) >= 10):
+                self._handle_cd(f"cd {top.path}")
+                return
+
+        print_warning(f"[No matches] jump {q}")
 
     def _handle_doctor(self):
         """Run setup health check: shell, LLM, macros, history, semantic history, config."""

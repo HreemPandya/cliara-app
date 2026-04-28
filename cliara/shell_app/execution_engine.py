@@ -456,6 +456,12 @@ class ExecutionEngineMixin:
             self.history.set_last_exit_ts(self.last_exit_code, start_time)
             return False
         finally:
+            try:
+                store = getattr(self, "_jump_store", None)
+                if store is not None and (command or "").strip():
+                    store.record_visit(Path.cwd(), persist=True)
+            except Exception:
+                pass
             self._enqueue_semantic_add(command, str(Path.cwd()), self.last_exit_code)
             self.show_shell_exit_in_prompt = True
 

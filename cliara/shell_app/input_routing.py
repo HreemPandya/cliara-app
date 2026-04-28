@@ -17,6 +17,12 @@ from cliara.shell_app.runtime import (
 class InputRoutingMixin:
     """Prompt input dispatch and NL-command execution helpers."""
 
+    _UNDO_COMMANDS = {
+        "add": "git reset",
+        "commit": "git reset --soft HEAD~1",
+        "stash": "git stash apply",
+    }
+
     def run_single_command(self, command: str) -> int:
         """
         Run a single command through the risk gate then exit.
@@ -30,6 +36,19 @@ class InputRoutingMixin:
         import sys
 
         try:
+            # Allow safe, explicit built-ins in single-command mode.
+            # (Keeps behavior predictable: `undo X` always becomes a concrete git command.)
+            expanded = self._maybe_expand_undo(command)
+            if expanded is None and command.strip().lower().startswith("undo"):
+                print_error("[Error] Usage: undo <add|commit|stash>")
+                print_dim("Examples:")
+                print_dim("  undo add    -> git reset")
+                print_dim("  undo commit -> git reset --soft HEAD~1")
+                print_dim("  undo stash  -> git stash apply")
+                return 2
+            if expanded:
+                command = expanded
+
             assessment = self._risk_engine.assess(command)
             non_interactive = not sys.stdin.isatty()
 
@@ -144,6 +163,11 @@ class InputRoutingMixin:
 
         if user_input.lower() == "push":
             self.handle_push()
+            return
+
+        if _ulow == "undo" or _ulow.startswith("undo "):
+            rest = user_input.strip()[4:].strip() if len(user_input.strip()) > 4 else ""
+            self._handle_undo(rest)
             return
 
         if user_input.strip().lower() == "prune branches":
@@ -304,6 +328,11 @@ class InputRoutingMixin:
             self.handle_history("clear")
             return True
 
+        if low == "undo" or low.startswith("undo "):
+            rest = raw[4:].strip() if len(raw) > 4 else ""
+            self._handle_undo(rest)
+            return True
+
         if low == "session" or low.startswith("session "):
             sub = raw[7:].strip() if len(raw) > 7 else ""
             self.handle_session(sub)
@@ -323,3 +352,39 @@ class InputRoutingMixin:
             return True
 
         return self.execute_shell_command(raw, capture=False)
+
+    def _maybe_expand_undo(self, user_input: str):
+        """Return expanded shell command for `undo ...`, or None if invalid/unknown."""
+        raw = (user_input or "").strip()
+        if not raw:
+            return None
+        parts = raw.split(maxsplit=2)
+        if not parts or parts[0].lower() != "undo":
+            return ""
+        if len(parts) < 2:
+            return None
+        target = parts[1].lower().strip()
+        return self._UNDO_COMMANDS.get(target)
+
+    def _handle_undo(self, args: str) -> None:
+        """Explicit undo primitives that route through the existing risk gate."""
+        rest = (args or "").strip()
+        if not rest or rest.lower() in ("help", "-h", "--help"):
+            print_info("Usage: undo <add|commit|stash>")
+            print_dim("Safe, narrow undo primitives:")
+            print_dim("  undo add    -> git reset")
+            print_dim("  undo commit -> git reset --soft HEAD~1")
+            print_dim("  undo stash  -> git stash apply")
+            return
+
+        expanded = self._maybe_expand_undo(f"undo {rest}")
+        if not expanded:
+            print_error(f"[Error] Unknown undo target: {rest.split()[0]}")
+            print_dim("Try: undo help")
+            return
+
+        print_dim(f"-> runs: {expanded}")
+
+        # Re-inject as a normal typed command so diff preview + risk gate apply.
+        self._gate_force_typed = True
+        self.handle_input(expanded)

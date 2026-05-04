@@ -121,6 +121,40 @@ def print_dim(msg: str):
     _cliara_console().print(msg, style="dim")
 
 
+def read_single_key_no_echo() -> Optional[str]:
+    """Read a single keypress from stdin without echo.
+
+    Returns the pressed key as a one-character string, or None when stdin is
+    non-interactive or the key cannot be read.
+    """
+    try:
+        if not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
+            return None
+
+        if platform.system() == "Windows":
+            import msvcrt
+
+            ch = msvcrt.getwch()
+            # Handle special keys (arrows/function keys) that return a prefix.
+            if ch in ("\x00", "\xe0"):
+                ch = msvcrt.getwch()
+            return ch
+
+        # POSIX: raw mode read
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            return sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except Exception:
+        return None
+
+
 def _ui_accent_style() -> str:
     """Rich style for the active theme accent (same as ``print_info``); reflects theme switches."""
     from cliara.console import get_ui_theme

@@ -140,13 +140,21 @@ class ExecutionEngineMixin:
 
         if fix_commands:
             fix_display = " && ".join(fix_commands)
-            self._pending_fix = fix_display
-            print_dim(f"\n  hint: try '{fix_display}' (Tab to use)")
+            # Inline fix offer (one keystroke): only for SAFE commands.
+            level, _dangerous = self.safety.check_commands(fix_commands)
+            if level == DangerLevel.SAFE:
+                self._pending_fix = None
+                self._inline_fix_offer = fix_display
+                self._inline_fix_offer_active = True
+                print_dim(f"↳ fix: {fix_display}   [press f to apply]")
+            else:
+                # Keep a non-interactive hint for fixes that would require safety confirmation.
+                self._pending_fix = fix_display
+                print_dim(f"  hint: try '{fix_display}'")
         elif explanation:
             short = explanation.split(".")[0].strip()
             if short:
-                print_dim(f"\n  hint: {short}")
-        print()
+                print_dim(f"  hint: {short}")
 
     def _maybe_translate_error(self, command: str):
         """

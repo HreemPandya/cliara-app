@@ -225,6 +225,11 @@ class CliaraShell(
         # prompt fills in this command; any other input clears it.
         self._pending_fix: Optional[str] = None
 
+        # Inline fix offer  -  set by _auto_suggest_fix() after a non-zero exit.
+        # The REPL consumes exactly one keypress: 'f' applies, anything else dismisses.
+        self._inline_fix_offer: Optional[str] = None
+        self._inline_fix_offer_active: bool = False
+
         # Regression detection  -  last report (ranked_causes, last_snapshot, current_snapshot)
         # for ? why after an automatic regression check on failure.
         self._last_regression_report: Optional[Tuple[List[Tuple[str, str]], dict, dict]] = None
@@ -852,6 +857,10 @@ class CliaraShell(
 
         while self.running:
             try:
+                # Inline fix offer: consume one key between command output and next prompt.
+                if self._inline_fix_offer_active and self._inline_fix_offer:
+                    self._handle_inline_fix_offer()
+
                 raw_cwd = str(Path.cwd())
                 cwd = _fmt_path(raw_cwd)
 
@@ -928,6 +937,35 @@ class CliaraShell(
                 if os.getenv("DEBUG"):
                     import traceback
                     traceback.print_exc()
+
+
+    def _handle_inline_fix_offer(self) -> None:
+        """Apply or dismiss the pending inline fix offer with one keypress."""
+        from cliara.shell_app.runtime import read_single_key_no_echo
+
+        fix_cmd = self._inline_fix_offer
+        # Clear first so failures don't re-trigger.
+        self._inline_fix_offer = None
+        self._inline_fix_offer_active = False
+
+        if not fix_cmd:
+            return
+
+        ch = read_single_key_no_echo()
+        if not ch:
+            return
+        if ch.lower() != "f":
+            return
+
+        # Link fix to the last command in the current task session.
+        try:
+            if self.current_session and self.current_session.commands:
+                self._next_command_parent_id = self.current_session.commands[-1].id
+        except Exception:
+            pass
+
+        # Execute immediately - no prompts.
+        self.execute_shell_command(fix_cmd, capture=False)
     
     
     def handle_nl_query(self, query: str):

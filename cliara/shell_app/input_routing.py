@@ -10,6 +10,7 @@ from cliara.shell_app.runtime import (
     print_dim,
     print_error,
     print_info,
+    print_success,
     print_warning,
 )
 
@@ -57,6 +58,142 @@ class InputRoutingMixin:
 
             success = self.execute_shell_command(command, capture=False)
             return 0 if success else self.last_exit_code or 1
+        finally:
+            self._flush_semantic_history()
+
+    @staticmethod
+    def _danger_level_from_name(name: str):
+        """Parse a DangerLevel name from config; defaults to CAUTION."""
+        from cliara.safety import DangerLevel
+
+        raw = (name or "").strip().lower()
+        if raw in ("safe", "none", "never"):
+            return DangerLevel.SAFE
+        if raw in ("caution", "warn", "warning"):
+            return DangerLevel.CAUTION
+        if raw in ("danger", "dangerous", "high"):
+            return DangerLevel.DANGEROUS
+        if raw in ("critical", "severe"):
+            return DangerLevel.CRITICAL
+        return DangerLevel.CAUTION
+
+    @staticmethod
+    def _danger_ge(a, b) -> bool:
+        """Return True when danger level *a* is >= *b* (SAFE < CAUTION < DANGEROUS < CRITICAL)."""
+        from cliara.safety import DangerLevel
+
+        order = {
+            DangerLevel.SAFE: 0,
+            DangerLevel.CAUTION: 1,
+            DangerLevel.DANGEROUS: 2,
+            DangerLevel.CRITICAL: 3,
+        }
+        return order.get(a, 0) >= order.get(b, 0)
+
+    def run_do(self, query: str) -> int:
+        """Plan then execute a natural-language request.
+
+        UX:
+        - Show a numbered plan.
+        - Require a single approval (one Enter).
+        - Execute steps sequentially and stream their output.
+        - No additional prompts unless a step crosses the configured safety boundary.
+
+        Returns process-style exit code (0 success).
+        """
+        import sys
+        from pathlib import Path
+        from cliara.shell_app.runtime import _print_safety_panel
+        from cliara.safety import DangerLevel
+
+        try:
+            if not sys.stdin.isatty():
+                print_error("[Error] 'cliara do' requires an interactive TTY (needs one Enter approval).")
+                return 2
+
+            q = (query or "").strip()
+            if not q:
+                print_error("[Error] Missing query. Usage: cliara do \"...\"")
+                return 2
+
+            context = {
+                "cwd": str(Path.cwd()),
+                "os": platform.system(),
+                "shell": getattr(self, "shell_path", None) or os.environ.get("SHELL", "bash"),
+            }
+
+            commands, explanation, _overall_level = self.nl_handler.process_query(
+                q,
+                context,
+                stream_callback=None,
+            )
+            if not commands:
+                print_error(f"[Error] {explanation}")
+                return 3
+
+            print_info("\nPlan:")
+            for i, cmd in enumerate(commands, 1):
+                print_dim(f"  {i}. {cmd}")
+            if (explanation or "").strip():
+                print_dim("\nNotes:")
+                for line in (explanation or "").strip().split("\n"):
+                    if line.strip():
+                        print_dim(f"  {line.strip()}")
+
+            try:
+                approval = input("\nPress Enter to execute this plan (anything else cancels): ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                print_warning("[Cancelled]")
+                return 130
+            if (approval or "").strip():
+                print_warning("[Cancelled]")
+                return 130
+
+            safety_boundary = self._danger_level_from_name(
+                self.config.get("do_safety_boundary", "caution")
+            )
+            safety_enabled = bool(self.config.get("safety_checks", True))
+
+            print()
+            for i, cmd in enumerate(commands, 1):
+                raw = (cmd or "").strip()
+                if not raw:
+                    continue
+
+                # Mid-stream safety prompt only when this step meets/exceeds the boundary.
+                if safety_enabled:
+                    step_level, dangerous = self.safety.check_commands([raw])
+                    if (
+                        step_level != DangerLevel.SAFE
+                        and self._danger_ge(step_level, safety_boundary)
+                    ):
+                        _print_safety_panel(self.safety, [c for c, _ in dangerous] or [raw], step_level)
+                        prompt = self.safety.get_confirmation_prompt(step_level)
+                        try:
+                            confirm = input(prompt).strip()
+                        except (EOFError, KeyboardInterrupt):
+                            print()
+                            print_warning("[Cancelled]")
+                            return 130
+                        if not self.safety.validate_confirmation(confirm, step_level):
+                            print_warning("[Cancelled]")
+                            return 130
+
+                print_info(f"[{i}/{len(commands)}] {raw}")
+                success = self._execute_nl_generated_command(raw)
+                print()
+                if not success:
+                    print_error(f"[X] Step {i} failed")
+                    # Hint-only; avoid interactive prompts mid-run.
+                    try:
+                        self._auto_suggest_fix()
+                    except Exception:
+                        pass
+                    return getattr(self, "last_exit_code", 1) or 1
+
+            print_success("[OK] Plan completed successfully")
+            return 0
         finally:
             self._flush_semantic_history()
 

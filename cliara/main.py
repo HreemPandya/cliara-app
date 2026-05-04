@@ -311,6 +311,17 @@ Once in the shell:
         help='What you want to do, in plain language',
     )
 
+    do_p = subparsers.add_parser(
+        'do',
+        help='Plan then execute a natural-language request (one Enter to approve)',
+    )
+    do_p.add_argument(
+        'query',
+        nargs='+',
+        metavar='WORDS',
+        help='What you want to do, in plain language',
+    )
+
     from cliara.gh_cli import register_gh_subparser, run_gh
 
     register_gh_subparser(subparsers)
@@ -338,6 +349,14 @@ Once in the shell:
             shell_override=args.shell,
         )
         sys.exit(0)
+    if args.command == 'do':
+        # Plan-then-execute: show a numbered plan, wait for one Enter, then run.
+        config = Config(config_dir=args.config_dir)
+        if args.shell:
+            config.set('shell', args.shell)
+        shell = CliaraShell(config)
+        exit_code = shell.run_do(' '.join(args.query))
+        sys.exit(exit_code)
     if args.command == 'gh':
         run_gh(args)
         sys.exit(0)

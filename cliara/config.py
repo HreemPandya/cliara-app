@@ -42,6 +42,10 @@ class Config:
         "history_size": 1000,
         "safety_checks": True,
         "auto_confirm_safe": False,
+        # Plan-then-execute mode (`cliara do`): only prompt mid-run when a step
+        # meets/exceeds this danger tier. One Enter plan-approval is always required.
+        # Values: safe | caution | dangerous | critical
+        "do_safety_boundary": "caution",
         "error_translation": True,  # Analyse stderr on failure and show plain-English fix
         "diff_preview": True,  # Show what destructive commands will affect before running
         "notify_after_seconds": 30,  # Desktop notification when a command takes longer than this

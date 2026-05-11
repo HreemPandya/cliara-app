@@ -205,6 +205,10 @@ Set config value live:
 cliara ~/proj ❯ config set semantic_history_enabled false
 ```
 
+## 10.1) postgres note
+
+No manual PostgreSQL setup is required. Cliara auto-downloads and configures PostgreSQL when needed. Only set PostgreSQL config if you want to use your own instance.
+
 ## 11) non-interactive CLI mode
 
 Run one command through Cliara gate and exit:

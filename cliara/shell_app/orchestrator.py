@@ -258,6 +258,17 @@ class CliaraShell(
         # Elapsed time for the last executed command (for prompt duration display)
         self._last_command_elapsed: Optional[float] = None
 
+        # IDE bridge (silent, bidirectional) - shares active editor file + last run
+        self._ide_bridge = None
+        try:
+            from cliara.ide_bridge import get_bridge
+
+            if self.config.get("ide_bridge_enabled", True):
+                self._ide_bridge = get_bridge(config_dir=self.config.config_dir, enabled=True)
+                self._ide_bridge.start()
+        except Exception:
+            self._ide_bridge = None
+
         progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
         self._initialize_llm(quiet=True)

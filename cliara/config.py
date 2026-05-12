@@ -111,6 +111,11 @@ class Config:
         "chat_export_include_stdout": False,
         "chat_export_include_regression_snapshot": False,
         "chat_export_regression_max_chars": 2000,
+
+        # IDE bridge — silent, bidirectional state exchange over local Unix socket
+        "ide_bridge_enabled": True,
+        "ide_bridge_max_stderr_chars": 12000,
+        "ide_bridge_max_stdout_chars": 8000,
         "chat_polish_enabled": False,  # chat polish — LLM compress (uses LLM when enabled)
         # When True, store truncated stdout/stderr on each session command (privacy-sensitive)
         "session_persist_output": False,

@@ -10,6 +10,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+import math
 
 import numpy as np
 from shutil import which
@@ -161,6 +162,115 @@ class NLHandler:
         self._dir_listing_cache: Dict[str, Tuple[float, str]] = {}
         # Read-only git snapshot is cheap; short TTL avoids duplicate work in one session burst.
         self._git_snapshot_cache: Dict[str, Tuple[float, str]] = {}
+        # One-time banner for the first cloud call in this interactive session.
+        self._cloud_redaction_preview_shown: bool = False
+
+    # ------------------------------------------------------------------
+    # Cloud redaction UX
+    # ------------------------------------------------------------------
+
+    _HIGH_ENTROPY_BLOB_RE = re.compile(
+        r"\b(?:[A-Za-z0-9_\-]{60,}|[A-Za-z0-9+/]{60,}={0,2})\b"
+    )
+
+    @staticmethod
+    def _shannon_entropy(s: str) -> float:
+        """Return Shannon entropy (bits/char)."""
+        if not s:
+            return 0.0
+        counts: Dict[str, int] = {}
+        for ch in s:
+            counts[ch] = counts.get(ch, 0) + 1
+        n = float(len(s))
+        ent = 0.0
+        for c in counts.values():
+            p = c / n
+            ent -= p * math.log2(p)
+        return ent
+
+    @staticmethod
+    def _looks_like_git_hash(token: str) -> bool:
+        t = (token or "").strip()
+        if len(t) not in (40, 64):
+            return False
+        return bool(re.fullmatch(r"[0-9a-fA-F]{%d}" % len(t), t))
+
+    def _unknown_high_entropy_blobs(self, text: str) -> List[str]:
+        """Return suspicious high-entropy blobs that are not already covered by known secret patterns."""
+        out: List[str] = []
+        s = (text or "")
+        for m in self._HIGH_ENTROPY_BLOB_RE.finditer(s):
+            blob = (m.group(0) or "").strip()
+            if not blob:
+                continue
+            if self._looks_like_git_hash(blob):
+                continue
+            # If it's already a known secret shape, our normal redaction should catch it.
+            if self._LIKELY_SECRET.search(blob):
+                continue
+            # Entropy threshold: reduce false positives for structured ids.
+            if self._shannon_entropy(blob) < 4.0:
+                continue
+            out.append(blob)
+        return out
+
+    def _redact_for_cloud_with_report(self, user_message: str) -> Tuple[str, int, bool]:
+        """Redact likely secrets before sending to cloud.
+
+        Returns (routed_message, redaction_count, fail_closed).
+        fail_closed indicates we detected a suspicious high-entropy blob that was not redacted.
+        """
+        if not user_message:
+            return user_message, 0, False
+
+        original_intent = self._extract_user_intent_text(user_message)
+        original_redacted_tokens = original_intent.count("<REDACTED>")
+
+        # Prefer local model for redaction when available; otherwise fall back to regex.
+        routed = user_message
+        changed = False
+
+        for prefix in ("User's request:", "User question:", "User query:"):
+            idx = routed.find(prefix)
+            if idx < 0:
+                continue
+            line_start = idx
+            line_end = routed.find("\n", idx)
+            if line_end < 0:
+                line_end = len(routed)
+            line = routed[line_start:line_end]
+            before = prefix
+            after = line[len(prefix) :]
+            raw = after.strip()
+            if not raw:
+                continue
+
+            if self._LIKELY_SECRET.search(raw):
+                redacted = self._redact_text_local(raw) or self._redact_text_regex(raw)
+                spacer = after[: len(after) - len(after.lstrip(" "))]
+                new_line = f"{before}{spacer}{redacted}"
+                routed = routed[:line_start] + new_line + routed[line_end:]
+                changed = True
+            break
+
+        if not changed:
+            # Fallback: redact the extracted intent line if it looks secret-y.
+            if original_intent and self._LIKELY_SECRET.search(original_intent):
+                redacted_intent = self._redact_text_local(original_intent) or self._redact_text_regex(original_intent)
+                # Replace only the first occurrence to keep the change bounded.
+                routed = user_message.replace(original_intent, redacted_intent, 1)
+
+        redacted_intent_now = self._extract_user_intent_text(routed)
+        redaction_count = max(
+            0,
+            redacted_intent_now.count("<REDACTED>") - original_redacted_tokens,
+        )
+
+        # Fail closed if we see high-entropy blobs that remain unredacted.
+        suspicious = self._unknown_high_entropy_blobs(original_intent)
+        fail_closed = any(blob in redacted_intent_now for blob in suspicious)
+
+        return routed, redaction_count, fail_closed
 
     # ------------------------------------------------------------------
     # Provider initialisation
@@ -872,6 +982,19 @@ class NLHandler:
         ctx.setdefault("cwd", str(Path.cwd()))
         ctx.setdefault("runtime", "Cliara")
 
+        # IDE bridge context (active editor file, workspace root, editor name)
+        if "ide" not in ctx:
+            try:
+                from cliara.ide_bridge import peek_bridge
+
+                bridge = peek_bridge()
+                if bridge is not None:
+                    ide_state = bridge.get_ide_state()
+                    if ide_state and (ide_state.active_file or ide_state.workspace_root or ide_state.editor):
+                        ctx["ide"] = ide_state.to_dict()
+            except Exception:
+                pass
+
         # Detect project type
         cwd = Path(ctx["cwd"])
         if (cwd / "package.json").exists():
@@ -925,6 +1048,17 @@ class NLHandler:
         prompt += f"- Runtime: {runtime} interactive shell (Cliara intercepts built-ins before host shell)\n"
         prompt += f"- Host Shell: {shell}\n"
         prompt += f"- Current Directory: {cwd}\n"
+        ide = context.get("ide") or {}
+        if isinstance(ide, dict):
+            af = (ide.get("active_file") or "").strip()
+            wr = (ide.get("workspace_root") or "").strip()
+            ed = (ide.get("editor") or "").strip()
+            if ed:
+                prompt += f"- IDE: {ed}\n"
+            if wr:
+                prompt += f"- IDE workspace: {wr}\n"
+            if af:
+                prompt += f"- IDE active file: {af}\n"
         prompt += "- Cliara built-ins include: help, explain, push, readme, deploy, session, config, theme, setup-llm, setup-ollama, macro aliases (mc/ml/ma/mr/mh).\n"
 
         if mentioned_builtins:
@@ -982,6 +1116,17 @@ class NLHandler:
         prompt += f"- Host shell: {shell}\n"
         prompt += f"- OS: {os_name}\n"
         prompt += f"- CWD: {cwd}\n"
+        ide = context.get("ide") or {}
+        if isinstance(ide, dict):
+            af = (ide.get("active_file") or "").strip()
+            wr = (ide.get("workspace_root") or "").strip()
+            ed = (ide.get("editor") or "").strip()
+            if ed:
+                prompt += f"- IDE: {ed}\n"
+            if wr:
+                prompt += f"- IDE workspace: {wr}\n"
+            if af:
+                prompt += f"- IDE active file: {af}\n"
         if project_type:
             prompt += f"- Project type: {project_type}\n"
         prompt += (
@@ -1007,6 +1152,17 @@ class NLHandler:
         prompt += f"- Host shell: {shell}\n"
         prompt += f"- OS: {os_name}\n"
         prompt += f"- CWD: {cwd}\n"
+        ide = context.get("ide") or {}
+        if isinstance(ide, dict):
+            af = (ide.get("active_file") or "").strip()
+            wr = (ide.get("workspace_root") or "").strip()
+            ed = (ide.get("editor") or "").strip()
+            if ed:
+                prompt += f"- IDE: {ed}\n"
+            if wr:
+                prompt += f"- IDE workspace: {wr}\n"
+            if af:
+                prompt += f"- IDE active file: {af}\n"
         if project_type:
             prompt += f"- Project type: {project_type}\n"
         prompt += (
@@ -1036,13 +1192,24 @@ class NLHandler:
         backend = self._select_backend(agent_type, user_message)
         self._last_backend_used = backend
 
-        # If we're going to the cloud and local is available, redact likely
-        # secrets in the user-intent line first.
+        # Cloud UX: redact + (once) preview; only prompt when redaction is uncertain.
         cloud_ok = bool(self.llm_client is not None and self.provider)
         local_ok = bool(self._local_enabled and self._local_llm_client is not None)
         routed_message = user_message
-        if backend == "cloud" and cloud_ok and local_ok:
-            routed_message = self._maybe_redact_request_line_for_cloud(user_message)
+        if backend == "cloud" and cloud_ok:
+            routed_message, redacted_n, fail_closed = self._redact_for_cloud_with_report(user_message)
+
+            if not self._cloud_redaction_preview_shown:
+                print_dim(f"→ cloud ({redacted_n} secrets redacted)")
+                self._cloud_redaction_preview_shown = True
+
+            if fail_closed:
+                resp = input("send anyway? [y] ").strip().lower()
+                if resp not in ("", "y", "yes"):
+                    if local_ok:
+                        backend = "local"
+                    else:
+                        raise RuntimeError("Cancelled cloud send (redaction uncertain).")
 
         # Execute on the selected backend by temporarily swapping the active client.
         if backend == "local" and local_ok:
@@ -2380,6 +2547,17 @@ Context:
 - Shell: {shell}
 - Working directory: {cwd}
 """
+        ide = context.get("ide") or {}
+        if isinstance(ide, dict):
+            ed = (ide.get("editor") or "").strip()
+            wr = (ide.get("workspace_root") or "").strip()
+            af = (ide.get("active_file") or "").strip()
+            if ed:
+                prompt += f"- IDE: {ed}\n"
+            if wr:
+                prompt += f"- IDE workspace: {wr}\n"
+            if af:
+                prompt += f"- IDE active file: {af}\n"
         if project_type:
             prompt += f"- Project type: {project_type}\n"
         if context.get("has_git"):

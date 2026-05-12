@@ -15,6 +15,12 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "cliaraGate.copyLastRunBlock",
+        "title": "Cliara: Copy Last Run Block"
+      }
+    ],
     "terminal": {
       "profiles": [
         {

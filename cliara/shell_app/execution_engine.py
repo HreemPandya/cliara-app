@@ -473,6 +473,44 @@ class ExecutionEngineMixin:
             self._enqueue_semantic_add(command, str(Path.cwd()), self.last_exit_code)
             self.show_shell_exit_in_prompt = True
 
+            # IDE bridge: publish last-run block for IDE chat/context (silent, best-effort)
+            try:
+                bridge = getattr(self, "_ide_bridge", None)
+                if bridge is not None and getattr(bridge, "enabled", True):
+                    from cliara.ide_bridge import LastRunBlock
+
+                    try:
+                        smax = int(self.config.get("ide_bridge_max_stderr_chars", 12000))
+                    except (TypeError, ValueError):
+                        smax = 12000
+                    try:
+                        omax = int(self.config.get("ide_bridge_max_stdout_chars", 8000))
+                    except (TypeError, ValueError):
+                        omax = 8000
+
+                    stderr_t = truncate_text(self.last_stderr or "", smax)
+                    stdout_t = truncate_text(self.last_stdout or "", omax)
+
+                    elapsed = self._last_command_elapsed
+                    if elapsed is None:
+                        elapsed = max(0.0, time.time() - start_time)
+
+                    shell_label = self.shell_path or os.environ.get("SHELL", "bash")
+                    block = LastRunBlock(
+                        command=self.last_command or command,
+                        cwd=str(Path.cwd()),
+                        shell=str(shell_label),
+                        os_name=platform.system(),
+                        exit_code=int(self.last_exit_code),
+                        started_ts=float(start_time),
+                        elapsed_s=float(elapsed),
+                        stdout=stdout_t,
+                        stderr=stderr_t,
+                    )
+                    bridge.set_last_run(block)
+            except Exception:
+                pass
+
     def _session_record_command(self, command: str, success: bool):
         """If a task session is active, record this command to it."""
         if not self.current_session:

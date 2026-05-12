@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 from shutil import which
-from typing import List, Tuple, Optional, Dict, Any, Callable
+from typing import List, Tuple, Optional, Dict, Any, Callable, Literal
 
 from cliara.safety import SafetyChecker, DangerLevel
 from cliara.shell_app.runtime import print_dim
@@ -149,6 +149,12 @@ class NLHandler:
         self.llm_enabled = False
         self.llm_client = None
         self.provider = None
+
+        # Optional local backend (Ollama) for transparent routing/redaction.
+        self._local_llm_client: Optional[Any] = None
+        self._local_enabled: bool = False
+        self._force_local_next: bool = False
+        self._last_backend_used: Optional[Literal["local", "cloud"]] = None
         # Lazy OpenAI client for embeddings when chat uses another provider (e.g. Groq).
         self._openai_embedding_client: Optional[Any] = None
         # Small TTL cache to avoid re-scanning the same directory tree on every NL query.
@@ -241,9 +247,250 @@ class NLHandler:
             pkg = "anthropic" if provider == "anthropic" else "openai"
             print(f"[Error] {pkg} package not installed. Run: pip install {pkg}")
             return False
+
         except Exception as e:
             print(f"[Error] Failed to initialize LLM: {e}")
             return False
+
+    def initialize_local_ollama(self, base_url: Optional[str] = None) -> bool:
+        """Initialize a *secondary* local Ollama backend without changing the cloud provider.
+
+        This enables the transparent local/cloud router. Safe to call even when
+        cloud is unconfigured.
+        """
+        url = (base_url or (self.config.get_ollama_base_url() if self.config is not None else None) or "http://localhost:11434").strip()
+        if not url:
+            return False
+        try:
+            from openai import OpenAI
+
+            kwargs: Dict[str, Any] = {
+                "api_key": "ollama", #pragma: allowlist secret
+                "base_url": url.rstrip("/") + "/v1",
+            }
+
+            # Probe Ollama before enabling.
+            import urllib.request
+            import urllib.error
+
+            try:
+                urllib.request.urlopen(url.rstrip("/"), timeout=3)
+            except urllib.error.URLError:
+                return False
+
+            self._local_llm_client = OpenAI(**kwargs)
+            self._local_enabled = True
+            # Treat overall LLM as enabled if either backend is available.
+            self.llm_enabled = bool(self.llm_enabled or self._local_enabled)
+            return True
+        except Exception:
+            return False
+
+    def force_local_next_request(self) -> None:
+        """Force the next LLM call to use the local backend (one-shot)."""
+        self._force_local_next = True
+
+    def _select_backend(
+        self,
+        agent_type: str,
+        user_message: str,
+    ) -> Literal["local", "cloud"]:
+        """Choose local vs cloud for a single LLM call.
+
+        Policy:
+        - If only one backend exists, use it.
+        - If forced, use local (one-shot).
+        - Trivial/classifier/redaction tasks prefer local.
+        - Hard reasoning (long/complex prompts) prefers cloud.
+        """
+        cloud_ok = bool(self.llm_client is not None and self.provider)
+        local_ok = bool(self._local_enabled and self._local_llm_client is not None)
+
+        if local_ok and not cloud_ok:
+            return "local"
+        if cloud_ok and not local_ok:
+            return "cloud"
+        if not cloud_ok and not local_ok:
+            return "cloud"
+
+        if self._force_local_next and local_ok:
+            self._force_local_next = False
+            return "local"
+
+        if agent_type in {"nl_router", "redact"}:
+            return "local"
+
+        # Heuristic complexity score
+        q = self._extract_user_intent_text(user_message)
+        prompt_len = len(user_message or "")
+        q_len = len(q)
+
+        # Very large prompts are usually grounding-heavy; prefer cloud.
+        if prompt_len >= 3500:
+            return "cloud"
+
+        # Lightweight tasks: short prompt + short request -> local.
+        if q_len <= 140 and prompt_len <= 1800:
+            return "local"
+
+        hard_keywords = (
+            "design",
+            "architecture",
+            "refactor",
+            "root cause",
+            "why is",
+            "why does",
+            "debug",
+            "optimize",
+            "tradeoff",
+            "pros and cons",
+            "compare",
+            "implement",
+            "migration",
+            "performance",
+            "security",
+            "concurrency",
+            "deadlock",
+            "race condition",
+        )
+        q_low = (q or "").lower()
+        if any(k in q_low for k in hard_keywords):
+            return "cloud"
+
+        # Multi-line or step-heavy tends to require more reasoning.
+        if (user_message or "").count("\n") >= 18:
+            return "cloud"
+        if re.search(r"\b(step|steps|plan|workflow|multi[- ]step)\b", q_low):
+            return "cloud"
+
+        # Default: cloud when uncertain.
+        return "cloud"
+
+    @staticmethod
+    def _extract_user_intent_text(user_message: str) -> str:
+        """Try to extract the short user intent line from the full prompt."""
+        text = (user_message or "").strip()
+        if not text:
+            return ""
+        # Common prompt prefixes in this file.
+        for prefix in ("User's request:", "User question:", "User query:"):
+            m = re.search(re.escape(prefix) + r"\s*(.*)", text)
+            if m:
+                return (m.group(1) or "").strip()
+        # Fallback: first line
+        return (text.splitlines()[0] if text else "").strip()
+
+    _LIKELY_SECRET = re.compile(
+        r"(sk-[A-Za-z0-9]{20,}"
+        r"|ghp_[A-Za-z0-9]{20,}"
+        r"|github_pat_[A-Za-z0-9_]{20,}"
+        r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+        r"|AKIA[0-9A-Z]{16}"
+        r"|AIza[0-9A-Za-z\-_]{20,}"
+        r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+        r"|\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*[^\s]{8,})",
+        flags=re.IGNORECASE,
+    )
+
+    def _maybe_redact_request_line_for_cloud(self, user_message: str) -> str:
+        """Redact likely secrets in the *user intent line* before sending to cloud."""
+        if not user_message:
+            return user_message
+
+        # Only redact the query text after known prefixes (keeps output bounded).
+        for prefix in ("User's request:", "User question:", "User query:"):
+            idx = user_message.find(prefix)
+            if idx < 0:
+                continue
+            # Extract the rest of that line.
+            line_start = idx
+            line_end = user_message.find("\n", idx)
+            if line_end < 0:
+                line_end = len(user_message)
+            line = user_message[line_start:line_end]
+            # Split at prefix.
+            before = prefix
+            after = line[len(prefix):]
+            raw = after.strip()
+            if not raw:
+                continue
+            if not self._LIKELY_SECRET.search(raw):
+                continue
+
+            redacted = self._redact_text_local(raw)
+            if not redacted:
+                redacted = self._redact_text_regex(raw)
+
+            # Preserve original spacing after prefix when possible.
+            spacer = after[: len(after) - len(after.lstrip(" "))]
+            new_line = f"{before}{spacer}{redacted}"
+            return user_message[:line_start] + new_line + user_message[line_end:]
+
+        return user_message
+
+    def _redact_text_regex(self, text: str) -> str:
+        """Conservative regex redaction fallback."""
+        if not text:
+            return text
+
+        def _sub(m: re.Match) -> str:
+            g = m.group(0)
+            # Preserve label when present.
+            if re.search(r"(?i)\b(api[_-]?key|token|secret|password)\b", g):
+                # Replace only the value portion.
+                parts = re.split(r"([:=])", g, maxsplit=1)
+                if len(parts) >= 3:
+                    return parts[0] + parts[1] + " <REDACTED>"
+            return "<REDACTED>"
+
+        return self._LIKELY_SECRET.sub(_sub, text)
+
+    def _redact_text_local(self, text: str) -> str:
+        """Use local model to redact *text* when available."""
+        if not (self._local_enabled and self._local_llm_client is not None):
+            return ""
+        # Avoid recursion: call the underlying implementation directly on the local backend.
+        orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
+        try:
+            self.provider = "ollama"
+            self.llm_client = self._local_llm_client
+            self.llm_enabled = True
+            out = self._call_llm_stream_impl("redact", text, stream_callback=None)
+            return (out or "").strip()
+        except Exception:
+            return ""
+        finally:
+            self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
+
+    def predict_next_backend_for_user_input(self, user_input: str, nl_prefix: str = "?") -> Literal["local", "cloud"]:
+        """Best-effort preview used by the prompt glyph (no LLM calls)."""
+        cloud_ok = bool(self.llm_client is not None and self.provider)
+        local_ok = bool(self._local_enabled and self._local_llm_client is not None)
+        if local_ok and not cloud_ok:
+            return "local"
+        if cloud_ok and not local_ok:
+            return "cloud"
+        if not (local_ok or cloud_ok):
+            return "cloud"
+        if self._force_local_next and local_ok:
+            return "local"
+
+        s = (user_input or "").strip()
+        low = s.lower()
+        if low.startswith((nl_prefix or "?").lower()):
+            q = s[len(nl_prefix or "?") :].strip()
+            # Preview whether it's a question (answer) vs command-generation.
+            is_question = bool(re.search(r"\b(what|why|how|when|where|explain)\b", q.lower())) or q.endswith("?")
+            agent = "cliara_qa" if is_question else "nl_to_commands"
+            # Use query text for complexity.
+            return "cloud" if self._select_backend(agent, f"User's request: {q}") == "cloud" else "local"
+        if low.startswith("explain "):
+            return "cloud" if self._select_backend("explain", f"User question: {s}") == "cloud" else "local"
+        # Heuristic: if the user is about to ask for a fix/explanation via NL prefix.
+        if low.startswith((nl_prefix or "?").lower() + " ") and re.search(r"\bfix\b", low):
+            return "cloud" if self._select_backend("fix", f"User's request: {s}") == "cloud" else "local"
+        # Default route indicator: prefer cloud when available.
+        return "cloud"
 
     # ------------------------------------------------------------------
     # Model resolution
@@ -259,9 +506,31 @@ class NLHandler:
         """
         if self.config is not None:
             model = self.config.get_llm_model(agent_type)
+            if model:
+                # Hybrid routing: when we temporarily switch to Ollama, ignore
+                # obviously cloud-only model ids (e.g. gpt-*, claude-*).
+                if (self.provider or "") == "ollama" and self._model_looks_cloud_only(model):
+                    model = None
             if model and model_id_matches_provider(model, self.provider or ""):
                 return model
         return _PROVIDER_DEFAULT_MODELS.get(self.provider or "", "gpt-4o-mini")
+
+    @staticmethod
+    def _model_looks_cloud_only(model: str) -> bool:
+        m = (model or "").strip().lower()
+        if not m:
+            return False
+        return (
+            m.startswith("gpt-")
+            or m.startswith("o1")
+            or m.startswith("o2")
+            or m.startswith("o3")
+            or m.startswith("o4")
+            or m.startswith("chatgpt-")
+            or m.startswith("claude-")
+            or m.startswith("gemini")
+            or m.startswith("text-embedding-")
+        )
 
     def resolved_model_for_display(self) -> str:
         """Model name for banners and status (primary NL agent resolution)."""
@@ -755,7 +1024,7 @@ class NLHandler:
         user_message: str,
         stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
-        """Call the LLM; optionally stream tokens to *stream_callback*.
+        """Call the LLM with transparent local/cloud routing.
 
         *stream_callback* streams for plain-text agents in
         ``_STREAMING_SAFE_AGENTS`` by default. For JSON-returning agents,
@@ -764,6 +1033,37 @@ class NLHandler:
 
         Returns the full assistant reply as a single string.
         """
+        backend = self._select_backend(agent_type, user_message)
+        self._last_backend_used = backend
+
+        # If we're going to the cloud and local is available, redact likely
+        # secrets in the user-intent line first.
+        cloud_ok = bool(self.llm_client is not None and self.provider)
+        local_ok = bool(self._local_enabled and self._local_llm_client is not None)
+        routed_message = user_message
+        if backend == "cloud" and cloud_ok and local_ok:
+            routed_message = self._maybe_redact_request_line_for_cloud(user_message)
+
+        # Execute on the selected backend by temporarily swapping the active client.
+        if backend == "local" and local_ok:
+            orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
+            try:
+                self.provider = "ollama"
+                self.llm_client = self._local_llm_client
+                self.llm_enabled = True
+                return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
+            finally:
+                self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
+
+        return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
+
+    def _call_llm_stream_impl(
+        self,
+        agent_type: str,
+        user_message: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Original LLM call implementation (no routing)."""
         if agent_type not in AGENT_REGISTRY:
             raise ValueError(f"Unknown agent type: {agent_type}")
         cfg = AGENT_REGISTRY[agent_type]

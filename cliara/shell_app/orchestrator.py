@@ -261,6 +261,12 @@ class CliaraShell(
         progress.step("Connecting LLM...")
         # Initialize LLM if API key is available
         self._initialize_llm(quiet=True)
+        # Optional: also initialize a secondary local Ollama backend for the
+        # transparent local/cloud router (never interrupts; silent if unavailable).
+        try:
+            self._initialize_local_llm_router(quiet=True)
+        except Exception:
+            pass
 
         progress.step("Detecting environment...")
         # Finish the progress bar
@@ -343,6 +349,20 @@ class CliaraShell(
                     print_warning(f"[{icons.WARN}] Failed to initialize LLM ({provider})")
         else:
             pass
+
+    def _initialize_local_llm_router(self, quiet: bool = False) -> None:
+        """Attempt to enable a secondary local Ollama backend.
+
+        This does not change the configured cloud provider; it only enables
+        transparent routing/redaction when Ollama is available.
+        """
+        # If the primary provider is already Ollama, routing isn't needed.
+        if self.nl_handler.provider == "ollama":
+            return
+        base_url = self.config.get_ollama_base_url()
+        ok = self.nl_handler.initialize_local_ollama(base_url=base_url)
+        if ok and not quiet:
+            print_success(f"[{icons.OK}] Local LLM (Ollama) ready")
 
     def _flush_semantic_history(self) -> None:
         """Persist semantic history (including in-memory-only stubs) to disk."""
@@ -817,6 +837,18 @@ class CliaraShell(
                 else:
                     buf.complete_next()
 
+            @kb.add("c-g", eager=True)
+            def _force_local_next(event):
+                """Force the next LLM request to local (Ctrl+G)."""
+                try:
+                    self.nl_handler.force_local_next_request()
+                    try:
+                        event.app.invalidate()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
             # Seed prompt history from existing command history so
             # arrow-up recalls previous sessions' commands.
             pt_history = InMemoryHistory()
@@ -866,27 +898,50 @@ class CliaraShell(
 
                 if self._prompt_session is not None:
                     # Coloured, syntax-highlighted prompt (uses current theme from config)
-                    message = []
-                    # Exit code indicator: only after a line that ran the shell (not theme/help).
-                    if self.show_shell_exit_in_prompt:
-                        if self.last_exit_code != 0:
-                            message.append(("class:prompt-exit-fail", f"X {self.last_exit_code}"))
-                            message.append(("class:prompt-sep", " "))
-                        elif self.last_command:
-                            message.append(("class:prompt-exit-success", icons.OK))
-                            message.append(("class:prompt-sep", " "))
-                    message.append(("class:prompt-name", "cliara"))
-                    message.append(("class:prompt-sep", " "))
-                    if self.current_session:
-                        message.append(("class:prompt-path", f"[{self.current_session.name}]"))
+                    nl_p = (self.config.get("nl_prefix", "?") or "?")
+
+                    def _message():
+                        message = []
+                        # Route glyph: indicates where the next LLM request will go.
+                        try:
+                            if self.nl_handler.llm_enabled:
+                                from prompt_toolkit.application.current import get_app
+                                buf_text = ""
+                                try:
+                                    buf_text = get_app().current_buffer.text
+                                except Exception:
+                                    buf_text = ""
+                                backend = self.nl_handler.predict_next_backend_for_user_input(
+                                    buf_text,
+                                    nl_prefix=nl_p,
+                                )
+                                glyph = "\u25d0" if backend == "local" else "\u25cf"  # ◐ local / ● cloud
+                                message.append(("class:prompt-sep", f"{glyph} "))
+                        except Exception:
+                            pass
+
+                        # Exit code indicator: only after a line that ran the shell (not theme/help).
+                        if self.show_shell_exit_in_prompt:
+                            if self.last_exit_code != 0:
+                                message.append(("class:prompt-exit-fail", f"X {self.last_exit_code}"))
+                                message.append(("class:prompt-sep", " "))
+                            elif self.last_command:
+                                message.append(("class:prompt-exit-success", icons.OK))
+                                message.append(("class:prompt-sep", " "))
+                        message.append(("class:prompt-name", "cliara"))
                         message.append(("class:prompt-sep", " "))
-                    message.extend([
-                        ("class:prompt-path", cwd),
-                        ("", " "),
-                        ("class:prompt-arrow", f"{prompt_arrow} "),
-                    ])
+                        if self.current_session:
+                            message.append(("class:prompt-path", f"[{self.current_session.name}]"))
+                            message.append(("class:prompt-sep", " "))
+                        message.extend([
+                            ("class:prompt-path", cwd),
+                            ("", " "),
+                            ("class:prompt-arrow", f"{prompt_arrow} "),
+                        ])
+                        return message
+
                     user_input = self._prompt_session.prompt(
-                        message,
+                        _message,
                         rprompt=self._get_right_prompt(),
                     ).strip()
                 else:
@@ -915,10 +970,20 @@ class CliaraShell(
                                 duration_str = f"[{minutes}m{seconds:02d}s]"
                             print_dim(f"  {duration_str}")
                     # Prompt line stays clean so cursor is right after "> "
+                    glyph = ""
+                    try:
+                        if self.nl_handler.llm_enabled:
+                            backend = self.nl_handler.predict_next_backend_for_user_input(
+                                "",
+                                nl_prefix=(self.config.get("nl_prefix", "?") or "?"),
+                            )
+                            glyph = ("\u25d0" if backend == "local" else "\u25cf") + " "
+                    except Exception:
+                        glyph = ""
                     if self.current_session:
-                        prompt = f"{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
+                        prompt = f"{glyph}{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
-                        prompt = f"{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
+                        prompt = f"{glyph}{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:

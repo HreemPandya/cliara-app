@@ -470,6 +470,30 @@ class ExecutionEngineMixin:
                     store.record_visit(Path.cwd(), persist=True)
             except Exception:
                 pass
+
+            # Ambient pulse: record last local test run (best-effort, no UI).
+            try:
+                from cliara.pulse import is_test_command
+
+                if is_test_command(command):
+                    from cliara.pulse_store import record_last_test_run
+
+                    cwd = Path.cwd()
+                    repo_root = _get_project_root(cwd)
+                    if repo_root:
+                        branch = _get_branch(cwd) or ""
+                        record_last_test_run(
+                            self.config.config_dir,
+                            repo_root,
+                            exit_code=int(self.last_exit_code),
+                            command=str(command or ""),
+                            cwd=str(cwd),
+                            branch=str(branch),
+                            ts=float(time.time()),
+                        )
+            except Exception:
+                pass
+
             self._enqueue_semantic_add(command, str(Path.cwd()), self.last_exit_code)
             self.show_shell_exit_in_prompt = True
 

@@ -101,6 +101,16 @@ def _run_status(config_dir=None):
     from cliara.shell_app.orchestrator import print_success, print_warning, print_dim
 
     print()
+
+
+def _run_pulse(config_dir=None):
+    """Expand the ambient prompt pulse glyph into details."""
+    from cliara.pulse import compute_pulse
+    from cliara.pulse_cli import print_pulse
+
+    config = Config(config_dir=config_dir)
+    snap = compute_pulse(config=config, fetch_ci=True)
+    print_pulse(snap)
     print_dim("  Cliara Status")
     print_dim("  ------------")
     print()
@@ -288,6 +298,7 @@ Once in the shell:
     subparsers.add_parser('login', help='Log in to Cliara Cloud (GitHub OAuth)')
     subparsers.add_parser('logout', help='Sign out and clear stored Cliara Cloud token')
     subparsers.add_parser('status', help='Show auth and LLM status')
+    subparsers.add_parser('pulse', help='Explain the ambient prompt pulse glyph')
 
     ask_p = subparsers.add_parser(
         'ask',
@@ -341,6 +352,9 @@ Once in the shell:
         sys.exit(0)
     if args.command == 'status':
         _run_status(config_dir=args.config_dir)
+        sys.exit(0)
+    if args.command == 'pulse':
+        _run_pulse(config_dir=args.config_dir)
         sys.exit(0)
     if args.command in ('ask', 'nl'):
         _run_ask(

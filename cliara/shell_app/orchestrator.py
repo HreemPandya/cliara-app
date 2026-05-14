@@ -188,6 +188,14 @@ class CliaraShell(
         # Task sessions  -  named, resumable workflow context
         sessions_path = self.config.config_dir / "sessions.json"
         self.session_store = SessionStore(store_path=sessions_path)
+
+        # Ambient pulse glyph (prompt-only; details via `cliara pulse`).
+        try:
+            from cliara.pulse import PulseComputer
+
+            self._pulse = PulseComputer(self.config)
+        except Exception:
+            self._pulse = None
         self.current_session: Optional[TaskSession] = None
         # When set, the next recorded command is linked as child of this id (e.g. fix after failure)
         self._next_command_parent_id: Optional[str] = None
@@ -907,12 +915,30 @@ class CliaraShell(
                 raw_cwd = str(Path.cwd())
                 cwd = _fmt_path(raw_cwd)
 
+                # Compute pulse once per prompt (avoid work per keystroke).
+                pulse_snap = None
+                try:
+                    if getattr(self, "_pulse", None) is not None:
+                        pulse_snap = self._pulse.get(fetch_ci=True)
+                except Exception:
+                    pulse_snap = None
+
                 if self._prompt_session is not None:
                     # Coloured, syntax-highlighted prompt (uses current theme from config)
                     nl_p = (self.config.get("nl_prefix", "?") or "?")
 
                     def _message():
                         message = []
+
+                        # Ambient pulse glyph: synthesis-only, always glyph-only.
+                        try:
+                            if pulse_snap is not None:
+                                from cliara.pulse import prompt_style_class
+
+                                message.append((prompt_style_class(pulse_snap.color), f"{pulse_snap.glyph} "))
+                        except Exception:
+                            pass
+
                         # Route glyph: indicates where the next LLM request will go.
                         try:
                             if self.nl_handler.llm_enabled:
@@ -991,10 +1017,19 @@ class CliaraShell(
                             glyph = ("\u25d0" if backend == "local" else "\u25cf") + " "
                     except Exception:
                         glyph = ""
+
+                    pulse_prefix = ""
+                    try:
+                        if pulse_snap is not None:
+                            from cliara.pulse import ansi_color_prefix, ansi_color_suffix
+
+                            pulse_prefix = f"{ansi_color_prefix(pulse_snap.color)}{pulse_snap.glyph}{ansi_color_suffix()} "
+                    except Exception:
+                        pulse_prefix = ""
                     if self.current_session:
-                        prompt = f"{glyph}{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
+                        prompt = f"{pulse_prefix}{glyph}{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
-                        prompt = f"{glyph}{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
+                        prompt = f"{pulse_prefix}{glyph}{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:
@@ -3112,6 +3147,13 @@ class CliaraShell(
         print_dim("  Just type any command  -  it passes through to your shell")
         print()
         print_help_example("ls, cd, git status, npm install", label="Examples")
+        print()
+
+        print_info("  Ambient")
+        print_dim("  " + "-" * 38)
+        print_help_cmd("pulse", "Explain the prompt pulse glyph")
+        print()
+        print_help_example("pulse")
         print()
 
         print_info("  Natural Language")

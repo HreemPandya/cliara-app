@@ -107,6 +107,10 @@ THEMES = {
             "prompt-arrow": "ansibrightblack",
             "prompt-exit-success": "ansigreen bold",
             "prompt-exit-fail": "ansired bold",
+            "prompt-pulse-green": "ansigreen bold",
+            "prompt-pulse-amber": "ansiyellow bold",
+            "prompt-pulse-red": "ansired bold",
+            "prompt-pulse-purple": "ansimagenta bold",
         },
         # Rich markup used for the instant preview line
         "preview": {
@@ -154,6 +158,10 @@ THEMES = {
             "prompt-arrow": "ansibrightblack",
             "prompt-exit-success": "ansigreen bold",
             "prompt-exit-fail": "ansired bold",
+            "prompt-pulse-green": "ansigreen bold",
+            "prompt-pulse-amber": "ansiyellow bold",
+            "prompt-pulse-red": "ansired bold",
+            "prompt-pulse-purple": "ansimagenta bold",
         },
         "preview": {
             "name":     "[bold magenta]",
@@ -201,6 +209,10 @@ THEMES = {
             "prompt-arrow": "ansibrightblack",
             "prompt-exit-success": "ansigreen bold",
             "prompt-exit-fail": "ansired bold",
+            "prompt-pulse-green": "ansigreen bold",
+            "prompt-pulse-amber": "ansiyellow bold",
+            "prompt-pulse-red": "ansired bold",
+            "prompt-pulse-purple": "ansimagenta bold",
         },
         "preview": {
             "name":     "[bold blue]",
@@ -249,6 +261,10 @@ THEMES = {
             "prompt-arrow": "ansibrightblack",
             "prompt-exit-success": "ansigreen bold",
             "prompt-exit-fail": "ansired bold",
+            "prompt-pulse-green": "ansigreen bold",
+            "prompt-pulse-amber": "ansiyellow bold",
+            "prompt-pulse-red": "ansired bold",
+            "prompt-pulse-purple": "ansimagenta bold",
         },
         "preview": {
             "name":     "[bold bright_red]",
@@ -296,6 +312,10 @@ THEMES = {
             "prompt-arrow": "ansibrightblack",
             "prompt-exit-success": "ansicyan bold",
             "prompt-exit-fail": "ansired bold",
+            "prompt-pulse-green": "ansigreen bold",
+            "prompt-pulse-amber": "ansiyellow bold",
+            "prompt-pulse-red": "ansired bold",
+            "prompt-pulse-purple": "ansimagenta bold",
         },
         "preview": {
             "name":     "[bold green]",
@@ -343,6 +363,10 @@ THEMES = {
             "prompt-arrow": "#a3a3a3",
             "prompt-exit-success": "bold #86efac",
             "prompt-exit-fail": "bold #fca5a5",
+            "prompt-pulse-green": "ansigreen bold",
+            "prompt-pulse-amber": "ansiyellow bold",
+            "prompt-pulse-red": "ansired bold",
+            "prompt-pulse-purple": "ansimagenta bold",
         },
         "preview": {
             "name":     "[bold white]",

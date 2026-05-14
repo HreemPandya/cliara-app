@@ -202,6 +202,9 @@ class InputRoutingMixin:
         self._pending_fix = None
         self.show_shell_exit_in_prompt = False
 
+        # Canonical normalized input (used throughout routing).
+        _ulow = (user_input or "").strip().lower()
+
         if self._inline_skip_once:
             self._inline_skip_once = False
 
@@ -235,22 +238,25 @@ class InputRoutingMixin:
                     user_input = command
                     self._inline_skip_once = True
 
-        if user_input.lower() in ["exit", "quit", "q"]:
+        if _ulow in ["exit", "quit", "q"]:
             self._print_exit_message()
             self.running = False
             return
 
-        if user_input.lower() in ["help", "?help"]:
+        if _ulow in ["help", "?help"]:
             self.show_help()
             return
 
-        if user_input.lower() == "version":
+        if _ulow == "version":
             from cliara import __version__
 
             print_info(f"Cliara {__version__}")
             return
 
-        _ulow = user_input.strip().lower()
+        if _ulow == "pulse" or _ulow.startswith("pulse "):
+            rest = user_input.strip()[5:].strip() if len(user_input.strip()) > 5 else ""
+            self._handle_pulse(rest)
+            return
         if _ulow == "last" or _ulow == "retry":
             if not self.last_command:
                 print_error("[Cliara] No previous command to repeat.")
@@ -502,6 +508,18 @@ class InputRoutingMixin:
             return None
         target = parts[1].lower().strip()
         return self._UNDO_COMMANDS.get(target)
+
+    def _handle_pulse(self, args: str) -> None:
+        """Show the details behind the ambient prompt pulse glyph."""
+        _ = (args or "").strip()  # reserved for future flags; keep UX minimal for now
+        try:
+            from cliara.pulse import compute_pulse
+            from cliara.pulse_cli import print_pulse
+
+            snap = compute_pulse(config=self.config, fetch_ci=True)
+            print_pulse(snap)
+        except Exception as e:
+            print_warning(f"[Cliara] pulse: {e}")
 
     def _handle_undo(self, args: str) -> None:
         """Explicit undo primitives that route through the existing risk gate."""

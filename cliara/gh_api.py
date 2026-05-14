@@ -144,9 +144,10 @@ def git_recent_commits_messages(cwd: Path, base: str, head: str, limit: int = 30
 
 
 class GitHubClient:
-    def __init__(self, token: str, api_base: str):
+    def __init__(self, token: str, api_base: str, *, timeout_s: float = 60.0):
         self._token = token
         self._api_base = api_base.rstrip("/")
+        self._timeout_s = float(timeout_s)
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -162,7 +163,7 @@ class GitHubClient:
         json_body: Optional[Dict[str, Any]] = None,
     ) -> Any:
         url = f"{self._api_base}{path}"
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=self._timeout_s) as client:
             r = client.request(method, url, headers=self._headers, params=params, json=json_body)
         if r.status_code == 401:
             raise RuntimeError(
@@ -193,6 +194,20 @@ class GitHubClient:
 
     def get_repo(self, owner: str, repo: str) -> Dict[str, Any]:
         return self._request("GET", f"/repos/{owner}/{repo}")
+
+    def list_check_runs(self, owner: str, repo: str, ref: str) -> List[Dict[str, Any]]:
+        """Return GitHub check-runs for a commit SHA or ref.
+
+        Uses the Checks API: GET /repos/{owner}/{repo}/commits/{ref}/check-runs
+        """
+        data = self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
+            params={"per_page": 100},
+        )
+        if isinstance(data, dict) and isinstance(data.get("check_runs"), list):
+            return data["check_runs"]
+        return []
 
     def list_pulls(
         self,

@@ -939,24 +939,6 @@ class CliaraShell(
                         except Exception:
                             pass
 
-                        # Route glyph: indicates where the next LLM request will go.
-                        try:
-                            if self.nl_handler.llm_enabled:
-                                from prompt_toolkit.application.current import get_app
-                                buf_text = ""
-                                try:
-                                    buf_text = get_app().current_buffer.text
-                                except Exception:
-                                    buf_text = ""
-                                backend = self.nl_handler.predict_next_backend_for_user_input(
-                                    buf_text,
-                                    nl_prefix=nl_p,
-                                )
-                                glyph = "\u25d0" if backend == "local" else "\u25cf"  # ◐ local / ● cloud
-                                message.append(("class:prompt-sep", f"{glyph} "))
-                        except Exception:
-                            pass
-
                         # Exit code indicator: only after a line that ran the shell (not theme/help).
                         if self.show_shell_exit_in_prompt:
                             if self.last_exit_code != 0:
@@ -1007,17 +989,6 @@ class CliaraShell(
                                 duration_str = f"[{minutes}m{seconds:02d}s]"
                             print_dim(f"  {duration_str}")
                     # Prompt line stays clean so cursor is right after "> "
-                    glyph = ""
-                    try:
-                        if self.nl_handler.llm_enabled:
-                            backend = self.nl_handler.predict_next_backend_for_user_input(
-                                "",
-                                nl_prefix=(self.config.get("nl_prefix", "?") or "?"),
-                            )
-                            glyph = ("\u25d0" if backend == "local" else "\u25cf") + " "
-                    except Exception:
-                        glyph = ""
-
                     pulse_prefix = ""
                     try:
                         if pulse_snap is not None:
@@ -1027,9 +998,9 @@ class CliaraShell(
                     except Exception:
                         pulse_prefix = ""
                     if self.current_session:
-                        prompt = f"{pulse_prefix}{glyph}{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
+                        prompt = f"{pulse_prefix}{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
-                        prompt = f"{pulse_prefix}{glyph}{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
+                        prompt = f"{pulse_prefix}{exit_indicator}{pfx}cliara{suf} {cwd} {prompt_arrow} "
                     user_input = input(prompt).strip()
 
                 if not user_input:

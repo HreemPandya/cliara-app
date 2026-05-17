@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -310,12 +311,35 @@ class ExecutionEngineMixin:
         self._last_command_elapsed = None
         self._persist_last_command()
 
+        # A1: causal command graph capture (silent, best-effort)
+        graph_cmd_id: Optional[str] = None
+        graph_project_root: Optional[str] = None
+        graph_git_before = {}
+        graph_git_after = {}
+        graph_env_before = dict(os.environ)
+        graph_env_after: Optional[dict] = None
+        graph_started_ts = time.time()
+        graph_proc_pid: Optional[int] = None
+        graph_pids_seen: Optional[set] = None
+        graph_ports_seen: Optional[set] = None
+        graph_monitor_stop = None
+        graph_monitor_thread = None
+
         start_time = time.time()
         spinner_delay = self.config.get("spinner_delay_seconds", 3)
         timer = None
 
         try:
             self.history.set_last_execution([command])
+
+            try:
+                graph_project_root = _get_project_root(Path.cwd()) or str(Path.cwd())
+                from cliara.causal_graph import git_status_map
+
+                graph_git_before = git_status_map(graph_project_root)
+            except Exception:
+                graph_project_root = graph_project_root or str(Path.cwd())
+                graph_git_before = {}
 
             if capture:
                 if spinner_delay > 0:
@@ -353,7 +377,7 @@ class ExecutionEngineMixin:
                 elapsed = time.time() - start_time
                 self._last_command_elapsed = elapsed
                 self._notify_completion(command, elapsed, success)
-                self._session_record_command(command, success)
+                graph_cmd_id = self._session_record_command(command, success)
                 if success and self.config.get("regression_snapshots", True):
                     self._regression_save_success(command, elapsed)
                 self.history.set_last_exit_ts(self.last_exit_code, start_time)
@@ -383,6 +407,32 @@ class ExecutionEngineMixin:
                     encoding="utf-8",
                     errors="replace",
                 )
+
+            # Optional background sampling of process tree + listening ports.
+            try:
+                graph_proc_pid = int(proc.pid)
+                graph_monitor_stop = threading.Event()
+
+                def _graph_monitor():
+                    nonlocal graph_pids_seen, graph_ports_seen
+                    try:
+                        from cliara.causal_graph import sample_process_tree_and_ports
+
+                        pids, ports = sample_process_tree_and_ports(
+                            graph_proc_pid or 0,
+                            graph_monitor_stop,
+                            sample_interval_s=float(self.config.get("graph_sample_interval_s", 0.5) or 0.5),
+                        )
+                        graph_pids_seen = set(pids or set())
+                        graph_ports_seen = set(ports or set())
+                    except Exception:
+                        return
+
+                graph_monitor_thread = threading.Thread(target=_graph_monitor, daemon=True)
+                graph_monitor_thread.start()
+            except Exception:
+                graph_monitor_stop = None
+                graph_monitor_thread = None
 
             stderr_lines: List[str] = []
             stdout_lines: List[str] = []
@@ -423,6 +473,14 @@ class ExecutionEngineMixin:
                 proc.wait()
                 timed_out = True
 
+            try:
+                if graph_monitor_stop is not None:
+                    graph_monitor_stop.set()
+                if graph_monitor_thread is not None:
+                    graph_monitor_thread.join(timeout=2)
+            except Exception:
+                pass
+
             timer.stop()
             stdout_reader.join(timeout=5)
             stderr_reader.join(timeout=5)
@@ -433,7 +491,7 @@ class ExecutionEngineMixin:
                 elapsed = time.time() - start_time
                 self._last_command_elapsed = elapsed
                 self._notify_completion(command, elapsed, False)
-                self._session_record_command(command, False)
+                graph_cmd_id = self._session_record_command(command, False)
                 self.history.set_last_exit_ts(self.last_exit_code, start_time)
                 return False
 
@@ -444,7 +502,7 @@ class ExecutionEngineMixin:
             elapsed = time.time() - start_time
             self._last_command_elapsed = elapsed
             self._notify_completion(command, elapsed, success)
-            self._session_record_command(command, success)
+            graph_cmd_id = self._session_record_command(command, success)
             if success and self.config.get("regression_snapshots", True):
                 self._regression_save_success(command, elapsed)
             self.history.set_last_exit_ts(self.last_exit_code, start_time)
@@ -460,10 +518,59 @@ class ExecutionEngineMixin:
             self.last_exit_code = -1
             elapsed = time.time() - start_time
             self._last_command_elapsed = elapsed
-            self._session_record_command(command, False)
+            graph_cmd_id = self._session_record_command(command, False)
             self.history.set_last_exit_ts(self.last_exit_code, start_time)
             return False
         finally:
+            # A1: causal command graph persist (silent, best-effort)
+            try:
+                if graph_project_root is None:
+                    graph_project_root = _get_project_root(Path.cwd()) or str(Path.cwd())
+                from cliara.causal_graph import (
+                    GraphNode,
+                    append_node,
+                    env_vars_changed,
+                    git_status_map,
+                    touched_files_from_status,
+                )
+
+                graph_git_after = git_status_map(graph_project_root)
+                graph_env_after = dict(os.environ)
+                node_id = (graph_cmd_id or "").strip() or str(uuid.uuid4())
+                touched = touched_files_from_status(graph_git_before or {}, graph_git_after or {})
+                env_changed = env_vars_changed(graph_env_before or {}, graph_env_after or {})
+
+                spawned_pids = []
+                if graph_proc_pid is not None:
+                    spawned_pids.append(int(graph_proc_pid))
+                if graph_pids_seen:
+                    spawned_pids.extend(sorted(int(x) for x in graph_pids_seen if str(x).isdigit()))
+                spawned_pids = sorted(set(int(x) for x in spawned_pids if int(x) > 0))
+
+                ports = sorted(set(int(p) for p in (graph_ports_seen or set()) if int(p) > 0))
+
+                node = GraphNode(
+                    id=node_id,
+                    command=str(command or ""),
+                    cwd=str(Path.cwd()),
+                    started_ts=float(graph_started_ts),
+                    ended_ts=float(time.time()),
+                    exit_code=int(self.last_exit_code),
+                    touched_files=touched,
+                    spawned_pids=spawned_pids,
+                    listening_ports=ports,
+                    env_vars_changed=env_changed,
+                )
+
+                append_node(
+                    config_dir=self.config.config_dir,
+                    project_root=str(graph_project_root),
+                    node=node,
+                    max_nodes=int(self.config.get("graph_max_nodes", 500) or 500),
+                )
+            except Exception:
+                pass
+
             try:
                 store = getattr(self, "_jump_store", None)
                 if store is not None and (command or "").strip():
@@ -535,10 +642,13 @@ class ExecutionEngineMixin:
             except Exception:
                 pass
 
-    def _session_record_command(self, command: str, success: bool):
-        """If a task session is active, record this command to it."""
+    def _session_record_command(self, command: str, success: bool) -> Optional[str]:
+        """If a task session is active, record this command to it.
+
+        Returns the recorded command id, or None if no session is active.
+        """
         if not self.current_session:
-            return
+            return None
 
         cwd = str(Path.cwd())
         root = _get_project_root(Path(cwd))
@@ -562,7 +672,7 @@ class ExecutionEngineMixin:
             if lo.strip():
                 stdout_preview = truncate_text(lo, omax)
 
-        self.session_store.add_command(
+        entry_id = self.session_store.add_command(
             self.current_session.id,
             command=command,
             cwd=cwd,
@@ -576,6 +686,7 @@ class ExecutionEngineMixin:
         updated = self.session_store.get_by_id(self.current_session.id)
         if updated:
             self.current_session = updated
+        return entry_id
 
     def _regression_workflow_key(self, command: str) -> Optional[str]:
         """Compute workflow key for regression snapshot."""

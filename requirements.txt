@@ -13,5 +13,8 @@ openai>=1.0.0          # OpenAI + Ollama (OpenAI-compatible API)
 anthropic>=0.25.0      # Anthropic Claude (optional — only needed for anthropic provider)
 python-dotenv>=1.0.0   # For loading .env files
 
+# System introspection (best-effort causal graph)
+psutil>=5.9.0
+
 # Database backends (optional)
 psycopg2-binary>=2.9.0  # PostgreSQL support

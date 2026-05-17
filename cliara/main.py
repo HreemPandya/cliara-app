@@ -140,6 +140,47 @@ def _run_pulse(config_dir=None):
     print()
 
 
+def _run_graph(config_dir=None):
+    """Open the causal command graph TUI for this project."""
+    import subprocess
+
+    config = Config(config_dir=config_dir)
+
+    # Best-effort project root: git repo root if available, else cwd.
+    project_root = str(Path.cwd())
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and (r.stdout or "").strip():
+            project_root = str(Path(r.stdout.strip()).resolve())
+    except Exception:
+        pass
+
+    from cliara.causal_graph import load_graph
+
+    graph = load_graph(config.config_dir, project_root)
+    try:
+        from cliara.causal_graph_tui import run_graph_tui
+
+        run_graph_tui(graph)
+    except Exception:
+        # Fallback: print a compact text view.
+        print(f"Cliara Graph — {graph.project_root}")
+        if not graph.nodes:
+            print("(no commands recorded yet)")
+            return
+        for i, n in enumerate(graph.nodes[-80:], 1):
+            status = "ok" if n.exit_code == 0 else "fail"
+            touched = f" files={len(n.touched_files)}" if n.touched_files else ""
+            ports = f" ports={len(n.listening_ports)}" if n.listening_ports else ""
+            print(f"{i:>3}. [{status}] {n.command}{touched}{ports}")
+
+
 # Prefixes that must not be sent to Ollama as model names (same idea as setup_wizard).
 _CLOUD_MODEL_PREFIXES = ("gpt-", "claude-", "llama-3.", "gemini-", "mixtral-", "text-")
 
@@ -299,6 +340,7 @@ Once in the shell:
     subparsers.add_parser('logout', help='Sign out and clear stored Cliara Cloud token')
     subparsers.add_parser('status', help='Show auth and LLM status')
     subparsers.add_parser('pulse', help='Explain the ambient prompt pulse glyph')
+    subparsers.add_parser('graph', help='Open the causal command graph (TUI)')
 
     ask_p = subparsers.add_parser(
         'ask',
@@ -355,6 +397,9 @@ Once in the shell:
         sys.exit(0)
     if args.command == 'pulse':
         _run_pulse(config_dir=args.config_dir)
+        sys.exit(0)
+    if args.command == 'graph':
+        _run_graph(config_dir=args.config_dir)
         sys.exit(0)
     if args.command in ('ask', 'nl'):
         _run_ask(

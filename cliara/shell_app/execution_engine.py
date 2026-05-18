@@ -26,6 +26,7 @@ from cliara.shell_app.runtime import (
     _NullTimer,
     _cliara_console,
     _print_safety_panel,
+    pick_thinking_word,
     print_dim,
     print_error,
     print_info,
@@ -185,6 +186,7 @@ class ExecutionEngineMixin:
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
 
+        print_dim(f"  {pick_thinking_word()}...")
         result = self.nl_handler.translate_error(
             command,
             self.last_exit_code,

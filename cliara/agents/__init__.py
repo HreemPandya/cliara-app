@@ -20,6 +20,7 @@ from cliara.agents import gh_assistant as _gh_assistant
 from cliara.agents import cliara_qa as _cliara_qa
 from cliara.agents import nl_router as _nl_router
 from cliara.agents import redact as _redact
+from cliara.agents import history_answer as _history_answer
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -50,6 +51,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
         | _cliara_qa.AGENTS
         | _nl_router.AGENTS
         | _redact.AGENTS
+        | _history_answer.AGENTS
     )
     for name, cfg in all_agents.items():
         registry[name] = {

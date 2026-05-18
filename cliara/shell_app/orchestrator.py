@@ -83,6 +83,9 @@ from cliara.shell_app.runtime import (
     _looks_like_why,
     _nl_query_plain_history_arg,
     _print_safety_panel,
+    StreamingThinkingAnimation,
+    pick_thinking_word,
+    thinking_status,
     print_dim,
     print_error,
     print_header,
@@ -391,8 +394,42 @@ class CliaraShell(
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # Git context helper (cached, used by semantic history enrichment)
+    # ------------------------------------------------------------------
+
+    _git_ctx_cache: Tuple[float, Dict[str, str]] = (0.0, {})
+
+    def _get_quick_git_context(self) -> Dict[str, str]:
+        """Return {git_branch, git_repo} with a 15 s TTL to avoid subprocess overhead.
+
+        Uses a single `git rev-parse` call (fast) rather than the full snapshot
+        used for NL grounding. Called from the hot path after every command, so
+        the TTL keeps cumulative cost negligible.
+        """
+        now = time.monotonic()
+        ts, cached = self._git_ctx_cache
+        if (now - ts) < 15.0:
+            return cached
+        ctx: Dict[str, str] = {}
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=1.5,
+                cwd=str(Path.cwd()),
+            )
+            if r.returncode == 0:
+                lines = r.stdout.strip().splitlines()
+                if len(lines) >= 2:
+                    ctx["git_repo"] = Path(lines[0].strip()).name
+                    ctx["git_branch"] = lines[1].strip()
+        except Exception:
+            pass
+        self._git_ctx_cache = (now, ctx)
+        return ctx
+
     def _semantic_history_worker(self):
-        """Background worker: get (command, cwd, exit_code, summary_override) from queue; add to semantic store."""
+        """Background worker: dequeue (command, cwd, exit_code, summary_override, git_ctx, session_name)."""
         q = self._semantic_history_queue
         store = self._semantic_history
         if not q or not store:
@@ -403,7 +440,7 @@ class CliaraShell(
                 item = q.get()
                 if item is None:
                     break
-                command, cwd, exit_code, summary_override = item
+                command, cwd, exit_code, summary_override, git_ctx, session_name = item
                 if summary_override:
                     summary = summary_override
                 else:
@@ -420,27 +457,22 @@ class CliaraShell(
                     emb_text = f"{command} {summary}".strip()
                     embedding = self.nl_handler.get_embedding(emb_text)
 
-                # Single disk write per command: main thread added the same row with persist=False.
                 store.add(
                     command=command,
                     summary=summary,
                     cwd=cwd,
                     exit_code=exit_code,
                     embedding=embedding,
+                    git_branch=git_ctx.get("git_branch"),
+                    git_repo=git_ctx.get("git_repo"),
+                    session_name=session_name,
                     persist=True,
                 )
             except Exception:
-                # Still add with empty summary so store populates (e.g. LLM timeout)
                 if item is not None:
                     try:
-                        command, cwd, exit_code, _ = item
-                        store.add(
-                            command=command,
-                            summary="",
-                            cwd=cwd,
-                            exit_code=exit_code,
-                            persist=True,
-                        )
+                        command, cwd, exit_code = item[0], item[1], item[2]
+                        store.add(command=command, summary="", cwd=cwd, exit_code=exit_code, persist=True)
                     except Exception:
                         pass
             finally:
@@ -455,7 +487,7 @@ class CliaraShell(
         cwd: Optional[str] = None,
         exit_code: Optional[int] = None,
     ):
-        """Add command to semantic history; enqueue for background summary when enabled."""
+        """Add command to semantic history; enqueue for background summary + enrichment."""
         if not self._semantic_history:
             return
         summary_override = None
@@ -467,14 +499,19 @@ class CliaraShell(
             self._semantic_history_queue is not None
             and self.config.get("semantic_history_summary_on_add", True)
         )
-        # When a worker will finalize (summary + optional embedding), keep the stub in memory only
-        # and persist once in the worker  -  avoids two full JSON writes per command.
+        # Lightweight git + session context captured synchronously (cached, ~0 ms).
+        git_ctx = self._get_quick_git_context()
+        session_name = self.current_session.name if self.current_session else None
+
         try:
             self._semantic_history.add(
                 command=command,
                 summary=summary_override or "",
                 cwd=cwd,
                 exit_code=exit_code,
+                git_branch=git_ctx.get("git_branch"),
+                git_repo=git_ctx.get("git_repo"),
+                session_name=session_name,
                 persist=not will_enqueue,
             )
         except Exception:
@@ -484,7 +521,9 @@ class CliaraShell(
         if not self.config.get("semantic_history_summary_on_add", True):
             return
         try:
-            self._semantic_history_queue.put((command, cwd, exit_code, summary_override))
+            self._semantic_history_queue.put(
+                (command, cwd, exit_code, summary_override, git_ctx, session_name)
+            )
         except Exception:
             pass
 
@@ -1114,8 +1153,7 @@ class CliaraShell(
 
         route = "commands"
         if self.nl_handler.llm_enabled:
-            from rich.status import Status
-            with Status(f"[dim]Understanding intent:[/dim] {query}", spinner="dots", console=_cliara_console()):
+            with thinking_status(query):
                 route = self.nl_handler.route_query_mode(query, context)
 
         # Informational intent: answer directly, don't force command execution.
@@ -1125,23 +1163,16 @@ class CliaraShell(
                 return
 
             stream_cb = None
-            from rich.status import Status
-            with Status(f"[dim]Answering:[/dim] {query}", spinner="dots", console=_cliara_console()) as status:
+            ql = query if len(query) <= 48 else (query[:45] + "...")
+            with thinking_status(ql) as status:
                 answer_chars = 0
 
                 if self.config.get("stream_llm", True):
-                    query_label = query if len(query) <= 48 else (query[:45] + "...")
-
                     def _answer_stream_cb(chunk: str) -> None:
                         nonlocal answer_chars
                         answer_chars += len(chunk or "")
-                        # Keep streaming UX via status updates only; printing tokens while
-                        # Status is active can be overwritten by live-render refresh.
                         if answer_chars and answer_chars % 120 == 0:
-                            status.update(
-                                f"[dim]Answering:[/dim] {query_label} "
-                                f"[dim](LLM streaming... {answer_chars} chars)[/dim]"
-                            )
+                            status.update(f"[dim]{answer_chars} chars[/dim]")
 
                     stream_cb = _answer_stream_cb
 
@@ -1168,11 +1199,10 @@ class CliaraShell(
                 print_error("[Error] No answer content returned from the LLM.")
             return
 
-        from rich.status import Status
-        with Status(f"[dim]Thinking about:[/dim] {query}", spinner="dots", console=_cliara_console()) as status:
+        ql = query if len(query) <= 48 else (query[:45] + "...")
+        with thinking_status(ql) as status:
             progress_chars = 0
             progress_tick = 0
-            query_label = query if len(query) <= 48 else (query[:45] + "...")
 
             def _nl_progress_callback(chunk: str) -> None:
                 nonlocal progress_chars, progress_tick
@@ -1180,13 +1210,9 @@ class CliaraShell(
                 next_tick = progress_chars // 120
                 if next_tick > progress_tick:
                     progress_tick = next_tick
-                    status.update(
-                        f"[dim]Thinking about:[/dim] {query_label} "
-                        f"[dim](LLM streaming... {progress_chars} chars)[/dim]"
-                    )
+                    status.update(f"[dim]{progress_chars} chars[/dim]")
 
-            # Mark this callback as safe for JSON agents: it only updates the
-            # status line and never prints raw streamed chunks.
+            # Safe for JSON agents: only updates spinner label, never prints tokens.
             setattr(_nl_progress_callback, "__cliara_json_safe__", True)
 
             commands, explanation, danger_level = self.nl_handler.process_query(
@@ -1395,16 +1421,25 @@ class CliaraShell(
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
         }
 
-        # Render once at the end so the output stays readable and consistent.
-        with Status("[dim]Analyzing last command output...[/dim]", spinner="dots", console=console):
-            explanation = self.nl_handler.explain_terminal_output(
-                self.last_command,
-                self.last_exit_code,
-                stdout,
-                stderr,
-                context,
-                stream_callback=None,
-            )
+        # Stream explanation token-by-token; animated spinner shows until first token.
+        _explain_chunks: List[str] = []
+        _explain_anim = StreamingThinkingAnimation(self.last_command[:55]).start()
+
+        def _on_explain_token(piece: str) -> None:
+            _explain_chunks.append(piece)
+
+        explanation = self.nl_handler.explain_terminal_output(
+            self.last_command,
+            self.last_exit_code,
+            stdout,
+            stderr,
+            context,
+            stream_callback=_explain_anim.wrap(on_token=_on_explain_token),
+        )
+        _explain_anim.stop()
+        if _explain_chunks:
+            print()  # end streamed line
+            explanation = "".join(_explain_chunks).strip()
 
         raw_lines = [ln.strip() for ln in (explanation or "").splitlines() if ln.strip()]
         if not raw_lines:
@@ -1495,28 +1530,26 @@ class CliaraShell(
         _cliara_console().print(Panel(text, title="Regression (vs last success)", border_style="dim"))
 
     def handle_semantic_history_search(self, query: str):
-        """
-        Search command history by intent. Called for ? find ... / ? when did I ... / ? what did I run ...
+        """Search command history by intent — routes to prose answer or command table.
+
+        Routing:
+          * Questions about past activity ("when did I set up Ollama?",
+            "did I ever run docker-compose?") → RAG prose answer + sources table.
+          * Command-seeking queries ("find the docker command I used last week",
+            "? find port command") → traditional command table + run prompt.
         """
         if not self.config.get("semantic_history_enabled", True):
             print_dim("Semantic history search is disabled. Use 'history [N]' for a plain list.")
             return
         store = self._semantic_history
         if not store or store.is_empty():
-            print_dim("No semantic history yet. Run some commands, then try again.")
-            print_dim("Use 'history [N]' for a plain list of recent commands.")
+            print_dim("No semantic history yet — run some commands first.")
             return
-        use_embeddings = self.config.get("semantic_history_use_embeddings", False)
+
         can_embed = self.nl_handler.supports_embedding_api()
         llm = self.nl_handler.llm_enabled
         if not can_embed and not llm:
-            print_dim("Semantic search needs embeddings (OpenAI API key or Ollama) and/or a chat LLM.")
-            print_dim("Set OPENAI_API_KEY for vector-only search, or run 'setup-llm' for text-based search.")
-            print_dim("Use 'history [N]' for a plain list.")
-            return
-        if not use_embeddings and not llm:
-            print_dim("Text-based history search needs a chat LLM. Run 'setup-llm', or enable semantic_history_use_embeddings with OpenAI/Ollama.")
-            print_dim("Use 'history [N]' for a plain list.")
+            print_dim("History search needs an LLM or embedding API. Run 'setup-llm'.")
             return
 
         def _cfg_int(key: str, default: int) -> int:
@@ -1531,114 +1564,211 @@ class CliaraShell(
             except (TypeError, ValueError):
                 return default
 
-        top_k = max(1, min(_cfg_int("semantic_history_top_k", 10), 100))
-        min_score = max(0.0, min(_cfg_float("semantic_history_embedding_min_score", 0.30), 1.0))
-        adaptive = bool(self.config.get("semantic_history_embedding_adaptive", True))
+        use_embeddings = self.config.get("semantic_history_use_embeddings", False)
+        top_k       = max(1, min(_cfg_int("semantic_history_top_k", 10), 100))
+        min_score   = max(0.0, min(_cfg_float("semantic_history_embedding_min_score", 0.28), 1.0))
+        adaptive    = bool(self.config.get("semantic_history_embedding_adaptive", True))
         adaptive_frac = max(0.1, min(_cfg_float("semantic_history_embedding_adaptive_frac", 0.82), 1.0))
-        hybrid_kw = bool(self.config.get("semantic_history_hybrid_keyword", True))
-        kw_pool = max(4, min(_cfg_int("semantic_history_hybrid_keyword_pool", 24), 200))
-        backfill_n = max(0, min(_cfg_int("semantic_history_backfill_per_search", 32), 200))
-        intent_max = max(20, min(_cfg_int("semantic_history_intent_max_entries", 200), 500))
+        hybrid_kw   = bool(self.config.get("semantic_history_hybrid_keyword", True))
+        kw_pool     = max(4, min(_cfg_int("semantic_history_hybrid_keyword_pool", 24), 200))
+        backfill_n  = max(0, min(_cfg_int("semantic_history_backfill_per_search", 32), 200))
+        intent_max  = max(20, min(_cfg_int("semantic_history_intent_max_entries", 200), 500))
 
-        entries = store.get_all() if use_embeddings else store.get_recent(intent_max)
-        if not entries:
-            print_dim("No matching commands found. Try a different phrase or run more commands.")
-            return
-        print_info(f"\n[Searching] {query.strip()}\n")
+        qstrip = (query or "").strip()
 
-        matches: list = []
-        qstrip = query.strip()
-        if use_embeddings:
-            if can_embed and backfill_n > 0:
-                store.backfill_missing_embeddings(self.nl_handler.get_embedding, max_entries=backfill_n)
-                entries = store.get_all()
-            matches = self.nl_handler.search_history_by_embeddings(
-                entries,
-                qstrip,
-                top_k=top_k,
-                min_score=min_score,
-                adaptive=adaptive,
-                adaptive_frac=adaptive_frac,
-            )
-            if hybrid_kw:
-                matches = self.nl_handler.merge_embedding_keyword_results(
-                    matches,
-                    entries,
-                    qstrip,
-                    target_k=top_k,
-                    keyword_pool=kw_pool,
-                )
-            # Rerank to make "when did I last ..." and similar queries feel right.
-            matches = self.nl_handler.rerank_history_matches(matches, qstrip)
-            if not matches and llm:
-                entries_recent = store.get_recent(intent_max)
-                matches = self.nl_handler.search_history_by_intent(
-                    entries_recent,
-                    qstrip,
-                    max_entries_in_prompt=intent_max,
-                )
-        else:
-            matches = self.nl_handler.search_history_by_intent(
-                entries,
-                qstrip,
-                max_entries_in_prompt=intent_max,
-            )
-        if not matches:
-            print_dim("No matching commands found. Try a different phrase or run more commands.")
-            return
+        # --- Classify intent FIRST — before any expensive I/O ---
+        # This lets us skip the embedding backfill entirely for prose-answer
+        # mode (where search_history_rag handles retrieval itself).
+        mode = self.nl_handler._classify_history_query_mode(qstrip) if llm else "commands"
+
+        # --- Load entries ---
+        entries = store.get_all()
+
+        # --- Embedding backfill: ONLY for command-table mode ---
+        # Backfilling up to 32 entries via the embedding API can take 30-60 s on
+        # Ollama (nomic-embed-text). Prose/answer mode uses search_history_rag
+        # which handles its own retrieval without needing pre-computed vectors.
+        if mode == "commands" and use_embeddings and can_embed and backfill_n > 0:
+            store.backfill_missing_embeddings(self.nl_handler.get_embedding, max_entries=backfill_n)
+            entries = store.get_all()
+
         from rich.table import Table
         from rich import box
+        from datetime import datetime
 
-        def _format_ts(ts: str) -> str:
+        def _fmt_ts(ts: str) -> str:
             ts = (ts or "").strip()
             if not ts:
                 return ""
             try:
-                from datetime import datetime
-
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                local_dt = dt.astimezone()
-                return local_dt.strftime("%Y-%m-%d %I:%M %p")
+                return dt.astimezone().strftime("%b %d, %H:%M")
             except Exception:
-                return ts
+                return ts[:10]
 
-        print_info(f"Found {len(matches)} matching command(s):\n")
-        table = Table(box=box.SIMPLE, show_header=True, header_style="bold", show_lines=False)
-        table.add_column("#", style="dim", justify="right", no_wrap=True)
-        table.add_column("When", style="dim", no_wrap=True)
-        table.add_column("Command", overflow="fold")
-        table.add_column("Summary", style="dim", overflow="fold")
-        table.add_column("Rel", style="dim", justify="right", no_wrap=True)
+        def _show_sources_table(sources: List[Dict], header: str = "") -> None:
+            """Theme-aware Rich evidence table (used in both prose and command modes)."""
+            from rich.text import Text
+            accent = _ui_accent_style()
 
-        for i, e in enumerate(matches, 1):
-            cmd = (e.get("command") or "").strip()
-            summary = (e.get("summary") or "").strip()
-            when = _format_ts(e.get("timestamp", ""))
-            rel = e.get("_rank_score", e.get("_embedding_score", None))
-            rel_str = ""
-            if isinstance(rel, (int, float)):
-                rel_str = f"{max(0.0, min(1.0, float(rel))) * 100:0.0f}%"
-            table.add_row(str(i), when, cmd, summary, rel_str)
+            if header:
+                print()
+                print_dim(header)
 
-        _cliara_console().print(table)
+            tbl = Table(
+                box=box.SIMPLE,
+                show_header=True,
+                header_style=f"bold {accent}",
+                show_lines=False,
+                padding=(0, 1),
+            )
+            tbl.add_column("#",       style="dim",         justify="right", no_wrap=True)
+            tbl.add_column("When",    style="dim",         no_wrap=True)
+            tbl.add_column("Command", style="bold white",  overflow="fold")
+            tbl.add_column("Context", overflow="fold")
+            tbl.add_column("",        justify="right",     no_wrap=True)
 
-        # Offer to run a match (more flexible than first-only).
-        try:
-            choice = input("Run which command? (1-{}; Enter to skip): ".format(len(matches))).strip().lower()
-            if not choice or choice in ("n", "no"):
+            for i, e in enumerate(sources, 1):
+                cmd     = (e.get("command") or "").strip()
+                when    = _fmt_ts(e.get("timestamp", ""))
+                branch  = (e.get("git_branch") or "").strip()
+                session = (e.get("session_name") or "").strip()
+                ec      = e.get("exit_code")
+
+                # Build context cell: branch in accent color, session italic dim
+                ctx = Text()
+                if branch:
+                    ctx.append(f"[{branch}]", style=accent)
+                if session:
+                    if branch:
+                        ctx.append("  ")
+                    ctx.append(f"#{session}", style="dim italic")
+
+                # Colored status icon
+                if ec is None:
+                    status = Text("", style="dim")
+                elif ec == 0:
+                    status = Text("✓", style="green")
+                else:
+                    status = Text("✗", style="red")
+
+                tbl.add_row(str(i), when, cmd, ctx, status)
+            _cliara_console().print(tbl)
+
+        def _render_answer_divider() -> None:
+            """Print a slim themed divider between the streamed answer and sources.
+
+            We don't re-render the answer in a panel — the streamed text IS the
+            answer. A subtle accent-colored rule separates it from the sources
+            table below so the visual hierarchy stays clear.
+            """
+            from rich.rule import Rule
+
+            accent = _ui_accent_style()
+            print()  # spacer
+            _cliara_console().print(Rule(style=accent, characters="─"))
+
+        def _run_prompt(sources: List[Dict]) -> None:
+            """Offer to re-execute one of the source commands."""
+            if not sources:
                 return
-            idx = None
-            if choice in ("y", "yes"):
-                idx = 1
-            elif choice.isdigit():
-                idx = int(choice)
-            if idx is None or idx < 1 or idx > len(matches):
-                return
-            picked = (matches[idx - 1].get("command") or "").strip()
-            if picked:
-                self.execute_shell_command(picked)
-        except (EOFError, KeyboardInterrupt):
-            print()
+            try:
+                choice = input(f"Run? (1-{len(sources)} / Enter to skip): ").strip().lower()
+                if not choice or choice in ("n", "no"):
+                    return
+                idx = 1 if choice in ("y", "yes") else (int(choice) if choice.isdigit() else None)
+                if idx and 1 <= idx <= len(sources):
+                    picked = (sources[idx - 1].get("command") or "").strip()
+                    if picked:
+                        self.execute_shell_command(picked)
+            except (EOFError, KeyboardInterrupt):
+                print()
+
+        # ==================================================================
+        # MODE A: Prose narrative answer (RAG)
+        # ==================================================================
+        if mode == "answer" and llm:
+            # Animated spinner cycles through words until first token; then clears
+            # so the answer streams directly on a clean line below.
+            _hist_anim = StreamingThinkingAnimation(qstrip[:55]).start()
+            streamed: List[str] = []
+
+            def _on_hist_token(piece: str) -> None:
+                streamed.append(piece)
+
+            answer, sources = self.nl_handler.search_history_rag(
+                entries, qstrip,
+                top_k=top_k,
+                min_score=min_score,
+                stream_callback=_hist_anim.wrap(on_token=_on_hist_token),
+            )
+            _hist_anim.stop()  # no-op if already stopped by first token
+            if streamed:
+                print()  # end streamed line
+
+            # Trust the retrieval. The sources returned by search_history_rag are
+            # exactly the entries the LLM used as context — show them all so the
+            # user sees what informed the answer. Re-filtering here would hide
+            # entries the LLM legitimately reasoned over.
+            #
+            # Display cap: keep to ≤5 for clean output.
+            if sources and len(sources) > 5:
+                # Already chronologically sorted; bias toward most recent on tie.
+                sources = sources[-5:]
+
+            if not answer:
+                if sources:
+                    print_dim("  Could not synthesize an answer, but found related entries:")
+                else:
+                    print_dim("  No relevant history found for that question.")
+                    return
+
+            if sources:
+                # Themed accent divider between streamed answer and sources.
+                _render_answer_divider()
+                _show_sources_table(
+                    sources,
+                    header=f"  Sources ({len(sources)} entr{'y' if len(sources) == 1 else 'ies'}):",
+                )
+                print()
+                _run_prompt(sources)
+            return
+
+        # ==================================================================
+        # MODE B: Command table (traditional, with optional embedding search)
+        # ==================================================================
+        matches: List[Dict] = []
+        if use_embeddings and can_embed:
+            matches = self.nl_handler.search_history_by_embeddings(
+                entries, qstrip, top_k=top_k,
+                min_score=min_score, adaptive=adaptive, adaptive_frac=adaptive_frac,
+            )
+            if hybrid_kw:
+                matches = self.nl_handler.merge_embedding_keyword_results(
+                    matches, entries, qstrip, target_k=top_k, keyword_pool=kw_pool,
+                )
+            matches = self.nl_handler.rerank_history_matches(matches, qstrip)
+            if not matches and llm:
+                matches = self.nl_handler.search_history_by_intent(
+                    store.get_recent(intent_max), qstrip, max_entries_in_prompt=intent_max,
+                )
+        elif llm:
+            matches = self.nl_handler.search_history_by_intent(
+                store.get_recent(intent_max), qstrip, max_entries_in_prompt=intent_max,
+            )
+        else:
+            matches = self.nl_handler.keyword_history_candidates(entries, qstrip, top_m=top_k)
+
+        if not matches:
+            print_dim(f"  No matching commands found for '{qstrip}'.")
+            print_dim("  Try rephrasing, or run more commands to build up history.")
+            return
+
+        print()
+        print_info(f"  Found {len(matches)} matching command(s) for: {qstrip}\n")
+        _show_sources_table(matches)
+        print()
+        _run_prompt(matches)
 
 
     def _handle_config_command(self, args: str):
@@ -1802,9 +1932,7 @@ class CliaraShell(
                 print_dim("  Start Ollama, then run 'use ollama' again.")
                 return
             _clear_incompatible_model(self)
-            # _ollama_running() already confirmed reachability → skip the second probe
-            # inside initialize_llm() to avoid a redundant network round-trip.
-            ok = self.nl_handler.initialize_llm("ollama", "ollama", base_url=base_url, skip_probe=True)
+            ok = self.nl_handler.initialize_llm("ollama", "ollama", base_url=base_url)
         else:
             api_key = os.getenv(_ENV_VAR_MAP[target])
             if not api_key:
@@ -2547,18 +2675,11 @@ class CliaraShell(
         )
         files = [f for f in (result.stdout or "").strip().splitlines() if f]
 
-        # "?"? 7. Generate commit message "?"?
-        # Stream tokens to the console so the user gets live feedback instead of
-        # a blank wait. The cloud-redaction banner (→ cloud …) is printed on its own
-        # line by the LLM layer, so we leave the cursor on a fresh line here and let
-        # the streamed tokens follow naturally below any banners.
-        print_dim("  Generating...")
-
-        _streamed_tokens: list = []
-
-        def _commit_stream(piece: str) -> None:
-            print(piece, end="", flush=True)
-            _streamed_tokens.append(piece)
+        # "?"? 7. Generate commit message with animated spinner "?"?
+        # Don't stream to stdout — the message will be displayed formatted in a
+        # confirmation panel below. Showing the same text twice (raw stream +
+        # panel) looks redundant for a one-line output.
+        _commit_anim = StreamingThinkingAnimation().start()
 
         context = {
             "cwd": str(Path.cwd()),
@@ -2567,17 +2688,18 @@ class CliaraShell(
             "branch": branch,
         }
         commit_msg = self.nl_handler.generate_commit_message(
-            diff_stat, diff_content, files, context, stream_callback=_commit_stream
+            diff_stat, diff_content, files, context,
+            stream_callback=_commit_anim.wrap(print_to_stdout=False),
         )
-        # End the streamed line cleanly before the summary panel.
-        print()
-
+        _commit_anim.stop()
         if not commit_msg or not commit_msg.strip():
             print_error("[Cliara] Could not generate commit message. Try again or use: git commit -m \"your message\"")
             self._unstage_all()
             return
 
         # "?"? 8. Show message and confirm "?"?
+        # Always print the commit message so it's visible even when streaming
+        # output was buffered or didn't display (e.g. rapid successive runs)
         print_info("[Cliara] Commit message:")
         print(f"\n  {commit_msg}\n")
         print_dim(f"  Branch: {branch}")

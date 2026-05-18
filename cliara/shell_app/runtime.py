@@ -2,6 +2,7 @@
 
 import os
 import platform
+import random
 import re
 import sys
 import threading
@@ -14,6 +15,198 @@ from typing import Dict, List, Optional, Tuple
 from cliara import icons
 from cliara.file_lock import with_file_lock
 from cliara.safety import DangerLevel
+
+# ---------------------------------------------------------------------------
+# LLM animated thinking indicator
+# ---------------------------------------------------------------------------
+# Two helpers:
+#   thinking_status(label)              — context manager for non-streaming calls.
+#                                         Shows a Rich dots spinner whose label
+#                                         cycles through thinking words every 2 s.
+#   StreamingThinkingAnimation(label)   — class for direct-streaming calls.
+#                                         Shows the same animated spinner until the
+#                                         first token arrives, then clears itself so
+#                                         tokens can stream to the terminal cleanly.
+
+import itertools
+
+_THINKING_WORDS: List[str] = [
+    "Cooking",
+    "Pondering",
+    "Contemplating",
+    "Brewing",
+    "Ruminating",
+    "Synthesizing",
+    "Rummaging",
+    "Cogitating",
+    "Percolating",
+    "Noodling",
+    "Simmering",
+    "Deliberating",
+    "Marinating",
+    "Mulling",
+    "Calculating",
+    "Stewing",
+    "Daydreaming",
+    "Spelunking",
+]
+
+# How long each word is shown before the next one appears (seconds).
+_THINKING_CYCLE_INTERVAL: float = 1.8
+
+
+def pick_thinking_word() -> str:
+    """Return a random thinking verb (used as fallback when no animation is needed)."""
+    return random.choice(_THINKING_WORDS)
+
+
+# Cycling color palette for the thinking-word animation. Each cycle rotates to
+# the next color so the word visibly shifts, not just text-changes. The palette
+# is intentionally bright/saturated so it stands out from regular dim output.
+_THINKING_COLORS: List[str] = [
+    "bright_magenta",
+    "bright_cyan",
+    "bright_blue",
+    "bright_green",
+    "bright_yellow",
+    "magenta",
+    "cyan",
+]
+
+
+def _thinking_label_markup(word: str, color: str, query_label: str = "") -> str:
+    """Rich markup for one frame of the cycling thinking-word animation."""
+    ql = f" [dim italic]{query_label[:55]}[/dim italic]" if query_label else ""
+    return f"[bold {color}]{word}...[/bold {color}]{ql}"
+
+
+@contextmanager
+def thinking_status(query_label: str = "", cycle_interval: float = _THINKING_CYCLE_INTERVAL):
+    """Context manager: Rich dots spinner whose label cycles through thinking words.
+
+    Each cycle rotates BOTH the word AND the color, so the animation feels
+    alive even on slow LLM calls. Use for blocking (non-streaming) LLM calls.
+
+    Example::
+
+        with thinking_status("kill port 3000") as status:
+            result = nl_handler.process_query(query, context)
+            # status.update("extra info") is still available if needed
+    """
+    from rich.status import Status
+
+    word_cycle  = itertools.cycle(random.sample(_THINKING_WORDS, len(_THINKING_WORDS)))
+    color_cycle = itertools.cycle(_THINKING_COLORS)
+    stop_evt = threading.Event()
+
+    first_label = _thinking_label_markup(next(word_cycle), next(color_cycle), query_label)
+    with Status(first_label, spinner="dots", console=_cliara_console()) as status:
+        def _cycle_words() -> None:
+            while not stop_evt.wait(cycle_interval):
+                status.update(_thinking_label_markup(
+                    next(word_cycle), next(color_cycle), query_label,
+                ))
+
+        t = threading.Thread(target=_cycle_words, daemon=True)
+        t.start()
+        try:
+            yield status
+        finally:
+            stop_evt.set()
+
+
+class StreamingThinkingAnimation:
+    """Animated thinking spinner for *direct-streaming* LLM calls.
+
+    Shows the animated cycling words until the first token is received, then
+    stops cleanly so streamed tokens can appear on the terminal uninterrupted.
+
+    Usage::
+
+        anim = StreamingThinkingAnimation("when did I set up Ollama?").start()
+        streamed = []
+        def _stream(piece):
+            streamed.append(piece)
+        answer = nl_handler.search_history_rag(..., stream_callback=anim.wrap(on_token=_stream))
+        anim.stop()   # no-op if already stopped by first token
+    """
+
+    def __init__(self, query_label: str = "", cycle_interval: float = _THINKING_CYCLE_INTERVAL):
+        self._label = query_label
+        self._interval = cycle_interval
+        self._stop = threading.Event()
+        self._status = None
+        self._thread: Optional[threading.Thread] = None
+        self._stopped = False
+
+    def start(self) -> "StreamingThinkingAnimation":
+        from rich.status import Status
+
+        word_cycle  = itertools.cycle(random.sample(_THINKING_WORDS, len(_THINKING_WORDS)))
+        color_cycle = itertools.cycle(_THINKING_COLORS)
+
+        first_label = _thinking_label_markup(next(word_cycle), next(color_cycle), self._label)
+        self._status = Status(first_label, spinner="dots", console=_cliara_console())
+        self._status.start()
+
+        def _cycle_words() -> None:
+            while not self._stop.wait(self._interval):
+                if self._status is None:
+                    return
+                self._status.update(_thinking_label_markup(
+                    next(word_cycle), next(color_cycle), self._label,
+                ))
+
+        self._thread = threading.Thread(target=_cycle_words, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        """Stop the animation and clear the spinner line."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._stop.set()
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+        if self._thread is not None:
+            self._thread.join(timeout=0.3)
+
+    def wrap(
+        self,
+        on_token: Optional[callable] = None,
+        print_to_stdout: bool = True,
+    ) -> callable:
+        """Return a stream callback that stops the animation on the first token.
+
+        The returned callback:
+          1. Stops the animated spinner (clears the line).
+          2. Prints the token to stdout (so the user sees streaming).
+          3. Forwards the token to ``on_token`` if provided (for collecting).
+
+        Args:
+            on_token: Optional collector — called for each token. Useful when
+                      you need to capture the full output for later display.
+            print_to_stdout: If True (default), each token is printed live so the
+                             user sees the response build. Set False for cases
+                             where the final text will be rendered in a Rich
+                             panel and you don't want a duplicate plain echo.
+        """
+        _first = [True]
+
+        def _cb(piece: str) -> None:
+            if _first[0]:
+                _first[0] = False
+                self.stop()
+                print()  # blank line after spinner clears so tokens start fresh
+            if print_to_stdout:
+                print(piece, end="", flush=True)
+            if on_token is not None:
+                on_token(piece)
+
+        return _cb
+
 
 # ---------------------------------------------------------------------------
 # Colorized output helpers (Rich-backed for Cliara UI)
@@ -342,31 +535,80 @@ def _nl_query_plain_history_arg(query: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Semantic-history intent detection — compiled patterns
+# ---------------------------------------------------------------------------
+# These are evaluated on every keypress (via the prompt-toolkit completer),
+# so they must be compiled at import time.
+
+# Past-tense personal actions: "did I run/use/set up/..."
+# Optional qualifier (ever/already/previously/…) between "I" and the action verb
+# handles "did I ever run …", "have I already installed …", etc.
+_HIST_PAST_ACTION_RE = re.compile(
+    r"\b(?:did|have)\s+i\s+"
+    r"(?:ever\s+|already\s+|previously\s+|really\s+|just\s+|once\s+)?"
+    r"(?:run|use|set\s+up|configure|install|deploy|create|build|push|pull|"
+    r"fix|start|stop|reset|commit|checkout|clone|add|remove|switch|update|"
+    r"delete|upgrade|bump|test|generate|migrate|connect|login|auth|setup|"
+    r"init|enable|disable|compile|execute|launch|fetch|sync|publish|"
+    r"release|tag|serve|watch|pack|convert|check|verify|scan|debug)\b",
+    re.IGNORECASE,
+)
+
+# "when/what/how/where did I …" — wh-questions about past actions
+_HIST_WH_DID_RE = re.compile(
+    r"\b(?:when|what|how|where|which)\s+did\s+i\b",
+    re.IGNORECASE,
+)
+
+# Temporal + personal patterns: "last time I", "have I ever", "what was the last …"
+_HIST_TEMPORAL_RE = re.compile(
+    r"\b(?:last\s+time\s+i|have\s+i\s+(?:ever|already)\b|"
+    r"which\s+\w+\s+did\s+i\b|what\s+was\s+(?:the|my)\s+last\b)\b",
+    re.IGNORECASE,
+)
+
+# "find X" — but NOT task-oriented "find me a command to / find out / find a way"
+_HIST_FIND_RE = re.compile(
+    r"^find\s+(?!(?:me\s+|out\s+|a\s+way\s+|how\s+|the\s+best\s+))",
+    re.IGNORECASE,
+)
+
+
 def _is_semantic_history_search_intent(query: str) -> bool:
-    """Return True if the query looks like a search over past commands by intent."""
-    q = query.strip().lower()
+    """Return True if the query is about the user's own past shell activity.
+
+    Much broader than the previous hard-coded prefix list — catches natural
+    questions like "when did I set up Ollama?" or "did I ever run docker-compose?"
+    without needing a special "find …" prefix.
+    """
+    q = (query or "").strip()
     if not q:
         return False
-    if q.startswith("find "):
+
+    ql = q.lower()
+
+    # Explicit search prefixes (backward-compatible).
+    if ql.startswith(("search history", "history search", "history find")):
         return True
-    if q.startswith("when did i "):
+
+    # ``? history <N>`` = plain list; non-numeric suffix = search intent.
+    if ql.startswith("history "):
+        rest = ql[len("history "):].strip()
+        return bool(rest and not rest.isdigit())
+
+    # "find X" prefix — excludes task-oriented "find me a command to …"
+    if _HIST_FIND_RE.match(q):
         return True
-    if q.startswith("what did i run"):
+
+    # Past-tense personal questions
+    if _HIST_PAST_ACTION_RE.search(q):
         return True
-    if "when did i " in q:
+    if _HIST_WH_DID_RE.search(q):
         return True
-    if "what did i run " in q or q == "what did i run":
+    if _HIST_TEMPORAL_RE.search(q):
         return True
-    if q.startswith("search history"):
-        return True
-    # ``history <N>`` is the plain list command; semantic forms use search/find.
-    if q.startswith("history "):
-        rest = q[len("history "):].strip()
-        if not rest or rest.isdigit():
-            return False
-        if rest.startswith("search ") or rest.startswith("find "):
-            return True
-        return False
+
     return False
 
 

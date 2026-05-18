@@ -104,7 +104,7 @@ class Config:
         "model_chat_polish": None,  # optional: chat polish — compress bundle for Cursor
         # Ollama (local LLM) settings
         "ollama_base_url": "http://localhost:11434",  # Ollama server URL
-        "ollama_keep_alive": "15m",  # Keep model loaded between requests to reduce cold-start delay
+        "ollama_keep_alive": "60m",  # Keep model loaded between requests to avoid cold-start delay
         "ollama_num_ctx": 4096,  # Context window for Ollama generation (lower can be faster)
         "ollama_max_tokens_cap": 768,  # Global max output cap for Ollama responses
         "ollama_max_tokens_nl": 320,  # NL-to-commands output cap for Ollama

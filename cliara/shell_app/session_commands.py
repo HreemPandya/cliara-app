@@ -15,6 +15,7 @@ from cliara.execution_graph import build_execution_tree, export_tree_json, rende
 from cliara.session_store import CLOSEOUT_KEYS, TaskSession, _get_branch, _get_project_root
 from cliara.shell_app.runtime import (
     _cliara_console,
+    pick_thinking_word,
     print_dim,
     print_error,
     print_header,
@@ -312,8 +313,8 @@ class SessionCommandMixin:
         """
         from rich.panel import Panel
         from rich.rule import Rule
-        from rich.status import Status
         from rich.text import Text
+        from cliara.shell_app.runtime import thinking_status
 
         if not self.current_session:
             return (True, None)
@@ -321,11 +322,7 @@ class SessionCommandMixin:
         briefing = self._build_session_closeout_briefing(s)
         console = _cliara_console()
         plan: List[Dict[str, Any]] = []
-        with Status(
-            "[dim]Running session_reflect skill...[/dim]",
-            spinner="dots",
-            console=console,
-        ):
+        with thinking_status():
             plan = self.nl_handler.session_reflect_plan(briefing)
         offline = not self.nl_handler.llm_enabled
 

@@ -69,6 +69,7 @@ STREAMING_SAFE_AGENTS = frozenset(
         "readme",
         "chat_polish",
         "cliara_qa",
+        "history_answer",  # RAG prose synthesis — streams naturally like a chat response
     }
 )
 

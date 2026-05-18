@@ -75,6 +75,13 @@ class SemanticHistoryStore:
             out["exit_code"] = int(e["exit_code"])
         if "embedding" in e and e["embedding"] is not None:
             out["embedding"] = list(e["embedding"])
+        # Enrichment fields (added in the semantic-search revamp)
+        if "git_branch" in e and e["git_branch"] is not None:
+            out["git_branch"] = str(e["git_branch"])
+        if "git_repo" in e and e["git_repo"] is not None:
+            out["git_repo"] = str(e["git_repo"])
+        if "session_name" in e and e["session_name"] is not None:
+            out["session_name"] = str(e["session_name"])
         return out
 
     def _save(self) -> None:
@@ -103,6 +110,9 @@ class SemanticHistoryStore:
         timestamp: Optional[str] = None,
         dedupe: bool = True,
         persist: bool = True,
+        git_branch: Optional[str] = None,
+        git_repo: Optional[str] = None,
+        session_name: Optional[str] = None,
     ) -> None:
         """
         Add an entry. Evicts oldest if over max_entries.
@@ -117,6 +127,9 @@ class SemanticHistoryStore:
             "cwd": cwd,
             "exit_code": exit_code,
             "embedding": embedding,
+            "git_branch": git_branch,
+            "git_repo": git_repo,
+            "session_name": session_name,
         }
         entry = self._normalize_entry(entry)
 

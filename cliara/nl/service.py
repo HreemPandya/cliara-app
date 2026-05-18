@@ -3,15 +3,12 @@ Natural Language handler for Cliara (Phase 2).
 Converts natural language queries to shell commands using LLM.
 """
 
-import contextlib
 import json
 import os
 import platform
 import re
 import subprocess
 import time
-import urllib.request
-import urllib.error
 from pathlib import Path
 import math
 
@@ -137,68 +134,8 @@ def _first_usable_commit_line(raw: str) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Commit message — type-inference keyword table
-# ---------------------------------------------------------------------------
-# When a model returns a plain description without a CC type prefix, we infer
-# the best-matching type by scanning the description for domain keywords.
-# Checked in priority order: specific types before the catch-all "chore".
-_CC_TYPE_KEYWORDS: List[Tuple[str, frozenset]] = [
-    ("fix",      frozenset({"fix", "fixes", "bug", "error", "issue", "crash", "broken",
-                             "resolve", "correct", "patch", "handle", "prevent", "revert"})),
-    ("feat",     frozenset({"add", "adds", "implement", "create", "introduce", "support",
-                             "enable", "new", "include", "feature", "allow", "expose"})),
-    ("perf",     frozenset({"performance", "speed", "faster", "slower", "latency", "memory",
-                             "cache", "efficient", "lazy", "throttle", "debounce", "optimiz"})),
-    ("refactor", frozenset({"refactor", "restructure", "reorganize", "simplify", "clean",
-                             "improve", "reduce", "move", "rename", "extract", "split",
-                             "merge", "dedup", "consolidate"})),
-    ("docs",     frozenset({"doc", "docs", "documentation", "readme", "comment", "comments",
-                             "changelog", "license", "typo", "clarif", "example"})),
-    ("test",     frozenset({"test", "tests", "spec", "specs", "coverage", "unit",
-                             "integration", "mock", "fixture", "assert"})),
-    ("ci",       frozenset({"ci", "cd", "workflow", "pipeline", "action", "travis",
-                             "circleci", "jenkins", "github action"})),
-    ("build",    frozenset({"build", "package", "dependency", "dependencies",
-                             "requirements", "version", "bump", "release", "publish",
-                             "install", "wheel", "lockfile"})),
-    ("chore",    frozenset({"update", "upgrade", "downgrade", "remove", "delete",
-                             "cleanup", "misc", "config", "setup", "format", "lint"})),
-]
-
-
-def _infer_cc_type(description: str) -> str:
-    """Return the best-matching Conventional Commits type for a plain description."""
-    desc = description.lower()
-    for cc_type, keywords in _CC_TYPE_KEYWORDS:
-        if any(kw in desc for kw in keywords):
-            return cc_type
-    return "chore"
-
-
-# Lines that are clearly model preamble and should be skipped when extracting
-# a commit description from plain-text responses.
-_COMMIT_PREAMBLE_RE = re.compile(
-    r"^(here\b|this\s+(is|would|would be)\b|the\s+commit\b|i\s+(would|suggest|recommend|think)\b"
-    r"|please\b|note[:\s]|output[:\s]|result[:\s]|sure[,!]|of\s+course\b|based\s+on\b"
-    r"|looking\s+at\b|commit\s+message[:\s]|conventional\s+commit)",
-    re.IGNORECASE,
-)
-
-
 class NLHandler:
     """Handles natural language to command conversion using LLM."""
-
-    # --- Ollama reachability probe cache (class-level, shared across instances) ---
-    # Probing Ollama on every initialize_llm() call adds 1.5–3 s when Ollama is
-    # not running. A short TTL cache avoids repeated network waits in one session.
-    _ollama_probe_cache: Dict[str, Tuple[float, bool]] = {}
-    _OLLAMA_PROBE_TTL: float = 30.0   # seconds before re-probing the same URL
-    _OLLAMA_PROBE_TIMEOUT: float = 1.5 # per-connection timeout (localhost responds <5 ms)
-
-    # --- Embedding query cache (instance-level) ---
-    _EMBEDDING_CACHE_TTL: float = 300.0  # 5-minute TTL for query vectors
-    _EMBEDDING_CACHE_MAX: int = 256      # avoid unbounded memory growth
 
     def __init__(self, safety_checker: SafetyChecker, config=None):
         """
@@ -227,9 +164,6 @@ class NLHandler:
         self._git_snapshot_cache: Dict[str, Tuple[float, str]] = {}
         # One-time banner for the first cloud call in this interactive session.
         self._cloud_redaction_preview_shown: bool = False
-        # Per-instance embedding cache: avoids re-fetching the same query vector
-        # within a session (e.g. repeated "? find ..." with the same wording).
-        self._embedding_cache: Dict[str, Tuple[float, List[float]]] = {}
 
     def _request_timeout_seconds(self) -> float:
         """Return the HTTP timeout for cloud LLM calls.
@@ -245,63 +179,6 @@ class NLHandler:
             return v if v > 0 else 60.0
         except Exception:
             return 60.0
-
-    # ------------------------------------------------------------------
-    # Ollama reachability probe (cached)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _probe_ollama_url(cls, url: str, timeout: Optional[float] = None) -> bool:
-        """Return True if Ollama is reachable at *url*.
-
-        Results are cached for _OLLAMA_PROBE_TTL seconds so that multiple
-        callers within one startup sequence (initialize_llm + initialize_local_ollama,
-        or 'use ollama' → initialize_llm) only hit the network once.
-
-        Args:
-            timeout: Override the default _OLLAMA_PROBE_TIMEOUT (e.g. pass a
-                     shorter value for opportunistic background probes).
-        """
-        base = url.rstrip("/")
-        now = time.monotonic()
-        cached = cls._ollama_probe_cache.get(base)
-        if cached is not None and (now - cached[0]) <= cls._OLLAMA_PROBE_TTL:
-            return cached[1]
-        probe_t = timeout if timeout is not None else cls._OLLAMA_PROBE_TIMEOUT
-        try:
-            urllib.request.urlopen(base, timeout=probe_t)
-            cls._ollama_probe_cache[base] = (now, True)
-            return True
-        except Exception:
-            cls._ollama_probe_cache[base] = (now, False)
-            return False
-
-    @classmethod
-    def invalidate_ollama_probe_cache(cls) -> None:
-        """Force the next probe to hit the network (e.g. after user starts Ollama)."""
-        cls._ollama_probe_cache.clear()
-
-    # ------------------------------------------------------------------
-    # Local-backend context manager
-    # ------------------------------------------------------------------
-
-    @contextlib.contextmanager
-    def _use_local_backend(self):
-        """Temporarily route one LLM call through the local Ollama backend.
-
-        Restores original provider/client/enabled on exit, even if an
-        exception is raised. This is the only place that mutates these
-        attributes during a call; extracting it here avoids the identical
-        try/finally blocks that previously appeared three times in _call_llm_stream.
-        """
-        orig = (self.provider, self.llm_client, self.llm_enabled)
-        try:
-            self.provider = "ollama"
-            self.llm_client = self._local_llm_client
-            self.llm_enabled = True
-            yield
-        finally:
-            self.provider, self.llm_client, self.llm_enabled = orig
 
     # ------------------------------------------------------------------
     # Cloud redaction UX
@@ -440,22 +317,14 @@ class NLHandler:
         """True if embedding vectors can be fetched (OpenAI or Ollama, including API-key-only)."""
         return self._client_for_embeddings() is not None
 
-    def initialize_llm(
-        self,
-        provider: str,
-        api_key: str,
-        base_url: Optional[str] = None,
-        *,
-        skip_probe: bool = False,
-    ) -> bool:
+    def initialize_llm(self, provider: str, api_key: str, base_url: Optional[str] = None) -> bool:
         """
         Initialize LLM client.
 
         Args:
-            provider:    "openai" | "anthropic" | "ollama"
-            api_key:     API key (use any non-empty string for ollama)
-            base_url:    Base URL override (required for ollama, optional for openai-compatible)
-            skip_probe:  When True, skip the Ollama reachability probe (caller already verified).
+            provider:  "openai" | "anthropic" | "ollama"
+            api_key:   API key (use any non-empty string for ollama)
+            base_url:  Base URL override (required for ollama, optional for openai-compatible)
         """
         if not api_key:
             return False
@@ -473,11 +342,13 @@ class NLHandler:
                 if provider == "ollama":
                     url = base_url or "http://localhost:11434"
                     kwargs["base_url"] = url.rstrip("/") + "/v1"
-                    # Probe Ollama before marking as ready — fail fast with a clear
-                    # message rather than hanging on the first query.
-                    # Skip when the caller has already verified reachability (avoids
-                    # double-probing on 'use ollama' or auto-detect paths).
-                    if not skip_probe and not self.__class__._probe_ollama_url(url):
+                    # Probe Ollama before marking as ready ΓÇö fail fast with a
+                    # clear message rather than hanging on the first query.
+                    import urllib.request
+                    import urllib.error
+                    try:
+                        urllib.request.urlopen(url.rstrip("/"), timeout=3)
+                    except urllib.error.URLError:
                         print(
                             f"[Warning] Ollama is not reachable at {url}. "
                             "Start Ollama and restart cliara to enable local LLM."
@@ -512,19 +383,11 @@ class NLHandler:
             print(f"[Error] Failed to initialize LLM: {e}")
             return False
 
-    def initialize_local_ollama(
-        self,
-        base_url: Optional[str] = None,
-        *,
-        skip_probe: bool = False,
-    ) -> bool:
+    def initialize_local_ollama(self, base_url: Optional[str] = None) -> bool:
         """Initialize a *secondary* local Ollama backend without changing the cloud provider.
 
         This enables the transparent local/cloud router. Safe to call even when
         cloud is unconfigured.
-
-        Args:
-            skip_probe: When True, skip the reachability probe (caller already verified).
         """
         url = (base_url or (self.config.get_ollama_base_url() if self.config is not None else None) or "http://localhost:11434").strip()
         if not url:
@@ -533,18 +396,19 @@ class NLHandler:
             from openai import OpenAI
 
             kwargs: Dict[str, Any] = {
-                "api_key": "ollama",  # pragma: allowlist secret
+                "api_key": "ollama", #pragma: allowlist secret
                 "base_url": url.rstrip("/") + "/v1",
                 "timeout": self._request_timeout_seconds(),
                 "max_retries": 1,
             }
 
-            # Probe Ollama before enabling. Uses the class-level cached probe so
-            # calling both initialize_llm() and initialize_local_ollama() for the
-            # same URL in one startup does not result in two network round-trips.
-            # Use a short 0.5 s timeout: this is an opportunistic secondary-backend
-            # probe (localhost only); if Ollama is running it responds in <5 ms.
-            if not skip_probe and not self.__class__._probe_ollama_url(url, timeout=0.5):
+            # Probe Ollama before enabling.
+            import urllib.request
+            import urllib.error
+
+            try:
+                urllib.request.urlopen(url.rstrip("/"), timeout=3)
+            except urllib.error.URLError:
                 return False
 
             self._local_llm_client = OpenAI(**kwargs)
@@ -718,11 +582,18 @@ class NLHandler:
         """Use local model to redact *text* when available."""
         if not (self._local_enabled and self._local_llm_client is not None):
             return ""
+        # Avoid recursion: call the underlying implementation directly on the local backend.
+        orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
         try:
-            with self._use_local_backend():
-                return (self._call_llm_stream_impl("redact", text, stream_callback=None) or "").strip()
+            self.provider = "ollama"
+            self.llm_client = self._local_llm_client
+            self.llm_enabled = True
+            out = self._call_llm_stream_impl("redact", text, stream_callback=None)
+            return (out or "").strip()
         except Exception:
             return ""
+        finally:
+            self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
 
     def predict_next_backend_for_user_input(self, user_input: str, nl_prefix: str = "?") -> Literal["local", "cloud"]:
         """Best-effort preview used by the prompt glyph (no LLM calls)."""
@@ -1363,10 +1234,16 @@ class NLHandler:
                     else:
                         raise RuntimeError("Cancelled cloud send (redaction uncertain).")
 
-        # Execute on the selected backend.
+        # Execute on the selected backend by temporarily swapping the active client.
         if backend == "local" and local_ok:
-            with self._use_local_backend():
+            orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
+            try:
+                self.provider = "ollama"
+                self.llm_client = self._local_llm_client
+                self.llm_enabled = True
                 return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
+            finally:
+                self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
 
         try:
             return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
@@ -1378,8 +1255,14 @@ class NLHandler:
                     print_dim("→ cloud failed; retrying locally")
                 except Exception:
                     pass
-                with self._use_local_backend():
+                orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
+                try:
+                    self.provider = "ollama"
+                    self.llm_client = self._local_llm_client
+                    self.llm_enabled = True
                     return self._call_llm_stream_impl(agent_type, user_message, stream_callback)
+                finally:
+                    self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
             raise
 
     def _call_llm_stream_impl(
@@ -1437,6 +1320,16 @@ class NLHandler:
                 cap_raw = self.config.get("ollama_max_tokens_macro", 500)
             elif agent_type == "readme":
                 cap_raw = self.config.get("ollama_max_tokens_readme", 8192)
+            elif agent_type == "history_answer":
+                # Short, focused answers on local models — keep latency under ~5s.
+                # 120 tokens ≈ 2-3 sentences, generated in 4-6s on consumer hardware.
+                cap_raw = self.config.get("ollama_max_tokens_history", 120)
+            elif agent_type == "commit_message":
+                # One-line output; 64 tokens is plenty for the message.
+                cap_raw = self.config.get("ollama_max_tokens_commit", 64)
+            elif agent_type == "history_summary":
+                # Background worker; aggressive cap keeps the queue from backing up.
+                cap_raw = self.config.get("ollama_max_tokens_summary", 80)
             else:
                 cap_raw = self.config.get("ollama_max_tokens_cap", 768)
         else:
@@ -1446,6 +1339,12 @@ class NLHandler:
                 cap_raw = 500
             elif agent_type == "readme":
                 cap_raw = 8192
+            elif agent_type == "history_answer":
+                cap_raw = 120
+            elif agent_type == "commit_message":
+                cap_raw = 64
+            elif agent_type == "history_summary":
+                cap_raw = 80
             else:
                 cap_raw = 768
 
@@ -2074,10 +1973,8 @@ Command: {command}"""
         shell = context_info.get("shell", "bash")
         cwd = context_info.get("cwd", "")
 
-        # Local models have smaller context windows; reduce I/O line budget.
-        _io_lines = 30 if self.provider == "ollama" else 70
-        out_t = self._truncate_stream_for_prompt(stdout or "", _io_lines)
-        err_t = self._truncate_stream_for_prompt(stderr or "", _io_lines)
+        out_t = self._truncate_stream_for_prompt(stdout or "", 70)
+        err_t = self._truncate_stream_for_prompt(stderr or "", 70)
         out_lines = len((stdout or "").splitlines())
         err_lines = len((stderr or "").splitlines())
 
@@ -2156,24 +2053,17 @@ Context:
             return ""
         if not (command or command.strip()):
             return ""
-
-        # Local models benefit from a very compact prompt — they run on every
-        # command in a background thread, so keeping prompts tiny matters.
-        is_local = (self.provider == "ollama")
-        cmd_limit = 300 if is_local else 2000
-
+        # Truncate very long commands for API
         cmd_for_prompt = command.strip()
-        if len(cmd_for_prompt) > cmd_limit:
-            cmd_for_prompt = cmd_for_prompt[:cmd_limit] + " ..."
+        if len(cmd_for_prompt) > 2000:
+            cmd_for_prompt = cmd_for_prompt[:2000] + " ..."
         try:
-            if is_local:
-                # Stripped-down prompt: the system prompt carries the task description.
-                prompt = f"Command: {cmd_for_prompt}"
-            else:
-                context_info = self._build_context(context) if context else {}
-                os_name = context_info.get("os", "Unknown")
-                shell = context_info.get("shell", "bash")
-                prompt = f"OS: {os_name}, Shell: {shell}\n\nCommand: {cmd_for_prompt}"
+            context_info = self._build_context(context) if context else {}
+            os_name = context_info.get("os", "Unknown")
+            shell = context_info.get("shell", "bash")
+            prompt = f"""OS: {os_name}, Shell: {shell}
+
+Command: {cmd_for_prompt}"""
             response = self._call_llm("history_summary", prompt)
             summary = (response or "").strip()
             if len(summary) > 150:
@@ -2243,6 +2133,175 @@ Context:
             return []
 
     # ------------------------------------------------------------------
+    # RAG history search helpers
+    # ------------------------------------------------------------------
+
+    # Queries that explicitly want a command to re-run rather than a prose answer.
+    _HISTORY_CMD_SEEK_RE = re.compile(
+        r"(?:^|\b)"
+        r"(?:find\s+(?:the\s+)?(?:command|script|flag|code|syntax|option)|"
+        r"what\s+(?:command|flag|option|syntax)\s+(?:do\s+i|did\s+i|should\s+i)|"
+        r"re-?run|show\s+(?:me\s+)?(?:the\s+)?command|"
+        r"search\s+(?:for\s+)?(?:the\s+)?(?:command|history))",
+        re.IGNORECASE,
+    )
+    _HISTORY_FIND_PREFIX_RE = re.compile(
+        r"^find\s+(?!(?:me\s+|out\s+|a\s+way\s+|how\s+|the\s+best\s+))",
+        re.IGNORECASE,
+    )
+
+    def _classify_history_query_mode(self, query: str) -> str:
+        """Return 'answer' (prose) or 'commands' (table) for a history query.
+
+        'commands' is appropriate when the user is clearly looking for a command
+        they can copy and re-run.  'answer' is appropriate when they are asking a
+        factual / temporal question about their past activity.
+        """
+        q = (query or "").strip()
+        if self._HISTORY_CMD_SEEK_RE.search(q):
+            return "commands"
+        if self._HISTORY_FIND_PREFIX_RE.match(q):
+            return "commands"
+        return "answer"
+
+    def _format_history_context(self, entries: List[Dict[str, Any]]) -> str:
+        """Render history entries as compact context blocks for RAG synthesis.
+
+        Each block exposes every piece of metadata that could help the model
+        reason about *when*, *where*, and *why* a command was run.
+        """
+        from datetime import datetime
+
+        lines = ["Shell command history (relevant entries, oldest first):"]
+        for e in entries:
+            ts_raw = (e.get("timestamp") or "").strip()
+            cmd = (e.get("command") or "").strip()
+            summary = (e.get("summary") or "").strip()
+            cwd = (e.get("cwd") or "").strip()
+            exit_code = e.get("exit_code")
+            branch = (e.get("git_branch") or "").strip()
+            session = (e.get("session_name") or "").strip()
+
+            # Human-readable timestamp
+            ts_str = ts_raw
+            if ts_raw:
+                try:
+                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    dt_local = dt.astimezone(tz=None)
+                    ts_str = dt_local.strftime("%b %d %Y, %H:%M")
+                except Exception:
+                    ts_str = ts_raw[:16]
+
+            # Shorten home dir in cwd
+            cwd_short = cwd
+            try:
+                import pathlib
+                cwd_short = cwd.replace(str(pathlib.Path.home()), "~") if cwd else ""
+            except Exception:
+                pass
+
+            meta_parts: List[str] = [ts_str]
+            if branch:
+                meta_parts.append(f"branch:{branch}")
+            if cwd_short:
+                meta_parts.append(f"dir:{cwd_short}")
+            if session:
+                meta_parts.append(f"session:{session}")
+            if exit_code is not None:
+                meta_parts.append("✓" if exit_code == 0 else f"✗({exit_code})")
+
+            lines.append(f"\n[{' | '.join(meta_parts)}]")
+            lines.append(f"$ {cmd}")
+            if summary:
+                lines.append(f"  > {summary}")
+
+        return "\n".join(lines)
+
+    def search_history_rag(
+        self,
+        entries: List[Dict[str, Any]],
+        query: str,
+        top_k: int = 8,
+        min_score: float = 0.22,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> "Tuple[str, List[Dict[str, Any]]]":
+        """Retrieve the most relevant history entries and synthesize a prose answer.
+
+        Inspired by RAG (retrieval-augmented generation): we first retrieve the
+        top-k semantically similar entries (embedding + keyword hybrid), format
+        them as structured context blocks, then ask the LLM to write a direct
+        narrative answer.  Streaming is supported so the answer appears
+        progressively rather than all at once.
+
+        Returns:
+            (answer_text, source_entries) — source_entries are the evidence
+            chunks shown as a compact 'Sources' table below the answer.
+        """
+        if not entries:
+            return "No history found.", []
+
+        is_local = (self.provider == "ollama")
+
+        # Local models are slow; limit context aggressively to keep latency under ~7 s.
+        # 2 entries × ~200 chars = ~100 tokens of context — fits comfortably
+        # alongside the system prompt + query in a 4 K context window and lets
+        # the model start generating within 1-2 s on consumer hardware.
+        actual_top_k = 2 if is_local else min(top_k, 6)
+
+        # --- Retrieval ---
+        # For prose answers, precision matters more than recall.
+        # Strategy: embedding search (best semantic match) first.
+        # Keyword padding only for cloud — local skips it to keep context tight.
+        emb_sources: List[Dict[str, Any]] = []
+        if self.supports_embedding_api():
+            # Slightly lower threshold (0.22) so we don't miss partial matches,
+            # but we'll filter aggressively by score before building context.
+            emb_sources = self.search_history_by_embeddings(
+                entries, query, top_k=actual_top_k,
+                min_score=min_score, adaptive=True, adaptive_frac=0.78,
+            )
+
+        sources: List[Dict[str, Any]] = list(emb_sources)
+
+        if not is_local and len(sources) < actual_top_k:
+            # Cloud: pad with keyword candidates only when embedding search didn't fill the quota.
+            # Use a HIGH keyword threshold (0.5) so only truly relevant entries are added.
+            kw_pool = self.keyword_history_candidates(
+                entries, query, top_m=min(16, actual_top_k * 3)
+            )
+            seen = {self.history_entry_key(e) for e in sources}
+            for e in kw_pool:
+                kw_score = self._keyword_score_for_entry(e, self._history_query_tokens(query))
+                # Only include keyword-matched entries that actually score well.
+                if kw_score >= 0.50 and self.history_entry_key(e) not in seen:
+                    sources.append(e)
+                    seen.add(self.history_entry_key(e))
+                    if len(sources) >= actual_top_k:
+                        break
+
+        if not sources:
+            # Last resort: pure keyword search (works without any API)
+            kw_fallback = self.keyword_history_candidates(entries, query, top_m=actual_top_k)
+            sources = kw_fallback[:actual_top_k]
+
+        if not sources:
+            return "I couldn't find any relevant commands in your history for that query.", []
+
+        # Sort chronologically so the LLM can reason about sequence naturally.
+        sources.sort(key=lambda e: e.get("timestamp", ""))
+
+        # --- Context blocks ---
+        context = self._format_history_context(sources)
+        prompt = f"{context}\n\nQuestion: {query}"
+
+        # --- Synthesis (streamed) ---
+        try:
+            answer = self._call_llm_stream("history_answer", prompt, stream_callback)
+            return (answer or "").strip(), sources
+        except Exception as exc:
+            return f"Search failed: {exc}", sources
+
+    # ------------------------------------------------------------------
     # Embedding-based semantic search
     # ------------------------------------------------------------------
 
@@ -2252,21 +2311,9 @@ Context:
         Uses OpenAI or the primary Ollama client, or a dedicated OpenAI client
         from ``OPENAI_API_KEY`` when chat uses another provider.  Returns None
         on failure.
-
-        Results are cached per-instance for _EMBEDDING_CACHE_TTL seconds so that
-        repeated "? find ..." queries with identical wording don't re-hit the
-        embedding API. The cache is bounded to _EMBEDDING_CACHE_MAX entries.
         """
-        key = (text or "").strip()
-        if not key:
+        if not text.strip():
             return None
-
-        # Fast path: serve from cache if still fresh.
-        now = time.monotonic()
-        cached = self._embedding_cache.get(key)
-        if cached is not None and (now - cached[0]) <= self._EMBEDDING_CACHE_TTL:
-            return cached[1]
-
         client = self._client_for_embeddings()
         if client is None:
             return None
@@ -2277,16 +2324,9 @@ Context:
         try:
             resp = client.embeddings.create(
                 model=model,
-                input=key,
+                input=text.strip(),
             )
-            vec = resp.data[0].embedding
-
-            # Evict oldest entry when cache is full before inserting.
-            if len(self._embedding_cache) >= self._EMBEDDING_CACHE_MAX:
-                oldest_key = min(self._embedding_cache, key=lambda k: self._embedding_cache[k][0])
-                del self._embedding_cache[oldest_key]
-            self._embedding_cache[key] = (now, vec)
-            return vec
+            return resp.data[0].embedding
         except Exception:
             return None
 
@@ -2403,16 +2443,53 @@ Context:
         except Exception:
             return None
 
+    # Common shell-vocabulary synonyms for retrieval. When a query token matches
+    # an entry, we also award a partial score for any synonym match — so that
+    # "set up a local model" finds `ollama pull` even though the verbatim tokens
+    # don't appear in the command.
+    _TOKEN_SYNONYMS: Dict[str, Tuple[str, ...]] = {
+        "set":       ("setup", "configure", "config", "init", "use"),
+        "setup":     ("set", "configure", "config", "init"),
+        "configure": ("config", "set", "setup", "init"),
+        "config":    ("configure", "set", "setup"),
+        "model":     ("llm", "gpt", "gemma", "llama", "claude", "mistral", "ollama"),
+        "local":     ("offline", "ollama", "self-hosted"),
+        "cloud":     ("api", "remote", "openai", "anthropic", "groq", "gemini"),
+        "provider":  ("service", "backend", "llm", "vendor"),
+        "install":   ("setup", "add", "pull", "pip", "npm", "brew"),
+        "deploy":    ("release", "publish", "push", "ship"),
+        "build":     ("compile", "make", "bundle", "pack"),
+        "test":      ("check", "verify", "pytest", "jest", "spec"),
+        "fix":       ("repair", "patch", "resolve", "correct", "handle"),
+        "switch":    ("use", "change", "swap", "toggle"),
+        "remove":    ("delete", "rm", "uninstall", "drop"),
+        "create":    ("make", "new", "add", "init"),
+        "run":       ("execute", "exec", "launch", "start"),
+        "auth":      ("login", "oauth", "token", "credentials"),
+        "branch":    ("checkout", "merge"),
+        "commit":    ("push", "stage", "git"),
+    }
+
     def _keyword_score_for_entry(self, entry: Dict[str, Any], tokens: List[str]) -> float:
+        """Score an entry by token overlap with the query.
+
+        Improvements over the previous version:
+          * Normalization is capped at min(tokens, 3) so multi-word queries
+            don't get penalized into oblivion (a 7-token query with 2 matches
+            now scores ~0.55, not ~0.24).
+          * Synonym matching: tokens are expanded via _TOKEN_SYNONYMS at half
+            weight, so "set up local model" can match `ollama pull gemma4`.
+        """
         if not tokens:
             return 0.0
         cmd = (entry.get("command") or "").strip().lower()
         summary = (entry.get("summary") or "").strip().lower()
         if not (cmd or summary):
             return 0.0
+
         score = 0.0
         for t in tokens:
-            # Prefer command matches over summary matches.
+            # Direct token match (preferred)
             if re.search(r"\b" + re.escape(t) + r"\b", cmd):
                 score += 1.0
             elif t in cmd:
@@ -2422,17 +2499,25 @@ Context:
             elif t in summary:
                 score += 0.25
 
-        # Heuristic: for queries like "last build", de-boost "pip install build" matches
-        # where the token is likely a package name, not the user's action.
+            # Synonym matches at half weight (only if direct didn't hit much)
+            for syn in self._TOKEN_SYNONYMS.get(t, ()):
+                if re.search(r"\b" + re.escape(syn) + r"\b", cmd):
+                    score += 0.50
+                    break  # one synonym hit per token is enough
+                if re.search(r"\b" + re.escape(syn) + r"\b", summary):
+                    score += 0.25
+                    break
+
+        # De-boost: "install" in "pip install <pkg>" when the query isn't about installing.
         if re.search(r"\bpip(?:3)?\s+install\b", cmd) and "install" not in tokens:
             score *= 0.55
 
-        # Heuristic: boost canonical action commands.
+        # Boost: canonical actions
         if "build" in tokens and re.search(r"\bpython(?:\.exe)?\s+-m\s+build\b", cmd):
             score += 0.75
 
-        # Normalise to [0, 1] by token count (roughly).
-        denom = max(1.0, float(len(tokens)) * 1.2)
+        # Normalize: cap divisor at 3 so multi-word queries score comparably to short ones.
+        denom = max(1.0, float(min(len(tokens), 3)) * 1.2)
         return max(0.0, min(1.0, score / denom))
 
     def rerank_history_matches(self, matches: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
@@ -2593,70 +2678,6 @@ Context:
         return out
 
     # ------------------------------------------------------------------
-    # Commit-message extraction helpers
-    # ------------------------------------------------------------------
-
-    def _extract_commit_message(self, response: str) -> str:
-        """Multi-strategy extraction — returns a ready-to-use CC-format line.
-
-        Strategies tried in order (inspired by aicommits / gptcommit approach):
-          1. JSON  ``{"message": "..."}``  — explicit structured output
-          2. Exact CC-format regex via _first_usable_commit_line
-          3. Smart plain-text: take the first reasonable line and auto-prefix CC type
-
-        Returns "" only when the response is empty or completely garbled.
-        """
-        text = (response or "").strip()
-        if not text:
-            return ""
-
-        # --- Strategy 1: JSON {"message": "..."} ---
-        raw_json = self._extract_json(text)
-        if raw_json:
-            try:
-                data = json.loads(raw_json)
-                msg = (data.get("message") or "").strip().strip("'\"")
-                if msg and len(msg) >= 10:
-                    if not _CC_LINE.match(msg):
-                        cc_type = _infer_cc_type(msg)
-                        msg = f"{cc_type}: {msg[0].lower()}{msg[1:]}"
-                    return msg[:120]
-            except Exception:
-                pass
-
-        # --- Strategy 2: Exact CC-format regex (handles preamble, fences, etc.) ---
-        msg = _first_usable_commit_line(text)
-        if msg:
-            return msg
-
-        # --- Strategy 3: Smart plain-text — preserve model's description, infer type ---
-        # Used when the model returns a valid description but without the CC prefix.
-        # This means the model's actual intent IS used — we just fix the format.
-        for line in text.splitlines():
-            s = line.strip().strip("'\"").strip("`").strip()
-            if not s:
-                continue
-            if _MD_FENCE_LINE.match(s):
-                continue
-            if len(s) < 10 or len(s) > 120:
-                continue
-            if _COMMIT_PREAMBLE_RE.match(s):
-                continue
-            # Skip lines that are clearly not a commit description
-            if s.startswith(("#", "{", "[", "<", "---")):
-                continue
-            # If it already looks like a CC line, use it directly.
-            if _CC_LINE.match(s):
-                return s
-            # Plain description: infer CC type and prefix.
-            cc_type = _infer_cc_type(s)
-            # Lower-case the first letter of the description (CC convention).
-            desc = s[0].lower() + s[1:] if s else s
-            return f"{cc_type}: {desc}"
-
-        return ""
-
-    # ------------------------------------------------------------------
     # Commit-message generation (smart push)
     # ------------------------------------------------------------------
 
@@ -2688,65 +2709,50 @@ Context:
             ctx = self._build_context(context)
             branch = (context or {}).get("branch", "main")
 
-            # Local models (Ollama) are slow on large inputs — keep context tight.
-            is_local = (self.provider == "ollama")
-            diff_char_limit = 600 if is_local else 3000
-            file_display_limit = 8 if is_local else 50
-            max_retries = 1 if is_local else 2
+            # Truncate diff to ~3 000 chars to stay within token limits
+            diff_truncated = diff_content[:3000]
+            if len(diff_content) > 3000:
+                diff_truncated += "\n\n... (diff truncated) ..."
 
-            diff_truncated = diff_content[:diff_char_limit]
-            if len(diff_content) > diff_char_limit:
-                diff_truncated += "\n... (diff truncated)"
+            file_list = "\n".join(f"  - {f}" for f in files)
 
-            shown_files = files[:file_display_limit]
-            file_list = "\n".join(f"  - {f}" for f in shown_files)
-            if len(files) > file_display_limit:
-                file_list += f"\n  ... ({len(files) - file_display_limit} more)"
+            prompt = f"""Analyse the following git diff and generate ONE conventional commit message.
 
-            if is_local:
-                # Minimal prompt for Ollama — system prompt carries all rules.
-                prompt = (
-                    f"Branch: {branch}\nFiles ({len(files)}):\n{file_list}\n\nStat:\n{diff_stat}"
-                )
-                if diff_truncated:
-                    prompt += f"\n\nDiff:\n{diff_truncated}"
-            else:
-                # Cloud: ask for JSON output so parsing is reliable regardless of
-                # what preamble or formatting the model chooses to add.
-                # Inspired by aicommits / gptcommit structured-output approach.
-                prompt = (
-                    f"Branch: {branch}\n\n"
-                    f"Files changed:\n{file_list}\n\n"
-                    f"Diff summary:\n{diff_stat}\n\n"
-                    f"Diff (may be truncated):\n{diff_truncated}\n\n"
-                    'Return ONLY this JSON object and nothing else:\n'
-                    '{"message": "<type>: <short imperative description>"}\n\n'
-                    "where <type> is one of: feat fix refactor docs style test chore perf ci build revert"
-                )
+Branch: {branch}
 
-            last_response = ""
-            for attempt in range(max_retries):
+Files changed:
+{file_list}
+
+Diff summary:
+{diff_stat}
+
+Diff (may be truncated):
+{diff_truncated}
+
+Rules (Conventional Commits):
+- Format: type: description (lowercase type; imperative description; no trailing period)
+- Core types: feat (new feature), fix (bug fix), refactor (restructure, no behavior change),
+  docs (documentation only), style (formatting/lint, no logic), test (tests), chore (misc/deps/config)
+- Extras: perf (performance), ci (CI/CD), build (build/packaging/deps), revert (undo a commit)
+- Prefer the primary change type (usually feat or fix) when several apply
+- Keep the line reasonably short (~50-72 chars when practical)
+- Be specific about what the diff actually changes
+- Return ONLY the commit message (one line, no quotes, no explanation)
+- Do not use markdown, bullets, or code blocks (no ```); output the line as plain text only"""
+
+            msg = ""
+            for attempt in range(3):
                 response = self._call_llm_stream("commit_message", prompt, stream_callback)
-                last_response = response
-                msg = self._extract_commit_message(response)
+                msg = _first_usable_commit_line(response)
                 if msg:
                     return msg
-                if attempt < max_retries - 1:
-                    time.sleep(0.3)
+                if attempt < 2:
+                    time.sleep(0.4)
 
-            # _extract_commit_message already tried all strategies including
-            # smart type inference. If it still returns "" the model gave us
-            # nothing usable — only then fall back to the stub.
-            if last_response.strip():
-                # The model responded but we couldn't extract a clean line.
-                # Take whatever we have and force-prefix it so push can proceed.
-                raw = last_response.strip().splitlines()[0][:80].strip("'\"` ")
-                if raw:
-                    return f"{_infer_cc_type(raw)}: {raw[0].lower()}{raw[1:]}"
-
+            # Empty reply or unparseable output: fall back so push can proceed after staging.
             print_dim(
-                "  Could not get a commit message from the model; using heuristic. "
-                "Check the API key, model id, and provider health."
+                "  No usable line from the model (retried); using heuristic message. "
+                "If this persists, check the API key, model id, and provider/gateway health."
             )
             return self._stub_commit_message(files, context)
 
@@ -2754,7 +2760,7 @@ Context:
             err = str(e).strip()
             if len(err) > 160:
                 err = err[:157] + "..."
-            print_dim(f"  Commit message generation failed ({err}); using heuristic.")
+            print_dim(f"  Commit message LLM failed ({err}); using heuristic message.")
             return self._stub_commit_message(files, context)
 
 
@@ -2967,18 +2973,13 @@ Each step is a single shell command. Be concise and project-appropriate."""
         cwd = context.get("cwd", "")
         project_type = context.get("project_type", "")
 
-        # Truncate very long stderr. Local models have smaller context windows,
-        # so use a tighter budget there (30 lines total vs 90 for cloud).
+        # Truncate very long stderr: keep first 60 + last 30 lines
         lines = stderr.splitlines()
-        if self.provider == "ollama":
-            head, tail, limit = 20, 10, 30
-        else:
-            head, tail, limit = 60, 30, 100
-        if len(lines) > limit:
+        if len(lines) > 100:
             truncated = (
-                "\n".join(lines[:head])
-                + f"\n\n... ({len(lines) - head - tail} lines omitted) ...\n\n"
-                + "\n".join(lines[-tail:])
+                "\n".join(lines[:60])
+                + f"\n\n... ({len(lines) - 90} lines omitted) ...\n\n"
+                + "\n".join(lines[-30:])
             )
         else:
             truncated = stderr

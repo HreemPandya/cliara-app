@@ -332,6 +332,10 @@ class ExecutionEngineMixin:
         try:
             self.history.set_last_execution([command])
 
+            # Subtle reminder: allow users to bail out without extra prompts.
+            # Keep it dim so it doesn't fight with command output.
+            print_dim("  (Ctrl+C to cancel)")
+
             try:
                 graph_project_root = _get_project_root(Path.cwd()) or str(Path.cwd())
                 from cliara.causal_graph import git_status_map

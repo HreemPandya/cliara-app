@@ -3,12 +3,15 @@ Natural Language handler for Cliara (Phase 2).
 Converts natural language queries to shell commands using LLM.
 """
 
+import contextlib
 import json
 import os
 import platform
 import re
 import subprocess
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 import math
 
@@ -137,6 +140,17 @@ def _first_usable_commit_line(raw: str) -> str:
 class NLHandler:
     """Handles natural language to command conversion using LLM."""
 
+    # --- Ollama reachability probe cache (class-level, shared across instances) ---
+    # Probing Ollama on every initialize_llm() call adds 1.5–3 s when Ollama is
+    # not running. A short TTL cache avoids repeated network waits in one session.
+    _ollama_probe_cache: Dict[str, Tuple[float, bool]] = {}
+    _OLLAMA_PROBE_TTL: float = 30.0   # seconds before re-probing the same URL
+    _OLLAMA_PROBE_TIMEOUT: float = 1.5 # per-connection timeout (localhost responds <5 ms)
+
+    # --- Embedding query cache (instance-level) ---
+    _EMBEDDING_CACHE_TTL: float = 300.0  # 5-minute TTL for query vectors
+    _EMBEDDING_CACHE_MAX: int = 256      # avoid unbounded memory growth
+
     def __init__(self, safety_checker: SafetyChecker, config=None):
         """
         Initialize NL handler.
@@ -164,6 +178,81 @@ class NLHandler:
         self._git_snapshot_cache: Dict[str, Tuple[float, str]] = {}
         # One-time banner for the first cloud call in this interactive session.
         self._cloud_redaction_preview_shown: bool = False
+        # Per-instance embedding cache: avoids re-fetching the same query vector
+        # within a session (e.g. repeated "? find ..." with the same wording).
+        self._embedding_cache: Dict[str, Tuple[float, List[float]]] = {}
+
+    def _request_timeout_seconds(self) -> float:
+        """Return the HTTP timeout for cloud LLM calls.
+
+        A hard timeout prevents the REPL from hanging indefinitely when the
+        network/provider is unreachable.
+        """
+        try:
+            if self.config is None:
+                return 60.0
+            raw = self.config.get("llm_timeout_seconds", 60)
+            v = float(raw)
+            return v if v > 0 else 60.0
+        except Exception:
+            return 60.0
+
+    # ------------------------------------------------------------------
+    # Ollama reachability probe (cached)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _probe_ollama_url(cls, url: str, timeout: Optional[float] = None) -> bool:
+        """Return True if Ollama is reachable at *url*.
+
+        Results are cached for _OLLAMA_PROBE_TTL seconds so that multiple
+        callers within one startup sequence (initialize_llm + initialize_local_ollama,
+        or 'use ollama' → initialize_llm) only hit the network once.
+
+        Args:
+            timeout: Override the default _OLLAMA_PROBE_TIMEOUT (e.g. pass a
+                     shorter value for opportunistic background probes).
+        """
+        base = url.rstrip("/")
+        now = time.monotonic()
+        cached = cls._ollama_probe_cache.get(base)
+        if cached is not None and (now - cached[0]) <= cls._OLLAMA_PROBE_TTL:
+            return cached[1]
+        probe_t = timeout if timeout is not None else cls._OLLAMA_PROBE_TIMEOUT
+        try:
+            urllib.request.urlopen(base, timeout=probe_t)
+            cls._ollama_probe_cache[base] = (now, True)
+            return True
+        except Exception:
+            cls._ollama_probe_cache[base] = (now, False)
+            return False
+
+    @classmethod
+    def invalidate_ollama_probe_cache(cls) -> None:
+        """Force the next probe to hit the network (e.g. after user starts Ollama)."""
+        cls._ollama_probe_cache.clear()
+
+    # ------------------------------------------------------------------
+    # Local-backend context manager
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _use_local_backend(self):
+        """Temporarily route one LLM call through the local Ollama backend.
+
+        Restores original provider/client/enabled on exit, even if an
+        exception is raised. This is the only place that mutates these
+        attributes during a call; extracting it here avoids the identical
+        try/finally blocks that previously appeared three times in _call_llm_stream.
+        """
+        orig = (self.provider, self.llm_client, self.llm_enabled)
+        try:
+            self.provider = "ollama"
+            self.llm_client = self._local_llm_client
+            self.llm_enabled = True
+            yield
+        finally:
+            self.provider, self.llm_client, self.llm_enabled = orig
 
     # ------------------------------------------------------------------
     # Cloud redaction UX
@@ -302,14 +391,22 @@ class NLHandler:
         """True if embedding vectors can be fetched (OpenAI or Ollama, including API-key-only)."""
         return self._client_for_embeddings() is not None
 
-    def initialize_llm(self, provider: str, api_key: str, base_url: Optional[str] = None) -> bool:
+    def initialize_llm(
+        self,
+        provider: str,
+        api_key: str,
+        base_url: Optional[str] = None,
+        *,
+        skip_probe: bool = False,
+    ) -> bool:
         """
         Initialize LLM client.
 
         Args:
-            provider:  "openai" | "anthropic" | "ollama"
-            api_key:   API key (use any non-empty string for ollama)
-            base_url:  Base URL override (required for ollama, optional for openai-compatible)
+            provider:    "openai" | "anthropic" | "ollama"
+            api_key:     API key (use any non-empty string for ollama)
+            base_url:    Base URL override (required for ollama, optional for openai-compatible)
+            skip_probe:  When True, skip the Ollama reachability probe (caller already verified).
         """
         if not api_key:
             return False
@@ -317,17 +414,21 @@ class NLHandler:
         try:
             if provider in _OPENAI_COMPAT_PROVIDERS:
                 from openai import OpenAI
-                kwargs: Dict[str, Any] = {"api_key": api_key}
+                kwargs: Dict[str, Any] = {
+                    "api_key": api_key,
+                    # Avoid indefinite hangs on bad network / blocked provider.
+                    "timeout": self._request_timeout_seconds(),
+                    # Keep retries low; retries + long timeouts can feel like a hang.
+                    "max_retries": 2,
+                }
                 if provider == "ollama":
                     url = base_url or "http://localhost:11434"
                     kwargs["base_url"] = url.rstrip("/") + "/v1"
-                    # Probe Ollama before marking as ready ΓÇö fail fast with a
-                    # clear message rather than hanging on the first query.
-                    import urllib.request
-                    import urllib.error
-                    try:
-                        urllib.request.urlopen(url.rstrip("/"), timeout=3)
-                    except urllib.error.URLError:
+                    # Probe Ollama before marking as ready — fail fast with a clear
+                    # message rather than hanging on the first query.
+                    # Skip when the caller has already verified reachability (avoids
+                    # double-probing on 'use ollama' or auto-detect paths).
+                    if not skip_probe and not self.__class__._probe_ollama_url(url):
                         print(
                             f"[Warning] Ollama is not reachable at {url}. "
                             "Start Ollama and restart cliara to enable local LLM."
@@ -362,11 +463,19 @@ class NLHandler:
             print(f"[Error] Failed to initialize LLM: {e}")
             return False
 
-    def initialize_local_ollama(self, base_url: Optional[str] = None) -> bool:
+    def initialize_local_ollama(
+        self,
+        base_url: Optional[str] = None,
+        *,
+        skip_probe: bool = False,
+    ) -> bool:
         """Initialize a *secondary* local Ollama backend without changing the cloud provider.
 
         This enables the transparent local/cloud router. Safe to call even when
         cloud is unconfigured.
+
+        Args:
+            skip_probe: When True, skip the reachability probe (caller already verified).
         """
         url = (base_url or (self.config.get_ollama_base_url() if self.config is not None else None) or "http://localhost:11434").strip()
         if not url:
@@ -375,17 +484,18 @@ class NLHandler:
             from openai import OpenAI
 
             kwargs: Dict[str, Any] = {
-                "api_key": "ollama", #pragma: allowlist secret
+                "api_key": "ollama",  # pragma: allowlist secret
                 "base_url": url.rstrip("/") + "/v1",
+                "timeout": self._request_timeout_seconds(),
+                "max_retries": 1,
             }
 
-            # Probe Ollama before enabling.
-            import urllib.request
-            import urllib.error
-
-            try:
-                urllib.request.urlopen(url.rstrip("/"), timeout=3)
-            except urllib.error.URLError:
+            # Probe Ollama before enabling. Uses the class-level cached probe so
+            # calling both initialize_llm() and initialize_local_ollama() for the
+            # same URL in one startup does not result in two network round-trips.
+            # Use a short 0.5 s timeout: this is an opportunistic secondary-backend
+            # probe (localhost only); if Ollama is running it responds in <5 ms.
+            if not skip_probe and not self.__class__._probe_ollama_url(url, timeout=0.5):
                 return False
 
             self._local_llm_client = OpenAI(**kwargs)
@@ -559,18 +669,11 @@ class NLHandler:
         """Use local model to redact *text* when available."""
         if not (self._local_enabled and self._local_llm_client is not None):
             return ""
-        # Avoid recursion: call the underlying implementation directly on the local backend.
-        orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
         try:
-            self.provider = "ollama"
-            self.llm_client = self._local_llm_client
-            self.llm_enabled = True
-            out = self._call_llm_stream_impl("redact", text, stream_callback=None)
-            return (out or "").strip()
+            with self._use_local_backend():
+                return (self._call_llm_stream_impl("redact", text, stream_callback=None) or "").strip()
         except Exception:
             return ""
-        finally:
-            self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
 
     def predict_next_backend_for_user_input(self, user_input: str, nl_prefix: str = "?") -> Literal["local", "cloud"]:
         """Best-effort preview used by the prompt glyph (no LLM calls)."""
@@ -1211,18 +1314,24 @@ class NLHandler:
                     else:
                         raise RuntimeError("Cancelled cloud send (redaction uncertain).")
 
-        # Execute on the selected backend by temporarily swapping the active client.
+        # Execute on the selected backend.
         if backend == "local" and local_ok:
-            orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
-            try:
-                self.provider = "ollama"
-                self.llm_client = self._local_llm_client
-                self.llm_enabled = True
+            with self._use_local_backend():
                 return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
-            finally:
-                self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
 
-        return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
+        try:
+            return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
+        except Exception as exc:
+            # If the cloud backend fails (timeouts, DNS, provider down), fall
+            # back to local when available so features like `mc ...` don't hang.
+            if backend == "cloud" and local_ok:
+                try:
+                    print_dim("→ cloud failed; retrying locally")
+                except Exception:
+                    pass
+                with self._use_local_backend():
+                    return self._call_llm_stream_impl(agent_type, user_message, stream_callback)
+            raise
 
     def _call_llm_stream_impl(
         self,
@@ -1303,6 +1412,14 @@ class NLHandler:
         """Turn upstream errors into a short message; add hints for known platform failures."""
         msg = str(err)
         out = f"{self.provider} API error: {err}"
+        if "timed out" in msg.lower() or "timeout" in msg.lower():
+            out += (
+                "\n  Hint: Request timed out. This is usually a network/DNS/proxy/firewall issue. "
+                "If you're on a restricted network, try another provider (Groq/Gemini), "
+                "or run Ollama locally (setup-ollama), then `use ollama`."
+            )
+        if "getaddrinfo failed" in msg.lower() or "name or service not known" in msg.lower():
+            out += "\n  Hint: DNS lookup failed. Check connectivity and proxy settings."
         if "Application not found" in msg and "404" in msg:
             out += (
                 "\n  Hint: The hosted API (often Railway) returned ΓÇ£Application not foundΓÇ¥. "
@@ -2077,9 +2194,21 @@ Command: {cmd_for_prompt}"""
         Uses OpenAI or the primary Ollama client, or a dedicated OpenAI client
         from ``OPENAI_API_KEY`` when chat uses another provider.  Returns None
         on failure.
+
+        Results are cached per-instance for _EMBEDDING_CACHE_TTL seconds so that
+        repeated "? find ..." queries with identical wording don't re-hit the
+        embedding API. The cache is bounded to _EMBEDDING_CACHE_MAX entries.
         """
-        if not text.strip():
+        key = (text or "").strip()
+        if not key:
             return None
+
+        # Fast path: serve from cache if still fresh.
+        now = time.monotonic()
+        cached = self._embedding_cache.get(key)
+        if cached is not None and (now - cached[0]) <= self._EMBEDDING_CACHE_TTL:
+            return cached[1]
+
         client = self._client_for_embeddings()
         if client is None:
             return None
@@ -2090,9 +2219,16 @@ Command: {cmd_for_prompt}"""
         try:
             resp = client.embeddings.create(
                 model=model,
-                input=text.strip(),
+                input=key,
             )
-            return resp.data[0].embedding
+            vec = resp.data[0].embedding
+
+            # Evict oldest entry when cache is full before inserting.
+            if len(self._embedding_cache) >= self._EMBEDDING_CACHE_MAX:
+                oldest_key = min(self._embedding_cache, key=lambda k: self._embedding_cache[k][0])
+                del self._embedding_cache[oldest_key]
+            self._embedding_cache[key] = (now, vec)
+            return vec
         except Exception:
             return None
 
@@ -2130,6 +2266,175 @@ Command: {cmd_for_prompt}"""
                 scored.append((score, e))
         scored.sort(key=lambda x: -x[0])
         return [e for _, e in scored[: max(1, top_m)]]
+
+    @staticmethod
+    def _history_query_tokens(query: str) -> List[str]:
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        raw = [t for t in re.findall(r"[a-z0-9]+", q) if len(t) > 1]
+        if not raw:
+            return []
+        stop = {
+            "when",
+            "what",
+            "where",
+            "why",
+            "how",
+            "did",
+            "do",
+            "does",
+            "i",
+            "me",
+            "my",
+            "we",
+            "you",
+            "the",
+            "a",
+            "an",
+            "to",
+            "of",
+            "in",
+            "on",
+            "for",
+            "with",
+            "and",
+            "or",
+            "last",
+            "recent",
+            "recently",
+            "latest",
+            "most",
+            "time",
+            "run",
+            "ran",
+            "command",
+            "commands",
+            "builds",
+        }
+        tokens = [t for t in raw if t not in stop]
+        # De-dupe while keeping order.
+        seen = set()
+        out: List[str] = []
+        for t in tokens:
+            if t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+        return out
+
+    @staticmethod
+    def _is_last_intent_query(query: str) -> bool:
+        q = (query or "").strip().lower()
+        if not q:
+            return False
+        # Handle common phrasing: "when did I last ...", "last time", "most recent".
+        return bool(
+            re.search(r"\b(last|latest|recently|most\s+recent)\b", q)
+            and re.search(r"\b(when|what)\b", q)
+        ) or bool(re.search(r"\bwhen\s+did\s+i\s+last\b", q))
+
+    @staticmethod
+    def _parse_history_timestamp(ts: str):
+        if not ts:
+            return None
+        try:
+            from datetime import datetime
+
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _keyword_score_for_entry(self, entry: Dict[str, Any], tokens: List[str]) -> float:
+        if not tokens:
+            return 0.0
+        cmd = (entry.get("command") or "").strip().lower()
+        summary = (entry.get("summary") or "").strip().lower()
+        if not (cmd or summary):
+            return 0.0
+        score = 0.0
+        for t in tokens:
+            # Prefer command matches over summary matches.
+            if re.search(r"\b" + re.escape(t) + r"\b", cmd):
+                score += 1.0
+            elif t in cmd:
+                score += 0.65
+            if re.search(r"\b" + re.escape(t) + r"\b", summary):
+                score += 0.45
+            elif t in summary:
+                score += 0.25
+
+        # Heuristic: for queries like "last build", de-boost "pip install build" matches
+        # where the token is likely a package name, not the user's action.
+        if re.search(r"\bpip(?:3)?\s+install\b", cmd) and "install" not in tokens:
+            score *= 0.55
+
+        # Heuristic: boost canonical action commands.
+        if "build" in tokens and re.search(r"\bpython(?:\.exe)?\s+-m\s+build\b", cmd):
+            score += 0.75
+
+        # Normalise to [0, 1] by token count (roughly).
+        denom = max(1.0, float(len(tokens)) * 1.2)
+        return max(0.0, min(1.0, score / denom))
+
+    def rerank_history_matches(self, matches: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """Re-rank history results to be more useful than pure cosine similarity.
+
+        - Adds lightweight keyword overlap scoring.
+        - Adds a small recency boost.
+        - Special-cases "when did I last ..." to prefer the most recent relevant hit.
+        """
+        if not matches or not (query or "").strip():
+            return matches
+
+        tokens = self._history_query_tokens(query)
+        is_last = self._is_last_intent_query(query)
+
+        # Precompute timestamp recency within this candidate set.
+        parsed = [self._parse_history_timestamp((e.get("timestamp") or "").strip()) for e in matches]
+        valid_times = [t for t in parsed if t is not None]
+        t_min = min(valid_times) if valid_times else None
+        t_max = max(valid_times) if valid_times else None
+
+        def _recency_norm(t) -> float:
+            if t is None or t_min is None or t_max is None or t_min == t_max:
+                return 0.0
+            span = (t_max - t_min).total_seconds()
+            if span <= 0:
+                return 0.0
+            return max(0.0, min(1.0, (t - t_min).total_seconds() / span))
+
+        scored: List[Tuple[float, Dict[str, Any], float, float, Any]] = []
+        for e, t in zip(matches, parsed):
+            emb = e.get("_embedding_score")
+            try:
+                emb_f = float(emb) if emb is not None else 0.0
+            except Exception:
+                emb_f = 0.0
+            # Cosine similarity is typically [0.3..0.9] after filtering; clamp anyway.
+            emb_f = max(0.0, min(1.0, emb_f))
+            kw = self._keyword_score_for_entry(e, tokens)
+            rec = _recency_norm(t)
+
+            if is_last and tokens:
+                rank = 0.75 * kw + 0.15 * rec + 0.10 * emb_f
+            else:
+                rank = 0.65 * emb_f + 0.30 * kw + 0.05 * rec
+
+            out_e = dict(e)
+            out_e["_keyword_score"] = kw
+            out_e["_rank_score"] = rank
+            scored.append((rank, out_e, kw, emb_f, t))
+
+        # For "last" queries, prefer most-recent among clearly relevant hits.
+        if is_last:
+            rel = [s for s in scored if s[2] >= 0.25]
+            base = rel if rel else scored
+            base.sort(key=lambda x: (x[2], x[4] or 0, x[0]), reverse=True)
+            return [e for _rank, e, _kw, _emb, _t in base]
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [e for _rank, e, _kw, _emb, _t in scored]
 
     def merge_embedding_keyword_results(
         self,
@@ -2224,7 +2529,9 @@ Command: {cmd_for_prompt}"""
         for rank in range(min(top_k, int(order.size))):
             i = int(order[rank])
             if float(scores[i]) >= threshold:
-                out.append(with_emb[i])
+                e = dict(with_emb[i])
+                e["_embedding_score"] = float(scores[i])
+                out.append(e)
         return out
 
     # ------------------------------------------------------------------

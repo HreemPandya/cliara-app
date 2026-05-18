@@ -1568,6 +1568,8 @@ class CliaraShell(
                     target_k=top_k,
                     keyword_pool=kw_pool,
                 )
+            # Rerank to make "when did I last ..." and similar queries feel right.
+            matches = self.nl_handler.rerank_history_matches(matches, qstrip)
             if not matches and llm:
                 entries_recent = store.get_recent(intent_max)
                 matches = self.nl_handler.search_history_by_intent(
@@ -1584,37 +1586,59 @@ class CliaraShell(
         if not matches:
             print_dim("No matching commands found. Try a different phrase or run more commands.")
             return
-        print_info(f"Found {len(matches)} matching command(s):\n")
-        for i, e in enumerate(matches, 1):
-            cmd = e.get("command", "")
-            summary = e.get("summary", "").strip()
-            ts = e.get("timestamp", "").strip()
-            cwd = e.get("cwd", "").strip()
-            line = f"  {i}. {cmd}"
-            if summary:
-                line += f"\n     {summary}"
-            if ts:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    # Convert UTC timestamp to local time and show 12-hour clock with AM/PM
-                    local_dt = dt.astimezone()
-                    line += f"\n     {local_dt.strftime('%Y-%m-%d %I:%M %p')}"
-                except Exception:
-                    line += f"\n     {ts}"
-            if cwd:
-                line += f"  |  {cwd}"
-            print(line)
-            print()
-        # Offer to run the first match
-        first_cmd = matches[0].get("command", "").strip()
-        if first_cmd:
+        from rich.table import Table
+        from rich import box
+
+        def _format_ts(ts: str) -> str:
+            ts = (ts or "").strip()
+            if not ts:
+                return ""
             try:
-                run_again = input("Run the first command again? (y/n): ").strip().lower()
-                if run_again in ("y", "yes"):
-                    self.execute_shell_command(first_cmd)
-            except (EOFError, KeyboardInterrupt):
-                print()
+                from datetime import datetime
+
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                local_dt = dt.astimezone()
+                return local_dt.strftime("%Y-%m-%d %I:%M %p")
+            except Exception:
+                return ts
+
+        print_info(f"Found {len(matches)} matching command(s):\n")
+        table = Table(box=box.SIMPLE, show_header=True, header_style="bold", show_lines=False)
+        table.add_column("#", style="dim", justify="right", no_wrap=True)
+        table.add_column("When", style="dim", no_wrap=True)
+        table.add_column("Command", overflow="fold")
+        table.add_column("Summary", style="dim", overflow="fold")
+        table.add_column("Rel", style="dim", justify="right", no_wrap=True)
+
+        for i, e in enumerate(matches, 1):
+            cmd = (e.get("command") or "").strip()
+            summary = (e.get("summary") or "").strip()
+            when = _format_ts(e.get("timestamp", ""))
+            rel = e.get("_rank_score", e.get("_embedding_score", None))
+            rel_str = ""
+            if isinstance(rel, (int, float)):
+                rel_str = f"{max(0.0, min(1.0, float(rel))) * 100:0.0f}%"
+            table.add_row(str(i), when, cmd, summary, rel_str)
+
+        _cliara_console().print(table)
+
+        # Offer to run a match (more flexible than first-only).
+        try:
+            choice = input("Run which command? (1-{}; Enter to skip): ".format(len(matches))).strip().lower()
+            if not choice or choice in ("n", "no"):
+                return
+            idx = None
+            if choice in ("y", "yes"):
+                idx = 1
+            elif choice.isdigit():
+                idx = int(choice)
+            if idx is None or idx < 1 or idx > len(matches):
+                return
+            picked = (matches[idx - 1].get("command") or "").strip()
+            if picked:
+                self.execute_shell_command(picked)
+        except (EOFError, KeyboardInterrupt):
+            print()
 
 
     def _handle_config_command(self, args: str):
@@ -1778,7 +1802,9 @@ class CliaraShell(
                 print_dim("  Start Ollama, then run 'use ollama' again.")
                 return
             _clear_incompatible_model(self)
-            ok = self.nl_handler.initialize_llm("ollama", "ollama", base_url=base_url)
+            # _ollama_running() already confirmed reachability → skip the second probe
+            # inside initialize_llm() to avoid a redundant network round-trip.
+            ok = self.nl_handler.initialize_llm("ollama", "ollama", base_url=base_url, skip_probe=True)
         else:
             api_key = os.getenv(_ENV_VAR_MAP[target])
             if not api_key:
@@ -1792,6 +1818,11 @@ class CliaraShell(
         if ok:
             self.config.settings["llm_provider"] = target
             self.config._load_env_vars()
+            # Clear incompatible stored model overrides (e.g. gemma4 on OpenAI).
+            try:
+                self.config._normalize_models_for_provider(target)
+            except Exception:
+                pass
             self.config.save()
             model = self.nl_handler._resolve_model("nl_to_commands")
             print_success(f"  Switched to {target.upper()}  (model: {model})")
@@ -1868,6 +1899,12 @@ class CliaraShell(
         if ok:
             self.config.settings["llm_provider"] = "cliara"
             self.config.settings["llm_api_key"] = token
+            # Clear incompatible stored model overrides from prior providers.
+            try:
+                self.config._normalize_models_for_provider("cliara")
+            except Exception:
+                pass
+            self.config.save()
 
         print()
         if ok:

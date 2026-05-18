@@ -101,6 +101,28 @@ def _run_status(config_dir=None):
     from cliara.shell_app.orchestrator import print_success, print_warning, print_dim
 
     print()
+    print_dim("  Cliara Status")
+    print_dim("  ------------")
+    print()
+
+    token_data = load_token()
+    if token_data and get_valid_token():
+        email = token_data.get("email", "unknown")
+        print_success(f"  Cliara Cloud: logged in ({email})")
+        print_dim("  Free tier · 150 queries/month · resets monthly")
+        return
+
+    config = Config(config_dir=config_dir)
+    provider = config.get_llm_provider()
+    if provider:
+        model = config.get_llm_model("nl_to_commands") or "(provider default)"
+        print_success(f"  BYOK: {provider}")
+        print_dim(f"  Model override: {model}")
+        print_dim("  Using your own API key")
+    else:
+        print_warning("  Not configured")
+        print_dim("  Run 'cliara login' for Cloud, or 'setup-llm' inside cliara for BYOK")
+    print()
 
 
 def _run_pulse(config_dir=None):

@@ -32,6 +32,37 @@ except ImportError:
 
 class Config:
     """Manages Cliara configuration and settings."""
+
+    # Model keys that may be provider-specific and should be cleared when the
+    # provider changes to avoid incompatible leftovers (e.g. gemma4 on OpenAI).
+    _MODEL_KEYS = (
+        "llm_model",
+        "model_nl",
+        "model_fix",
+        "model_explain",
+        "model_commit",
+        "model_deploy",
+        "model_readme",
+        "model_history",
+        "model_copilot",
+        "model_session_reflect",
+        "model_chat_polish",
+    )
+
+    # Prefixes that are almost certainly cloud-only ids (not valid for Ollama).
+    _CLOUD_MODEL_PREFIXES = (
+        "gpt-",
+        "o1",
+        "o2",
+        "o3",
+        "o4",
+        "chatgpt-",
+        "claude-",
+        "llama-3.",
+        "gemini-",
+        "mixtral-",
+        "text-",
+    )
     
     DEFAULT_CONFIG = {
         "shell": None,  # Auto-detected
@@ -56,6 +87,9 @@ class Config:
         "llm_provider": None,  # "openai" | "anthropic" | "ollama"
         "llm_api_key": None,  # Never persisted to disk — comes from env
         "llm_model": None,    # Global model override; None = provider default
+        # Network timeout (seconds) for cloud LLM requests. Prevents hangs when
+        # a provider is unreachable (firewall/DNS/proxy issues).
+        "llm_timeout_seconds": 60,
         # Per-task model overrides — None means fall back to llm_model then provider default
         # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "gemma4" for ollama
         "model_nl": None,       # ? natural-language → commands
@@ -380,6 +414,7 @@ class Config:
 
     def _load_env_vars(self):
         """Load environment variables into config (see _resolve_llm_credentials)."""
+        prev_provider = self.settings.get("llm_provider")
         resolved = self._resolve_llm_credentials()
         if resolved:
             prov, key, o_url = resolved
@@ -387,6 +422,55 @@ class Config:
             self.settings["llm_api_key"] = key
             if o_url:
                 self.settings["ollama_base_url"] = o_url
+
+        # If the active provider changed (or env credentials caused a flip),
+        # clear incompatible stored model overrides so the provider switch is
+        # consistent across the app.
+        provider_now = self.settings.get("llm_provider")
+        changed = self._normalize_models_for_provider(provider_now)
+        if changed and provider_now and provider_now != prev_provider:
+            # Persist the cleanup so future sessions don't re-hit this mismatch.
+            try:
+                self.save()
+            except Exception:
+                pass
+
+    def _normalize_models_for_provider(self, provider: Optional[str]) -> bool:
+        """Clear stored model overrides that don't match *provider*.
+
+        Returns True when a setting was changed.
+        """
+        if not provider:
+            return False
+
+        # Lazy import to avoid heavy/circular imports during Config module load.
+        try:
+            from cliara.nl.constants import model_id_matches_provider
+        except Exception:
+            model_id_matches_provider = None  # type: ignore
+
+        changed = False
+        prov = str(provider).strip().lower()
+        for key in self._MODEL_KEYS:
+            val = self.settings.get(key)
+            if not isinstance(val, str) or not val.strip():
+                continue
+            model = val.strip()
+
+            # Ollama: clear obvious cloud ids (historically caused 404s).
+            if prov == "ollama":
+                low = model.lower()
+                if any(low.startswith(p) for p in self._CLOUD_MODEL_PREFIXES):
+                    self.settings[key] = None
+                    changed = True
+                continue
+
+            # Other providers: clear local-only ids like "gemma4".
+            if model_id_matches_provider is not None and not model_id_matches_provider(model, prov):
+                self.settings[key] = None
+                changed = True
+
+        return changed
 
     def get_llm_api_key(self) -> Optional[str]:
         """Get LLM API key from environment or config (including token file)."""
@@ -417,6 +501,7 @@ class Config:
           2. Global ``llm_model`` override
           3. None → caller applies the provider default
         """
+        provider = (self.get_llm_provider() or "").strip().lower()
         _AGENT_CONFIG_KEYS: Dict[str, str] = {
             "nl_to_commands": "model_nl",
             "fix":            "model_fix",
@@ -431,10 +516,28 @@ class Config:
             "session_reflect": "model_session_reflect",
             "chat_polish":     "model_chat_polish",
         }
+
+        def _is_compatible(model: Optional[str]) -> bool:
+            if not (model and provider):
+                return True
+            if provider == "ollama":
+                low = model.strip().lower()
+                return not any(low.startswith(p) for p in self._CLOUD_MODEL_PREFIXES)
+            try:
+                from cliara.nl.constants import model_id_matches_provider
+
+                return model_id_matches_provider(model, provider)
+            except Exception:
+                # If we can't validate, assume compatible.
+                return True
+
         if agent_type:
             key = _AGENT_CONFIG_KEYS.get(agent_type)
             if key:
                 model = self.settings.get(key)
-                if model:
+                if model and _is_compatible(model):
                     return model
-        return self.settings.get("llm_model") or None
+        global_model = self.settings.get("llm_model")
+        if global_model and _is_compatible(global_model):
+            return global_model
+        return None

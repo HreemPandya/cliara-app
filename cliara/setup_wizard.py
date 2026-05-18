@@ -138,8 +138,12 @@ def _write_env_var(key: str, value: str) -> Path:
     return env_path
 
 
-def _ollama_running(url: str = _OLLAMA_DEFAULT_URL, timeout: int = 2) -> bool:
-    """Return True if an Ollama service is reachable at *url*."""
+def _ollama_running(url: str = _OLLAMA_DEFAULT_URL, timeout: float = 1.0) -> bool:
+    """Return True if an Ollama service is reachable at *url*.
+
+    The default timeout is 1 s: Ollama on localhost responds in <5 ms when
+    running, so 1 s is more than enough while still failing fast when it's not.
+    """
     try:
         urllib.request.urlopen(url, timeout=timeout)
         return True
@@ -154,8 +158,20 @@ def _mask_key(key: str) -> str:
     return key[:6] + "..." + key[-4:]
 
 
-def _apply_env_and_reinit(shell: "CliaraShell", provider_id: str, env_var: str, key: str) -> bool:
-    """Set the env var in the current process and re-initialise the LLM client."""
+def _apply_env_and_reinit(
+    shell: "CliaraShell",
+    provider_id: str,
+    env_var: str,
+    key: str,
+    *,
+    skip_probe: bool = False,
+) -> bool:
+    """Set the env var in the current process and re-initialise the LLM client.
+
+    Args:
+        skip_probe: Pass True when the caller already confirmed Ollama is
+                    reachable (e.g. auto_detect_ollama) to avoid a second probe.
+    """
     os.environ[env_var] = key
     # Persist choice so OLLAMA_BASE_URL in ~/.cliara/.env does not shadow this provider.
     shell.config.settings["llm_provider"] = provider_id
@@ -168,7 +184,7 @@ def _apply_env_and_reinit(shell: "CliaraShell", provider_id: str, env_var: str, 
     base_url = shell.config.get_ollama_base_url() if provider == "ollama" else None
 
     if provider and api_key:
-        return shell.nl_handler.initialize_llm(provider, api_key, base_url=base_url)
+        return shell.nl_handler.initialize_llm(provider, api_key, base_url=base_url, skip_probe=skip_probe)
     return False
 
 
@@ -194,7 +210,9 @@ def auto_detect_ollama(shell: "CliaraShell") -> bool:
     _clear_incompatible_model(shell)
 
     env_path = _write_env_var("OLLAMA_BASE_URL", _OLLAMA_DEFAULT_URL)
-    ok = _apply_env_and_reinit(shell, "ollama", "OLLAMA_BASE_URL", _OLLAMA_DEFAULT_URL)
+    # _ollama_running() already confirmed Ollama is up → skip the second probe
+    # inside initialize_llm() to avoid an unnecessary extra network round-trip.
+    ok = _apply_env_and_reinit(shell, "ollama", "OLLAMA_BASE_URL", _OLLAMA_DEFAULT_URL, skip_probe=True)
     if ok:
         try:
             from cliara.shell_app.orchestrator import print_success

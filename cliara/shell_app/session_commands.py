@@ -330,7 +330,7 @@ class SessionCommandMixin:
         offline = not self.nl_handler.llm_enabled
 
         summary_body = Text()
-        summary_body.append(f"Session -o{s.name}...", style="bold")
+        summary_body.append(f"Session '{s.name}'...", style="bold")
         summary_body.append(f" · {len(s.commands)} commands")
         if s.branch:
             summary_body.append(f" · {s.branch}", style="dim")

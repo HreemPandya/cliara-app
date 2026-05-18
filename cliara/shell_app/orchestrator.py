@@ -2548,7 +2548,17 @@ class CliaraShell(
         files = [f for f in (result.stdout or "").strip().splitlines() if f]
 
         # "?"? 7. Generate commit message "?"?
-        print_dim("Generating commit message...\n")
+        # Stream tokens to the console so the user gets live feedback instead of
+        # a blank wait. The cloud-redaction banner (→ cloud …) is printed on its own
+        # line by the LLM layer, so we leave the cursor on a fresh line here and let
+        # the streamed tokens follow naturally below any banners.
+        print_dim("  Generating...")
+
+        _streamed_tokens: list = []
+
+        def _commit_stream(piece: str) -> None:
+            print(piece, end="", flush=True)
+            _streamed_tokens.append(piece)
 
         context = {
             "cwd": str(Path.cwd()),
@@ -2556,19 +2566,18 @@ class CliaraShell(
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
             "branch": branch,
         }
-        # No streaming: stream uses end="" so the next print_info would share one line
-        # with the message, and we already print the message once below.
         commit_msg = self.nl_handler.generate_commit_message(
-            diff_stat, diff_content, files, context, stream_callback=None
+            diff_stat, diff_content, files, context, stream_callback=_commit_stream
         )
+        # End the streamed line cleanly before the summary panel.
+        print()
+
         if not commit_msg or not commit_msg.strip():
             print_error("[Cliara] Could not generate commit message. Try again or use: git commit -m \"your message\"")
             self._unstage_all()
             return
 
         # "?"? 8. Show message and confirm "?"?
-        # Always print the commit message so it's visible even when streaming
-        # output was buffered or didn't display (e.g. rapid successive runs)
         print_info("[Cliara] Commit message:")
         print(f"\n  {commit_msg}\n")
         print_dim(f"  Branch: {branch}")

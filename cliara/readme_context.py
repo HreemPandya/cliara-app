@@ -266,20 +266,52 @@ def _read_existing_readme(root: Path) -> str:
     return ""
 
 
-def _scan_file_content_for_patterns(root: Path, patterns: frozenset) -> bool:
-    """Return True if any file in the project contains patterns (case-insensitive)."""
-    pattern_re = re.compile("|".join(re.escape(p) for p in patterns), re.I)
-    for ext in (".py", ".js", ".ts", ".go", ".rs", ".java", ".kt"):
-        for path in root.rglob(f"*{ext}"):
-            if not path.is_file() or "__pycache__" in str(path) or "node_modules" in str(path):
-                continue
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-                if pattern_re.search(text):
-                    return True
-            except Exception:
-                pass
-    return False
+def _scan_file_content_multi(
+    root: Path,
+    pattern_sets: Dict[str, "re.Pattern"],
+    max_files: int = 300,
+) -> Dict[str, bool]:
+    """Scan source files once and check all pattern sets in a single pass.
+
+    Previously the fingerprint called _scan_file_content_for_patterns() four
+    times, each of which walked the whole file tree independently (O(4N) reads).
+    This function does one walk and returns a dict of {label: found} for all
+    sets simultaneously (O(N) reads, capped at *max_files*).
+    """
+    results = {label: False for label in pattern_sets}
+    remaining = dict(pattern_sets)  # only check patterns not yet found
+    files_checked = 0
+
+    _skip_dirs = _IGNORE_DIRS | {"dist", "build", ".next", "coverage"}
+    _src_exts = frozenset((".py", ".js", ".ts", ".go", ".rs", ".java", ".kt"))
+
+    def _walk(directory: Path) -> None:
+        nonlocal files_checked
+        if files_checked >= max_files or not remaining:
+            return
+        try:
+            entries = list(directory.iterdir())
+        except (PermissionError, OSError):
+            return
+        for entry in entries:
+            if not remaining or files_checked >= max_files:
+                return
+            if entry.is_dir():
+                if entry.name not in _skip_dirs and not entry.name.startswith("."):
+                    _walk(entry)
+            elif entry.is_file() and entry.suffix.lower() in _src_exts:
+                try:
+                    text = entry.read_text(encoding="utf-8", errors="replace")
+                    files_checked += 1
+                    for label, pat in list(remaining.items()):
+                        if pat.search(text):
+                            results[label] = True
+                            del remaining[label]
+                except Exception:
+                    pass
+
+    _walk(root)
+    return results
 
 
 def _scan_file_names(root: Path, patterns: frozenset) -> bool:
@@ -313,12 +345,26 @@ def _build_fingerprint(root: Path, context: Dict[str, Any]) -> Dict[str, Any]:
         fp["ecosystem"] = "go"
         fp["type"] = "service"
 
-    fp["has_auth"] = _scan_file_content_for_patterns(root, _AUTH_PATTERNS) or _scan_file_names(root, _AUTH_PATTERNS)
-    fp["has_env"] = any((root / n).exists() for n in (".env.example", ".env.template", "env.example")) or _scan_file_content_for_patterns(root, _ENV_PATTERNS)
-    fp["has_database"] = _scan_file_content_for_patterns(root, _DB_PATTERNS)
-    fp["has_setup_wizard"] = _scan_file_content_for_patterns(root, _SETUP_PATTERNS)
+    # Single-pass scan for all content patterns (previously 4 separate rglob walks).
+    scan_results = _scan_file_content_multi(root, {
+        "auth":  re.compile("|".join(re.escape(p) for p in _AUTH_PATTERNS), re.I),
+        "env":   re.compile("|".join(re.escape(p) for p in _ENV_PATTERNS), re.I),
+        "db":    re.compile("|".join(re.escape(p) for p in _DB_PATTERNS), re.I),
+        "setup": re.compile("|".join(re.escape(p) for p in _SETUP_PATTERNS), re.I),
+    })
+
+    fp["has_auth"] = scan_results["auth"] or _scan_file_names(root, _AUTH_PATTERNS)
+    fp["has_env"] = (
+        any((root / n).exists() for n in (".env.example", ".env.template", "env.example"))
+        or scan_results["env"]
+    )
+    fp["has_database"] = scan_results["db"]
+    fp["has_setup_wizard"] = scan_results["setup"]
     fp["has_docker"] = "Dockerfile" in configs or "docker-compose" in str(configs)
-    fp["has_optional_deps"] = "optional-dependencies" in str(configs.get("pyproject.toml", "")) or "postgres" in str(configs.get("pyproject.toml", ""))
+    fp["has_optional_deps"] = (
+        "optional-dependencies" in str(configs.get("pyproject.toml", ""))
+        or "postgres" in str(configs.get("pyproject.toml", ""))
+    )
 
     return fp
 

@@ -137,6 +137,55 @@ def _first_usable_commit_line(raw: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Commit message — type-inference keyword table
+# ---------------------------------------------------------------------------
+# When a model returns a plain description without a CC type prefix, we infer
+# the best-matching type by scanning the description for domain keywords.
+# Checked in priority order: specific types before the catch-all "chore".
+_CC_TYPE_KEYWORDS: List[Tuple[str, frozenset]] = [
+    ("fix",      frozenset({"fix", "fixes", "bug", "error", "issue", "crash", "broken",
+                             "resolve", "correct", "patch", "handle", "prevent", "revert"})),
+    ("feat",     frozenset({"add", "adds", "implement", "create", "introduce", "support",
+                             "enable", "new", "include", "feature", "allow", "expose"})),
+    ("perf",     frozenset({"performance", "speed", "faster", "slower", "latency", "memory",
+                             "cache", "efficient", "lazy", "throttle", "debounce", "optimiz"})),
+    ("refactor", frozenset({"refactor", "restructure", "reorganize", "simplify", "clean",
+                             "improve", "reduce", "move", "rename", "extract", "split",
+                             "merge", "dedup", "consolidate"})),
+    ("docs",     frozenset({"doc", "docs", "documentation", "readme", "comment", "comments",
+                             "changelog", "license", "typo", "clarif", "example"})),
+    ("test",     frozenset({"test", "tests", "spec", "specs", "coverage", "unit",
+                             "integration", "mock", "fixture", "assert"})),
+    ("ci",       frozenset({"ci", "cd", "workflow", "pipeline", "action", "travis",
+                             "circleci", "jenkins", "github action"})),
+    ("build",    frozenset({"build", "package", "dependency", "dependencies",
+                             "requirements", "version", "bump", "release", "publish",
+                             "install", "wheel", "lockfile"})),
+    ("chore",    frozenset({"update", "upgrade", "downgrade", "remove", "delete",
+                             "cleanup", "misc", "config", "setup", "format", "lint"})),
+]
+
+
+def _infer_cc_type(description: str) -> str:
+    """Return the best-matching Conventional Commits type for a plain description."""
+    desc = description.lower()
+    for cc_type, keywords in _CC_TYPE_KEYWORDS:
+        if any(kw in desc for kw in keywords):
+            return cc_type
+    return "chore"
+
+
+# Lines that are clearly model preamble and should be skipped when extracting
+# a commit description from plain-text responses.
+_COMMIT_PREAMBLE_RE = re.compile(
+    r"^(here\b|this\s+(is|would|would be)\b|the\s+commit\b|i\s+(would|suggest|recommend|think)\b"
+    r"|please\b|note[:\s]|output[:\s]|result[:\s]|sure[,!]|of\s+course\b|based\s+on\b"
+    r"|looking\s+at\b|commit\s+message[:\s]|conventional\s+commit)",
+    re.IGNORECASE,
+)
+
+
 class NLHandler:
     """Handles natural language to command conversion using LLM."""
 
@@ -2025,8 +2074,10 @@ Command: {command}"""
         shell = context_info.get("shell", "bash")
         cwd = context_info.get("cwd", "")
 
-        out_t = self._truncate_stream_for_prompt(stdout or "", 70)
-        err_t = self._truncate_stream_for_prompt(stderr or "", 70)
+        # Local models have smaller context windows; reduce I/O line budget.
+        _io_lines = 30 if self.provider == "ollama" else 70
+        out_t = self._truncate_stream_for_prompt(stdout or "", _io_lines)
+        err_t = self._truncate_stream_for_prompt(stderr or "", _io_lines)
         out_lines = len((stdout or "").splitlines())
         err_lines = len((stderr or "").splitlines())
 
@@ -2105,17 +2156,24 @@ Context:
             return ""
         if not (command or command.strip()):
             return ""
-        # Truncate very long commands for API
-        cmd_for_prompt = command.strip()
-        if len(cmd_for_prompt) > 2000:
-            cmd_for_prompt = cmd_for_prompt[:2000] + " ..."
-        try:
-            context_info = self._build_context(context) if context else {}
-            os_name = context_info.get("os", "Unknown")
-            shell = context_info.get("shell", "bash")
-            prompt = f"""OS: {os_name}, Shell: {shell}
 
-Command: {cmd_for_prompt}"""
+        # Local models benefit from a very compact prompt — they run on every
+        # command in a background thread, so keeping prompts tiny matters.
+        is_local = (self.provider == "ollama")
+        cmd_limit = 300 if is_local else 2000
+
+        cmd_for_prompt = command.strip()
+        if len(cmd_for_prompt) > cmd_limit:
+            cmd_for_prompt = cmd_for_prompt[:cmd_limit] + " ..."
+        try:
+            if is_local:
+                # Stripped-down prompt: the system prompt carries the task description.
+                prompt = f"Command: {cmd_for_prompt}"
+            else:
+                context_info = self._build_context(context) if context else {}
+                os_name = context_info.get("os", "Unknown")
+                shell = context_info.get("shell", "bash")
+                prompt = f"OS: {os_name}, Shell: {shell}\n\nCommand: {cmd_for_prompt}"
             response = self._call_llm("history_summary", prompt)
             summary = (response or "").strip()
             if len(summary) > 150:
@@ -2535,6 +2593,70 @@ Command: {cmd_for_prompt}"""
         return out
 
     # ------------------------------------------------------------------
+    # Commit-message extraction helpers
+    # ------------------------------------------------------------------
+
+    def _extract_commit_message(self, response: str) -> str:
+        """Multi-strategy extraction — returns a ready-to-use CC-format line.
+
+        Strategies tried in order (inspired by aicommits / gptcommit approach):
+          1. JSON  ``{"message": "..."}``  — explicit structured output
+          2. Exact CC-format regex via _first_usable_commit_line
+          3. Smart plain-text: take the first reasonable line and auto-prefix CC type
+
+        Returns "" only when the response is empty or completely garbled.
+        """
+        text = (response or "").strip()
+        if not text:
+            return ""
+
+        # --- Strategy 1: JSON {"message": "..."} ---
+        raw_json = self._extract_json(text)
+        if raw_json:
+            try:
+                data = json.loads(raw_json)
+                msg = (data.get("message") or "").strip().strip("'\"")
+                if msg and len(msg) >= 10:
+                    if not _CC_LINE.match(msg):
+                        cc_type = _infer_cc_type(msg)
+                        msg = f"{cc_type}: {msg[0].lower()}{msg[1:]}"
+                    return msg[:120]
+            except Exception:
+                pass
+
+        # --- Strategy 2: Exact CC-format regex (handles preamble, fences, etc.) ---
+        msg = _first_usable_commit_line(text)
+        if msg:
+            return msg
+
+        # --- Strategy 3: Smart plain-text — preserve model's description, infer type ---
+        # Used when the model returns a valid description but without the CC prefix.
+        # This means the model's actual intent IS used — we just fix the format.
+        for line in text.splitlines():
+            s = line.strip().strip("'\"").strip("`").strip()
+            if not s:
+                continue
+            if _MD_FENCE_LINE.match(s):
+                continue
+            if len(s) < 10 or len(s) > 120:
+                continue
+            if _COMMIT_PREAMBLE_RE.match(s):
+                continue
+            # Skip lines that are clearly not a commit description
+            if s.startswith(("#", "{", "[", "<", "---")):
+                continue
+            # If it already looks like a CC line, use it directly.
+            if _CC_LINE.match(s):
+                return s
+            # Plain description: infer CC type and prefix.
+            cc_type = _infer_cc_type(s)
+            # Lower-case the first letter of the description (CC convention).
+            desc = s[0].lower() + s[1:] if s else s
+            return f"{cc_type}: {desc}"
+
+        return ""
+
+    # ------------------------------------------------------------------
     # Commit-message generation (smart push)
     # ------------------------------------------------------------------
 
@@ -2566,50 +2688,65 @@ Command: {cmd_for_prompt}"""
             ctx = self._build_context(context)
             branch = (context or {}).get("branch", "main")
 
-            # Truncate diff to ~3 000 chars to stay within token limits
-            diff_truncated = diff_content[:3000]
-            if len(diff_content) > 3000:
-                diff_truncated += "\n\n... (diff truncated) ..."
+            # Local models (Ollama) are slow on large inputs — keep context tight.
+            is_local = (self.provider == "ollama")
+            diff_char_limit = 600 if is_local else 3000
+            file_display_limit = 8 if is_local else 50
+            max_retries = 1 if is_local else 2
 
-            file_list = "\n".join(f"  - {f}" for f in files)
+            diff_truncated = diff_content[:diff_char_limit]
+            if len(diff_content) > diff_char_limit:
+                diff_truncated += "\n... (diff truncated)"
 
-            prompt = f"""Analyse the following git diff and generate ONE conventional commit message.
+            shown_files = files[:file_display_limit]
+            file_list = "\n".join(f"  - {f}" for f in shown_files)
+            if len(files) > file_display_limit:
+                file_list += f"\n  ... ({len(files) - file_display_limit} more)"
 
-Branch: {branch}
+            if is_local:
+                # Minimal prompt for Ollama — system prompt carries all rules.
+                prompt = (
+                    f"Branch: {branch}\nFiles ({len(files)}):\n{file_list}\n\nStat:\n{diff_stat}"
+                )
+                if diff_truncated:
+                    prompt += f"\n\nDiff:\n{diff_truncated}"
+            else:
+                # Cloud: ask for JSON output so parsing is reliable regardless of
+                # what preamble or formatting the model chooses to add.
+                # Inspired by aicommits / gptcommit structured-output approach.
+                prompt = (
+                    f"Branch: {branch}\n\n"
+                    f"Files changed:\n{file_list}\n\n"
+                    f"Diff summary:\n{diff_stat}\n\n"
+                    f"Diff (may be truncated):\n{diff_truncated}\n\n"
+                    'Return ONLY this JSON object and nothing else:\n'
+                    '{"message": "<type>: <short imperative description>"}\n\n'
+                    "where <type> is one of: feat fix refactor docs style test chore perf ci build revert"
+                )
 
-Files changed:
-{file_list}
-
-Diff summary:
-{diff_stat}
-
-Diff (may be truncated):
-{diff_truncated}
-
-Rules (Conventional Commits):
-- Format: type: description (lowercase type; imperative description; no trailing period)
-- Core types: feat (new feature), fix (bug fix), refactor (restructure, no behavior change),
-  docs (documentation only), style (formatting/lint, no logic), test (tests), chore (misc/deps/config)
-- Extras: perf (performance), ci (CI/CD), build (build/packaging/deps), revert (undo a commit)
-- Prefer the primary change type (usually feat or fix) when several apply
-- Keep the line reasonably short (~50-72 chars when practical)
-- Be specific about what the diff actually changes
-- Return ONLY the commit message (one line, no quotes, no explanation)
-- Do not use markdown, bullets, or code blocks (no ```); output the line as plain text only"""
-
-            msg = ""
-            for attempt in range(3):
+            last_response = ""
+            for attempt in range(max_retries):
                 response = self._call_llm_stream("commit_message", prompt, stream_callback)
-                msg = _first_usable_commit_line(response)
+                last_response = response
+                msg = self._extract_commit_message(response)
                 if msg:
                     return msg
-                if attempt < 2:
-                    time.sleep(0.4)
+                if attempt < max_retries - 1:
+                    time.sleep(0.3)
 
-            # Empty reply or unparseable output: fall back so push can proceed after staging.
+            # _extract_commit_message already tried all strategies including
+            # smart type inference. If it still returns "" the model gave us
+            # nothing usable — only then fall back to the stub.
+            if last_response.strip():
+                # The model responded but we couldn't extract a clean line.
+                # Take whatever we have and force-prefix it so push can proceed.
+                raw = last_response.strip().splitlines()[0][:80].strip("'\"` ")
+                if raw:
+                    return f"{_infer_cc_type(raw)}: {raw[0].lower()}{raw[1:]}"
+
             print_dim(
-                "  No usable line from the model (retried); using heuristic message. "
-                "If this persists, check the API key, model id, and provider/gateway health."
+                "  Could not get a commit message from the model; using heuristic. "
+                "Check the API key, model id, and provider health."
             )
             return self._stub_commit_message(files, context)
 
@@ -2617,7 +2754,7 @@ Rules (Conventional Commits):
             err = str(e).strip()
             if len(err) > 160:
                 err = err[:157] + "..."
-            print_dim(f"  Commit message LLM failed ({err}); using heuristic message.")
+            print_dim(f"  Commit message generation failed ({err}); using heuristic.")
             return self._stub_commit_message(files, context)
 
 
@@ -2830,13 +2967,18 @@ Each step is a single shell command. Be concise and project-appropriate."""
         cwd = context.get("cwd", "")
         project_type = context.get("project_type", "")
 
-        # Truncate very long stderr: keep first 60 + last 30 lines
+        # Truncate very long stderr. Local models have smaller context windows,
+        # so use a tighter budget there (30 lines total vs 90 for cloud).
         lines = stderr.splitlines()
-        if len(lines) > 100:
+        if self.provider == "ollama":
+            head, tail, limit = 20, 10, 30
+        else:
+            head, tail, limit = 60, 30, 100
+        if len(lines) > limit:
             truncated = (
-                "\n".join(lines[:60])
-                + f"\n\n... ({len(lines) - 90} lines omitted) ...\n\n"
-                + "\n".join(lines[-30:])
+                "\n".join(lines[:head])
+                + f"\n\n... ({len(lines) - head - tail} lines omitted) ...\n\n"
+                + "\n".join(lines[-tail:])
             )
         else:
             truncated = stderr

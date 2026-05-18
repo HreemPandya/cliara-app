@@ -752,8 +752,8 @@ class MacroCommandMixin:
             print_warning("[Cancelled]")
             return
 
-        # Re-create under new name, then delete old
-        self.macros.add(new_name, macro.commands, macro.description, tags=macro.tags)
+        # Re-create under new name preserving all fields, then delete old
+        self.macros.add(new_name, macro.commands, macro.description, tags=macro.tags, params=macro.params)
         self.macros.delete(old_name)
         print_success(f"[{icons.OK}] Macro '{old_name}' renamed to '{new_name}'")
 

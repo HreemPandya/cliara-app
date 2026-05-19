@@ -1227,8 +1227,18 @@ class NLHandler:
                 self._cloud_redaction_preview_shown = True
 
             if fail_closed:
-                resp = input("send anyway? [y] ").strip().lower()
-                if resp not in ("", "y", "yes"):
+                # Default is CANCEL — pressing Enter must not silently send
+                # a query that may contain an unredacted secret.
+                try:
+                    resp = input(
+                        "  [!] Possible unredacted secret detected. Send to cloud anyway? [y/N] "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    resp = "n"
+                if resp in ("y", "yes"):
+                    pass  # user explicitly confirmed — proceed
+                else:
                     if local_ok:
                         backend = "local"
                     else:

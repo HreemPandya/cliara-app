@@ -38,6 +38,15 @@ from cliara.shell_app.runtime import (
 class ExecutionEngineMixin:
     """Command execution, translation, and failure analysis helpers."""
 
+    def _subprocess_timeout(self) -> Optional[float]:
+        """Return the configured subprocess timeout, or None to disable."""
+        try:
+            raw = self.config.get("subprocess_timeout_seconds", 1800)
+            v = float(raw)
+            return v if v > 0 else None
+        except Exception:
+            return 1800.0
+
     # ------------------------------------------------------------------
     # Cross-platform command translation
     # ------------------------------------------------------------------
@@ -91,12 +100,13 @@ class ExecutionEngineMixin:
                 ps_exe = "pwsh" if "pwsh" in (self.shell_path or "").lower() else "powershell"
                 result = subprocess.run(
                     [ps_exe, "-NoProfile", "-Command", command],
-                    timeout=300,
+                    timeout=self._subprocess_timeout(),
                 )
                 self._enqueue_semantic_add(command, str(Path.cwd()), result.returncode)
                 return result.returncode == 0
             except subprocess.TimeoutExpired:
-                print_error("[Error] Command timed out (5 minutes)")
+                limit = self.config.get("subprocess_timeout_seconds", 1800)
+                print_error(f"[Error] Command timed out ({limit}s). Raise subprocess_timeout_seconds in config to extend.")
                 self._enqueue_semantic_add(command, str(Path.cwd()), -1)
                 return False
             except Exception as e:
@@ -360,7 +370,7 @@ class ExecutionEngineMixin:
                             [ps_exe, "-NoProfile", "-Command", command],
                             capture_output=True,
                             text=True,
-                            timeout=300,
+                            timeout=self._subprocess_timeout(),
                         )
                     else:
                         result = subprocess.run(
@@ -368,7 +378,7 @@ class ExecutionEngineMixin:
                             shell=True,
                             capture_output=True,
                             text=True,
-                            timeout=300,
+                            timeout=self._subprocess_timeout(),
                         )
                 finally:
                     timer.stop()
@@ -473,7 +483,7 @@ class ExecutionEngineMixin:
 
             timed_out = False
             try:
-                proc.wait(timeout=300)
+                proc.wait(timeout=self._subprocess_timeout())
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()

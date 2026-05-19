@@ -90,6 +90,10 @@ class Config:
         # Network timeout (seconds) for cloud LLM requests. Prevents hangs when
         # a provider is unreachable (firewall/DNS/proxy issues).
         "llm_timeout_seconds": 60,
+        # Hard timeout for shell subprocess execution (seconds).
+        # 5 minutes (300 s) was too short for large builds, deploys, and test suites.
+        # Set to 0 to disable the timeout entirely.
+        "subprocess_timeout_seconds": 1800,
         # Per-task model overrides — None means fall back to llm_model then provider default
         # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "gemma4" for ollama
         "model_nl": None,       # ? natural-language → commands
@@ -240,19 +244,26 @@ class Config:
             postgres_copy.pop("password", None)
             settings_to_save["postgres"] = postgres_copy
         
-        # Never save connection strings with passwords
+        # Never save connection strings with passwords.
+        # Use urlparse so passwords containing : or @ are handled correctly.
         if "connection_string" in settings_to_save and settings_to_save["connection_string"]:
             conn_str = settings_to_save["connection_string"]
-            # Remove password from connection string if present
-            if "@" in conn_str and ":" in conn_str.split("@")[0]:
-                # Format: postgresql://user:<pass>@host
-                parts = conn_str.split("@")
-                auth_part = parts[0].split("://")[1] if "://" in parts[0] else parts[0]
-                if ":" in auth_part:
-                    user = auth_part.split(":")[0]
-                    settings_to_save["connection_string"] = conn_str.replace(
-                        f"{user}:{auth_part.split(':')[1]}", user
+            try:
+                from urllib.parse import urlparse, urlunparse
+                parsed = urlparse(conn_str)
+                if parsed.password:
+                    # Rebuild without the password: keep username, drop password
+                    netloc_no_pass = parsed.hostname or ""
+                    if parsed.username:
+                        netloc_no_pass = f"{parsed.username}@{netloc_no_pass}"
+                    if parsed.port:
+                        netloc_no_pass = f"{netloc_no_pass}:{parsed.port}"
+                    settings_to_save["connection_string"] = urlunparse(
+                        parsed._replace(netloc=netloc_no_pass)
                     )
+            except Exception:
+                # If parsing fails, drop the entire key rather than risk leaking.
+                settings_to_save.pop("connection_string", None)
         
         with with_file_lock(self.config_file):
             with open(self.config_file, 'w') as f:

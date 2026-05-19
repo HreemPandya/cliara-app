@@ -875,7 +875,13 @@ class CliaraShell(
                 @kb.add(Keys.BracketedPaste)
                 def _bracketed_paste(event):
                     """Bracket-paste: terminal wraps pasted text in escape sequences."""
-                    event.current_buffer.insert_text(event.data)
+                    # Mark BEFORE insert_text so that if insert_text raises the
+                    # flag is never set on a failed paste (avoids false positives
+                    # on the next typed command).
+                    try:
+                        event.current_buffer.insert_text(event.data)
+                    except Exception:
+                        return  # failed paste — do not mark
                     self._source_detector.mark_paste()
             except (ImportError, Exception):
                 pass

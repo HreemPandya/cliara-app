@@ -314,6 +314,19 @@ def print_dim(msg: str):
     _cliara_console().print(msg, style="dim")
 
 
+def safe_input(prompt: str, default: Optional[str] = None) -> Optional[str]:
+    """``input()`` wrapper that returns *default* on EOF or Ctrl-C instead of raising.
+
+    Returns the stripped user input, or *default* (None unless specified).
+    Callers that receive None should treat it as a cancellation.
+    """
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
 def read_single_key_no_echo() -> Optional[str]:
     """Read a single keypress from stdin without echo.
 

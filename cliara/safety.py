@@ -78,23 +78,52 @@ class SafetyChecker:
                 re.compile(pattern, re.IGNORECASE) for pattern in patterns
             ]
     
+    # Split tokens: pipe, semicolon, &&, ||, command-substitution openers.
+    # We intentionally keep this simple (no full shell parser) — false negatives
+    # are acceptable as long as we catch the obvious dangerous compositions like
+    # `find . -name "*.bak" | xargs rm -rf` and `ls; rm -rf /`.
+    _PIPELINE_SPLIT_RE = re.compile(
+        r'\|{1,2}|;|&&|`|\$\(|\bdo\b|\bthen\b',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _split_pipeline_stages(command: str) -> List[str]:
+        """Return each pipeline / compound-command stage as a separate string.
+
+        Uses a simple regex split so we evaluate the danger level of every
+        component — e.g. the `rm -rf` in `find . | xargs rm -rf` is checked
+        even though the leading `find` is safe.
+        """
+        stages = SafetyChecker._PIPELINE_SPLIT_RE.split(command)
+        return [s.strip() for s in stages if s.strip()]
+
     def check_command(self, command: str) -> Tuple[DangerLevel, Optional[str]]:
+        """Check a command (and every pipeline/compound stage within it) for danger.
+
+        Returns the *highest* danger level found across all stages so that
+        constructs like ``find . -name '*.bak' | xargs rm -rf`` are correctly
+        classified as DANGEROUS rather than SAFE.
         """
-        Check a single command for danger level.
-        
-        Args:
-            command: Shell command to check
-        
-        Returns:
-            Tuple of (danger_level, matched_pattern)
-        """
-        # Check in order of severity
-        for level in [DangerLevel.CRITICAL, DangerLevel.DANGEROUS, DangerLevel.CAUTION]:
-            for pattern in self.compiled_patterns[level]:
-                if pattern.search(command):
-                    return level, pattern.pattern
-        
-        return DangerLevel.SAFE, None
+        stages = self._split_pipeline_stages(command)
+        if not stages:
+            stages = [command]
+
+        highest = DangerLevel.SAFE
+        matched_pattern: Optional[str] = None
+        level_order = [DangerLevel.SAFE, DangerLevel.CAUTION,
+                       DangerLevel.DANGEROUS, DangerLevel.CRITICAL]
+
+        for stage in stages:
+            for level in [DangerLevel.CRITICAL, DangerLevel.DANGEROUS, DangerLevel.CAUTION]:
+                for pattern in self.compiled_patterns[level]:
+                    if pattern.search(stage):
+                        if level_order.index(level) > level_order.index(highest):
+                            highest = level
+                            matched_pattern = pattern.pattern
+                        break  # one match per level per stage is enough
+
+        return highest, matched_pattern
     
     def check_commands(self, commands: List[str]) -> Tuple[DangerLevel, List[Tuple[str, str]]]:
         """

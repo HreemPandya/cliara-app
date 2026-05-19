@@ -99,11 +99,30 @@ def _git_branch(cwd: Path) -> str:
 
 
 def _default_branch(cwd: Path) -> str:
-    # Prefer local info: refs/remotes/origin/HEAD -> origin/main
+    """Return the repo's default branch name without hard-coding 'main'.
+
+    Strategy (fastest → slowest):
+    1. Remote tracking symbolic ref  (origin/HEAD → origin/main or origin/master)
+    2. If remote HEAD is missing, check whether 'main' or 'master' exists locally.
+    3. Fall back to whatever the current branch is — at least the pulse won't
+       show false-amber just because we assumed the wrong default name.
+    """
+    # 1. Remote symbolic ref — most reliable when origin is set up.
     sym = _git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd).strip()
     if sym and "/" in sym:
-        return sym.split("/", 1)[1].strip() or "main"
-    return "main"
+        name = sym.split("/", 1)[1].strip()
+        if name:
+            return name
+
+    # 2. Probe common default names locally.
+    for candidate in ("main", "master"):
+        ref = _git(["rev-parse", "--verify", "--quiet", candidate], cwd).strip()
+        if ref:
+            return candidate
+
+    # 3. Last resort: the current branch is the best guess we have.
+    current = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd).strip()
+    return current or "main"
 
 
 def _parse_porcelain_paths(line: str) -> List[str]:

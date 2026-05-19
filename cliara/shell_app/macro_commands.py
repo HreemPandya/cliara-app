@@ -13,6 +13,7 @@ from cliara.translation.core import command_exists
 from cliara.shell_app.runtime import (
     _cliara_console,
     _print_safety_panel,
+    safe_input,
     print_dim,
     print_error,
     print_header,
@@ -205,7 +206,7 @@ class MacroCommandMixin:
             params = [p.strip() for p in params_token.split(',') if p.strip()]
 
         if not name:
-            name = input("Macro name: ").strip()
+            name = safe_input("Macro name: ") or ""
             if not name:
                 print_error("[Error] Macro name required")
                 return
@@ -220,8 +221,8 @@ class MacroCommandMixin:
 
         commands = []
         while True:
-            cmd = input("  > ").strip()
-            if not cmd:
+            cmd = safe_input("  > ")
+            if cmd is None or not cmd:
                 break
             commands.append(cmd)
 
@@ -238,13 +239,13 @@ class MacroCommandMixin:
         if params:
             print_dim(f"\nParams: {', '.join(params)}")
 
-        description = input("Description (optional): ").strip()
+        description = safe_input("Description (optional): ") or ""
 
         # Safety check
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
             _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
-            confirm = input("\nSave anyway? (yes/no): ").strip().lower()
+            confirm = (safe_input("\nSave anyway? (yes/no): ") or "").lower()
             if confirm not in ['yes', 'y']:
                 print_warning("[Cancelled]")
                 return
@@ -647,7 +648,7 @@ class MacroCommandMixin:
     def macro_edit(self, name: str):
         """Edit an existing macro's commands and description."""
         if not name:
-            name = input("Macro name: ").strip()
+            name = safe_input("Macro name: ") or ""
             if not name:
                 print_error("[Error] Macro name required")
                 return
@@ -670,8 +671,8 @@ class MacroCommandMixin:
         commands = []
         first = True
         while True:
-            cmd = input("  > ").strip()
-            if not cmd:
+            cmd = safe_input("  > ")
+            if cmd is None or not cmd:
                 if first:
                     # User pressed Enter immediately  -  keep existing commands
                     commands = macro.commands
@@ -681,7 +682,7 @@ class MacroCommandMixin:
             commands.append(cmd)
 
         # Update description
-        new_desc = input(f"New description (Enter to keep '{macro.description or ''}'): ").strip()
+        new_desc = safe_input(f"New description (Enter to keep '{macro.description or ''}'): ")
         description = new_desc if new_desc else macro.description
 
         # Update params
@@ -692,9 +693,9 @@ class MacroCommandMixin:
             if p not in all_params:
                 all_params.append(p)
         current_params_str = ','.join(all_params)
-        new_params_input = input(
+        new_params_input = safe_input(
             f"Parameters (comma-separated, Enter to keep '{current_params_str}'): "
-        ).strip()
+        ) or ""
         if new_params_input:
             params = [p.strip() for p in new_params_input.split(',') if p.strip()]
         else:
@@ -704,7 +705,7 @@ class MacroCommandMixin:
         level, dangerous = self.safety.check_commands(commands)
         if level in [DangerLevel.DANGEROUS, DangerLevel.CRITICAL]:
             _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
-            confirm = input("\nSave anyway? (yes/no): ").strip().lower()
+            confirm = (safe_input("\nSave anyway? (yes/no): ") or "").lower()
             if confirm not in ['yes', 'y']:
                 print_warning("[Cancelled]")
                 return
@@ -723,7 +724,7 @@ class MacroCommandMixin:
             print_error(f"[Error] Macro '{name}' not found")
             return
         
-        confirm = input(f"Delete macro '{name}'? (y/n): ").strip().lower()
+        confirm = (safe_input(f"Delete macro '{name}'? (y/n): ") or "").lower()
         if confirm in ['y', 'yes']:
             self.macros.delete(name)
             print_success(f"[{icons.OK}] Macro '{name}' deleted")
@@ -778,15 +779,15 @@ class MacroCommandMixin:
         for i, cmd in enumerate(last_commands, 1):
             print(f"  {i}. {cmd}")
         
-        confirm = input("\nSave these commands? (y/n): ").strip().lower()
+        confirm = (safe_input("\nSave these commands? (y/n): ") or "").lower()
         if confirm not in ['y', 'yes']:
             print_warning("[Cancelled]")
             return
-        
+
         if not self._check_macro_name_conflict(name):
             print_warning("[Cancelled]")
             return
-        description = input("Description (optional): ").strip()
+        description = safe_input("Description (optional): ") or ""
         self.macros.add(name, last_commands, description)
         print_success(f"[{icons.OK}] Macro '{name}' saved!")
     
@@ -899,12 +900,12 @@ class MacroCommandMixin:
         if level != DangerLevel.SAFE:
             _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             prompt = self.safety.get_confirmation_prompt(level)
-            response = input(prompt).strip()
+            response = safe_input(prompt) or ""
             if not self.safety.validate_confirmation(response, level):
                 print_warning("[Cancelled]")
                 return
         else:
-            confirm = input("\nRun? (y/n): ").strip().lower()
+            confirm = (safe_input("\nRun? (y/n): ") or "").lower()
             if confirm not in ['y', 'yes']:
                 print_warning("[Cancelled]")
                 return
@@ -1049,12 +1050,12 @@ class MacroCommandMixin:
         if level != DangerLevel.SAFE:
             _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
             prompt = self.safety.get_confirmation_prompt(level)
-            response = input(prompt).strip()
+            response = safe_input(prompt) or ""
             if not self.safety.validate_confirmation(response, level):
                 print_warning("[Cancelled]")
                 return
         else:
-            confirm = input("Run chain? (y/n): ").strip().lower()
+            confirm = (safe_input("Run chain? (y/n): ") or "").lower()
             if confirm not in ['y', 'yes']:
                 print_warning("[Cancelled]")
                 return

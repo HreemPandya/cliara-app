@@ -2,11 +2,18 @@
 
 A tiny colored glyph intended for the interactive prompt.
 
-Color meanings (per spec):
-- green  = clean tree + tests passing + on default branch ("main")
-- amber  = unstaged changes
+Color meanings:
+- green  = clean working tree on the default branch (tests, if recorded, are passing)
+- amber  = unstaged changes / off main / explicit test failure
 - red    = failing CI on this branch (HEAD)
 - purple = uncommitted work older than 24h
+
+Notes on green:
+- We do NOT require a recent test run for green. Most users don't run their
+  full suite before every prompt; treating "unknown test status" as
+  not-green made the dot perpetually amber on otherwise pristine repos.
+- An *explicit* test failure (last recorded run had non-zero exit) still
+  downgrades green so the user is notified.
 
 Notes:
 - This is synthesis, not data: glyph-only in the prompt.
@@ -320,16 +327,21 @@ def compute_pulse(
         reasons.append("unstaged changes")
     else:
         on_main = (branch is not None) and (default_branch is not None) and (branch == default_branch)
-        if clean_tree and tests_ok is True and on_main:
+        # Green = clean tree, on main, and no *explicit* test failure on record.
+        # Unknown test state (no test runs recorded yet) is treated as OK so the
+        # dot reflects working-tree cleanliness rather than CI/test discipline.
+        tests_not_failing = tests_ok is not False
+        if clean_tree and on_main and tests_not_failing:
             color = "green"
-            reasons.append("clean + tests passing + on main")
+            if tests_ok is True:
+                reasons.append("clean + tests passing + on main")
+            else:
+                reasons.append("clean + on main")
         else:
-            # spec doesn't define a separate color for "not green but clean".
-            # Keep amber as the generic "not fully green" state.
             if not clean_tree:
                 reasons.append("uncommitted changes")
-            if tests_ok is not True:
-                reasons.append("tests not known/passing")
+            if tests_ok is False:
+                reasons.append("last test run failed")
             if not on_main:
                 reasons.append("not on main")
 

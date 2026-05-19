@@ -1716,22 +1716,18 @@ class CliaraShell(
                 # Already chronologically sorted; bias toward most recent on tie.
                 sources = sources[-5:]
 
+            # Prose / answer mode: the streamed text IS the result. Do NOT clutter
+            # the terminal with a sources table or a "Run?" prompt — the user asked
+            # a question, not for a command to re-run. The LLM is instructed to
+            # name specific commands in the answer itself when relevant.
+            #
+            # If the model returned nothing AND there's no retrieval, surface that
+            # explicitly so the user knows the history search didn't find anything.
             if not answer:
-                if sources:
-                    print_dim("  Could not synthesize an answer, but found related entries:")
-                else:
+                if not sources:
                     print_dim("  No relevant history found for that question.")
-                    return
-
-            if sources:
-                # Themed accent divider between streamed answer and sources.
-                _render_answer_divider()
-                _show_sources_table(
-                    sources,
-                    header=f"  Sources ({len(sources)} entr{'y' if len(sources) == 1 else 'ies'}):",
-                )
-                print()
-                _run_prompt(sources)
+                else:
+                    print_dim("  No answer could be synthesized from the retrieved entries.")
             return
 
         # ==================================================================

@@ -1215,15 +1215,26 @@ class NLHandler:
         backend = self._select_backend(agent_type, user_message)
         self._last_backend_used = backend
 
-        # Cloud UX: redact + (once) preview; only prompt when redaction is uncertain.
         cloud_ok = bool(self.llm_client is not None and self.provider)
         local_ok = bool(self._local_enabled and self._local_llm_client is not None)
         routed_message = user_message
-        if backend == "cloud" and cloud_ok:
+
+        # Redaction and the "→ cloud" banner only apply when data is actually
+        # leaving the machine to a remote API.  When the primary provider is
+        # Ollama, _select_backend still returns "cloud" (meaning "use the
+        # primary client") but nothing touches a network endpoint, so skipping
+        # redaction is both correct and avoids the misleading banner.
+        _sending_to_network_cloud = (
+            backend == "cloud"
+            and cloud_ok
+            and self.provider not in ("ollama", None)
+        )
+
+        if _sending_to_network_cloud:
             routed_message, redacted_n, fail_closed = self._redact_for_cloud_with_report(user_message)
 
             if not self._cloud_redaction_preview_shown:
-                print_dim(f"→ cloud ({redacted_n} secrets redacted)")
+                print_dim(f"→ {self.provider} ({redacted_n} secrets redacted)")
                 self._cloud_redaction_preview_shown = True
 
             if fail_closed:

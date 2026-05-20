@@ -17,7 +17,7 @@ from shutil import which
 from typing import List, Tuple, Optional, Dict, Any, Callable, Literal
 
 from cliara.safety import SafetyChecker, DangerLevel
-from cliara.shell_app.runtime import print_dim
+from cliara.shell_app.runtime import print_dim, print_error
 from cliara.agents import AGENT_REGISTRY
 from cliara.nl.constants import (
     CLIARA_BUILTIN_COMMANDS,
@@ -1269,11 +1269,20 @@ class NLHandler:
         try:
             return self._call_llm_stream_impl(agent_type, routed_message, stream_callback)
         except Exception as exc:
-            # If the cloud backend fails (timeouts, DNS, provider down), fall
-            # back to local when available so features like `mc ...` don't hang.
-            if backend == "cloud" and local_ok:
+            # Always surface the actual error so users can debug
+            # (auth failure, expired key, rate limit, etc.) instead of seeing
+            # a generic "cloud failed; retrying locally" that hides everything.
+            err_brief = self._brief_llm_error(exc)
+            fallback_enabled = bool(
+                self.config is not None
+                and self.config.get("llm_fallback_to_local", False)
+            )
+
+            if backend == "cloud" and local_ok and fallback_enabled:
+                # User has explicitly opted in to local fallback.
                 try:
-                    print_dim("→ cloud failed; retrying locally")
+                    print_dim(f"→ {self.provider} failed: {err_brief}")
+                    print_dim("→ retrying locally (disable with: config set llm_fallback_to_local false)")
                 except Exception:
                     pass
                 orig_provider, orig_client, orig_enabled = self.provider, self.llm_client, self.llm_enabled
@@ -1284,7 +1293,49 @@ class NLHandler:
                     return self._call_llm_stream_impl(agent_type, user_message, stream_callback)
                 finally:
                     self.provider, self.llm_client, self.llm_enabled = orig_provider, orig_client, orig_enabled
+
+            # Default: no fallback. Re-raise with the actual error message visible.
+            # The original exception is already chained, so __cause__ has full context.
             raise
+
+    @staticmethod
+    def _brief_llm_error(exc: Exception) -> str:
+        """Return a one-line, user-friendly summary of an LLM API error.
+
+        Maps common HTTP status codes to actionable hints so users know
+        exactly what to fix (key, model, quota, network).
+        """
+        msg = str(exc) or exc.__class__.__name__
+        low = msg.lower()
+
+        # Auth / key issues — most common silent failure
+        if "401" in msg or "unauthorized" in low or "invalid_api_key" in low or "invalid api key" in low:
+            return "401 unauthorized — API key invalid or expired (run: key set <provider> <key>)"
+        if "403" in msg or "forbidden" in low:
+            return "403 forbidden — key lacks permission for this model/org"
+
+        # Quota / rate limiting
+        if "429" in msg or "rate limit" in low or "rate_limit" in low:
+            return "429 rate limit — slow down, or top up quota at the provider"
+        if "quota" in low or "insufficient_quota" in low:
+            return "quota exceeded — billing / quota issue at the provider"
+
+        # Model / endpoint
+        if "404" in msg or "model_not_found" in low or "does not exist" in low:
+            return "404 model not found — check llm_model setting"
+
+        # Network
+        if "timed out" in low or "timeout" in low:
+            return "request timed out — network/DNS/firewall issue"
+        if "connection" in low and ("refused" in low or "reset" in low or "aborted" in low):
+            return "connection refused/reset — provider unreachable"
+        if "getaddrinfo" in low or "name or service not known" in low or "name resolution" in low:
+            return "DNS resolution failed — check internet / proxy"
+
+        # Truncate long messages
+        if len(msg) > 220:
+            msg = msg[:217] + "..."
+        return msg
 
     def _call_llm_stream_impl(
         self,
@@ -2761,27 +2812,51 @@ Rules (Conventional Commits):
 - Return ONLY the commit message (one line, no quotes, no explanation)
 - Do not use markdown, bullets, or code blocks (no ```); output the line as plain text only"""
 
+            # Retry only when the model produced an *unusable* line — i.e. it
+            # responded successfully but the format didn't match conventional
+            # commits. Don't retry on API errors (auth/rate-limit/network) —
+            # those are deterministic and re-trying won't help.
             msg = ""
-            for attempt in range(3):
+            try:
+                response = self._call_llm_stream("commit_message", prompt, stream_callback)
+            except Exception as e:
+                # API-layer failure — surface it loudly instead of silently
+                # retrying or falling back to the heuristic. The user needs
+                # to know the key/quota/network is broken so they can fix it.
+                err = self._brief_llm_error(e)
+                print_error(f"\n  [Commit message] {self.provider} request failed: {err}")
+                print_dim("  Run `key test` to verify connectivity, or `key set <provider> <key>` to update.")
+                print_dim("  Using heuristic commit message as fallback so the push isn't blocked.")
+                return self._stub_commit_message(files, context)
+
+            msg = _first_usable_commit_line(response)
+            if msg:
+                return msg
+
+            # Unusable line. Retry once at a slightly hotter temperature isn't
+            # possible without rewriting the stream API, so just try the call
+            # once more — same prompt — in case the model produced empty output.
+            try:
                 response = self._call_llm_stream("commit_message", prompt, stream_callback)
                 msg = _first_usable_commit_line(response)
                 if msg:
                     return msg
-                if attempt < 2:
-                    time.sleep(0.4)
+            except Exception as e:
+                err = self._brief_llm_error(e)
+                print_error(f"\n  [Commit message] {self.provider} request failed on retry: {err}")
+                return self._stub_commit_message(files, context)
 
-            # Empty reply or unparseable output: fall back so push can proceed after staging.
+            # Two attempts both gave unusable output.
             print_dim(
-                "  No usable line from the model (retried); using heuristic message. "
-                "If this persists, check the API key, model id, and provider/gateway health."
+                "  Model returned an unusable commit line twice; using heuristic. "
+                "If this persists, try a different model or run `key test`."
             )
             return self._stub_commit_message(files, context)
 
         except Exception as e:
-            err = str(e).strip()
-            if len(err) > 160:
-                err = err[:157] + "..."
-            print_dim(f"  Commit message LLM failed ({err}); using heuristic message.")
+            # Catch-all for anything else (prompt building, context build, …)
+            err = self._brief_llm_error(e)
+            print_error(f"\n  [Commit message] Unexpected error: {err}")
             return self._stub_commit_message(files, context)
 
 

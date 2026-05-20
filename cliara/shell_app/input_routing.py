@@ -387,6 +387,13 @@ class InputRoutingMixin:
             self._handle_use_provider(user_input[3:].strip())
             return
 
+        # API-key management — `key`, `key show`, `key set <provider> <key>`,
+        # `key remove <provider>`, `key test [provider]`, `key path`.
+        _kw = user_input.lower().strip()
+        if _kw == "key" or _kw.startswith("key "):
+            self._handle_key_command(user_input[3:].strip() if len(user_input) > 3 else "")
+            return
+
         if self.macros.exists(user_input):
             self.run_macro(user_input)
             return

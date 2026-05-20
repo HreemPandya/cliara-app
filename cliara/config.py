@@ -11,21 +11,71 @@ from pathlib import Path
 from cliara.file_lock import with_file_lock
 from typing import Dict, Any, Optional
 
-# Load .env files if they exist.
-# Priority (highest wins): system env → project .env → ~/.cliara/.env
-# We load lowest-priority first so higher-priority sources can override.
+# Load .env files.
+#
+# Priority (highest wins): system env → ~/.cliara/.env → project .env
+#
+# IMPORTANT: API keys / credentials in ~/.cliara/.env are PERSONAL and must
+# NOT be overridden by a project-level .env. This prevents a stale or
+# test API key committed to a project's .env from silently breaking all
+# cloud LLM calls (a real bug where the project's invalid key shadowed the
+# user's valid key and produced unexplained 401 errors).
+#
+# Non-credential project settings (DB URLs, feature flags, …) still come
+# from the project's .env as expected.
+
+_CLIARA_CREDENTIAL_VARS: frozenset = frozenset({
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "CLIARA_TOKEN",
+    "OLLAMA_BASE_URL",
+    "OLLAMA_HOST",
+    "GITHUB_TOKEN",
+})
+
 try:
-    from dotenv import load_dotenv, find_dotenv
-    # 1. User-level env (~/.cliara/.env) — lowest priority; set only if not already set
+    from dotenv import load_dotenv, find_dotenv, dotenv_values as _dotenv_values
+
     _user_env_path = Path.home() / ".cliara" / ".env"
-    if _user_env_path.exists():
-        load_dotenv(_user_env_path, override=False)
-    # 2. Project-level .env — overrides user env (but not system env vars already exported)
-    dotenv_path = find_dotenv(usecwd=True)
-    if dotenv_path:
-        load_dotenv(dotenv_path, override=True)
+
+    # Step 1: Load project .env first — sets project-specific settings that
+    # aren't already in the system env. Credentials will be overridden below.
+    _proj_env_path = find_dotenv(usecwd=True)
+    if _proj_env_path:
+        load_dotenv(_proj_env_path, override=False)
     else:
-        load_dotenv(override=True)
+        load_dotenv(override=False)
+
+    # Step 2: Load user's personal credentials from ~/.cliara/.env.
+    # These always win over both system env (user knowingly placed them here)
+    # and project .env (personal keys must not be shadowed by project files).
+    if _user_env_path.exists():
+        _user_vals = _dotenv_values(_user_env_path)
+        _conflicting: list = []
+        for _k, _v in (_user_vals or {}).items():
+            if _v:
+                _old = os.environ.get(_k, "")
+                os.environ[_k] = _v
+                # Warn when a project .env had a DIFFERENT credential so the
+                # user is aware of the conflict (avoids silent bad-key issues).
+                if (
+                    _k in _CLIARA_CREDENTIAL_VARS
+                    and _proj_env_path
+                    and _old
+                    and _old != _v
+                ):
+                    _conflicting.append(_k)
+        if _conflicting:
+            import sys as _sys
+            print(
+                f"[Cliara] Note: project .env had a different value for "
+                f"{', '.join(_conflicting)} — using ~/.cliara/.env (personal "
+                f"credentials always take precedence over project settings).",
+                file=_sys.stderr,
+            )
+
 except ImportError:
     pass  # python-dotenv not installed, skip
 
@@ -90,6 +140,12 @@ class Config:
         # Network timeout (seconds) for cloud LLM requests. Prevents hangs when
         # a provider is unreachable (firewall/DNS/proxy issues).
         "llm_timeout_seconds": 60,
+        # When True and a secondary local Ollama backend is also configured,
+        # cloud LLM failures (auth/rate-limit/network) silently retry against
+        # the local model.  Off by default: silent fallback masks real bugs
+        # (expired keys, quota exhaustion).  Users who want belt-and-braces
+        # can set this to true.
+        "llm_fallback_to_local": False,
         # Hard timeout for shell subprocess execution (seconds).
         # 5 minutes (300 s) was too short for large builds, deploys, and test suites.
         # Set to 0 to disable the timeout entirely.

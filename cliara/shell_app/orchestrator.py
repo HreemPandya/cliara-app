@@ -1870,6 +1870,226 @@ class CliaraShell(
         self.config.settings["llm_wizard_dismissed"] = False
         setup_wizard.run_wizard(self)
 
+    # ------------------------------------------------------------------
+    # API key management
+    # ------------------------------------------------------------------
+
+    _PROVIDER_KEY_ENV_VARS: Dict[str, str] = {
+        "openai":    "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "groq":      "GROQ_API_KEY",
+        "gemini":    "GEMINI_API_KEY",
+    }
+
+    @staticmethod
+    def _mask_api_key(key: Optional[str]) -> str:
+        """Mask a key for display: 'sk-pro...XYZ4' (never log full key)."""
+        if not key:
+            return "(none)"
+        if len(key) <= 12:
+            return key[:3] + "***" + key[-2:] if len(key) > 5 else "*****"
+        return f"{key[:6]}...{key[-4:]}"
+
+    def _key_storage_path(self) -> Path:
+        """Return path to the user's persistent key store (~/.cliara/.env)."""
+        return self.config.config_dir / ".env"
+
+    def _write_key_to_env_file(self, env_var: str, value: Optional[str]) -> Path:
+        """Upsert KEY=VALUE in ~/.cliara/.env; if value is None, remove the key line.
+
+        Returns the path written.
+        """
+        env_path = self._key_storage_path()
+        existing_lines: List[str] = []
+        if env_path.exists():
+            try:
+                existing_lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            except Exception:
+                existing_lines = []
+
+        new_lines: List[str] = []
+        replaced = False
+        for line in existing_lines:
+            bare = line.lstrip("#").lstrip().split("=", 1)[0].strip()
+            if bare == env_var:
+                if value is not None:
+                    new_lines.append(f"{env_var}={value}\n")
+                    replaced = True
+                # if value is None, omit (= delete)
+            else:
+                new_lines.append(line)
+
+        if value is not None and not replaced:
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
+            new_lines.append(f"{env_var}={value}\n")
+
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text("".join(new_lines), encoding="utf-8")
+        return env_path
+
+    def _handle_key_command(self, args: str) -> None:
+        """Manage API keys: show / set / remove / test / path.
+
+        Usage:
+            key                          Show active provider, masked key, and storage path.
+            key show                     Same as above.
+            key set <provider> <key>     Save a key for <provider> (openai, anthropic, groq, gemini).
+            key remove <provider>        Delete the saved key for <provider>.
+            key test [provider]          Make a tiny test request to verify connectivity.
+            key path                     Show where keys are stored.
+
+        Keys are persisted to ``~/.cliara/.env`` (a file readable only by the
+        current user on POSIX; on Windows it lives in the user profile).
+        """
+        parts = (args or "").split(maxsplit=2)
+        sub = parts[0].lower() if parts else "show"
+        env_path = self._key_storage_path()
+
+        # ---------- show ----------
+        if sub in ("", "show", "ls", "list", "status"):
+            print()
+            current = self.nl_handler.provider or "(none)"
+            key = self.config.get_llm_api_key()
+            print_info(f"  Active provider: [{current.upper()}]")
+            print_dim(f"  Key:    {self._mask_api_key(key)}")
+            print_dim(f"  Stored: {env_path}{' (exists)' if env_path.exists() else ' (not yet created)'}")
+            print()
+            print_dim("  All configured providers:")
+            any_set = False
+            for pid, env_var in self._PROVIDER_KEY_ENV_VARS.items():
+                val = os.environ.get(env_var)
+                marker = "  <- active" if pid == current else ""
+                if val:
+                    print(f"    {pid:<10}  {env_var:<20}  {self._mask_api_key(val)}{marker}")
+                    any_set = True
+                else:
+                    print_dim(f"    {pid:<10}  {env_var:<20}  (unset)")
+            if not any_set:
+                print_dim("    (no BYOK keys set; run `key set <provider> <key>`)")
+            print()
+            print_dim("  Commands:")
+            print_dim("    key set <provider> <key>   key remove <provider>   key test")
+            print()
+            return
+
+        # ---------- path ----------
+        if sub == "path":
+            print()
+            print_info(f"  {env_path}")
+            print_dim(f"  Exists: {env_path.exists()}")
+            print()
+            return
+
+        # ---------- set <provider> <key> ----------
+        if sub == "set":
+            if len(parts) < 3:
+                print_error("[Error] Usage: key set <provider> <key>")
+                return
+            provider = parts[1].lower().strip()
+            key = parts[2].strip()
+            if provider not in self._PROVIDER_KEY_ENV_VARS:
+                print_error(f"[Error] Unknown provider '{provider}'. Options: {', '.join(self._PROVIDER_KEY_ENV_VARS)}")
+                return
+            if not key or len(key) < 8:
+                print_error("[Error] Key looks too short — paste the full key (no quotes).")
+                return
+            env_var = self._PROVIDER_KEY_ENV_VARS[provider]
+            try:
+                path = self._write_key_to_env_file(env_var, key)
+            except Exception as exc:
+                print_error(f"[Error] Could not write {env_path}: {exc}")
+                return
+            # Apply in-process so the next query uses it
+            os.environ[env_var] = key
+            # Set provider in config so credential resolution picks it up
+            self.config.settings["llm_provider"] = provider
+            self.config._load_env_vars()
+            try:
+                self.config.save()
+            except Exception:
+                pass
+            # Reinit client
+            ok = self.nl_handler.initialize_llm(provider, key)
+            print()
+            if ok:
+                print_success(f"  Key saved for [{provider.upper()}]  ({self._mask_api_key(key)})")
+                print_dim(f"  Storage: {path}")
+                print_dim("  Run `key test` to verify, or just try `? hello world`.")
+            else:
+                print_warning(f"  Key saved to {path} but client init failed.")
+                print_dim("  Run `key test` for the error details.")
+            print()
+            return
+
+        # ---------- remove <provider> ----------
+        if sub in ("remove", "rm", "delete", "del", "unset"):
+            if len(parts) < 2:
+                print_error("[Error] Usage: key remove <provider>")
+                return
+            provider = parts[1].lower().strip()
+            if provider not in self._PROVIDER_KEY_ENV_VARS:
+                print_error(f"[Error] Unknown provider '{provider}'. Options: {', '.join(self._PROVIDER_KEY_ENV_VARS)}")
+                return
+            env_var = self._PROVIDER_KEY_ENV_VARS[provider]
+            try:
+                self._write_key_to_env_file(env_var, None)  # None = delete line
+            except Exception as exc:
+                print_error(f"[Error] Could not update {env_path}: {exc}")
+                return
+            # Remove from process env so it doesn't leak into the current session
+            os.environ.pop(env_var, None)
+            print()
+            print_success(f"  Removed key for [{provider.upper()}]")
+            # If that was the active provider, clear in-process LLM state so
+            # the next call surfaces a clear "not configured" error rather
+            # than using a stale client.
+            if self.nl_handler.provider == provider:
+                self.nl_handler.llm_enabled = False
+                self.nl_handler.llm_client = None
+                self.nl_handler.provider = None
+                self.config.settings["llm_provider"] = None
+                try:
+                    self.config.save()
+                except Exception:
+                    pass
+                print_dim("  No active LLM provider now. Run `setup-llm` or `use <provider>`.")
+            print()
+            return
+
+        # ---------- test [provider] ----------
+        if sub == "test":
+            provider = parts[1].lower().strip() if len(parts) > 1 else (self.nl_handler.provider or "")
+            if not provider:
+                print_error("[Error] No active provider. Usage: key test <provider>")
+                return
+            if provider != (self.nl_handler.provider or ""):
+                # Switch first
+                api_key = os.environ.get(self._PROVIDER_KEY_ENV_VARS.get(provider, ""), "")
+                if not api_key and provider != "ollama":
+                    print_error(f"[Error] No key configured for {provider}. Run `key set {provider} <key>` first.")
+                    return
+                if not self.nl_handler.initialize_llm(provider, api_key or "ollama"):
+                    print_error(f"[Error] Failed to initialize {provider} client.")
+                    return
+            # Make a tiny test call
+            print()
+            print_dim(f"  Testing {self.nl_handler.provider} with a 5-token ping...")
+            try:
+                # cliara_qa is a streaming-safe text agent — use it for the ping
+                reply = self.nl_handler._call_llm("cliara_qa", "Reply with exactly the single word: OK")
+                snippet = (reply or "").strip()[:80] or "(empty)"
+                print_success(f"  [{icons.OK}] {self.nl_handler.provider} responded: {snippet!r}")
+            except Exception as e:
+                err = self.nl_handler._brief_llm_error(e)
+                print_error(f"  [{icons.FAIL}] {self.nl_handler.provider} failed: {err}")
+                print_dim("  Fix: `key set <provider> <new-key>` or `use <other-provider>`.")
+            print()
+            return
+
+        print_error(f"[Error] Unknown subcommand 'key {sub}'.")
+        print_dim("  Usage: key [show|set|remove|test|path]")
+
     def _handle_use_provider(self, provider_arg: str) -> None:
         """Switch the active LLM provider for this session.
 
@@ -3445,6 +3665,7 @@ class CliaraShell(
             "use <provider>",
             "Switch provider live: use openai / use ollama / use groq",
         )
+        print_help_cmd("key", "Show / set / remove / test API keys (key set openai sk-...)")
         print_help_cmd(
             "setup-llm",
             "Configure an AI provider (Groq, Gemini, Ollama, OpenAI...)",

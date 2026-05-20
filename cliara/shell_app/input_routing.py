@@ -394,6 +394,11 @@ class InputRoutingMixin:
             self._handle_key_command(user_input[3:].strip() if len(user_input) > 3 else "")
             return
 
+        # Manual on-demand secret scan: `secret-scan` or `scan secrets`
+        if _kw in ("secret-scan", "scan secrets", "secrets", "scan-secrets"):
+            self._handle_secret_scan_command()
+            return
+
         if self.macros.exists(user_input):
             self.run_macro(user_input)
             return

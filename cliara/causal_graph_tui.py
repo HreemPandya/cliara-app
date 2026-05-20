@@ -17,14 +17,12 @@ from prompt_toolkit.styles import Style
 
 from cliara.causal_graph import CausalGraph, GraphNode
 
-
 def _fmt_ts(ts: float) -> str:
     try:
         dt = _dt.datetime.fromtimestamp(float(ts))
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "?"
-
 
 def _fmt_duration_s(node: GraphNode) -> str:
     try:

@@ -2090,6 +2090,25 @@ class CliaraShell(
         print_error(f"[Error] Unknown subcommand 'key {sub}'.")
         print_dim("  Usage: key [show|set|remove|test|path]")
 
+    def _handle_secret_scan_command(self) -> None:
+        """Run secret scan on staged files on demand (same engine as push gate).
+
+        Usage: secret-scan
+        """
+        from cliara.secret_scan import get_staged_files
+
+        staged = get_staged_files(Path.cwd())
+        if not staged:
+            print_dim("  No staged files. Run `git add` first, or use `push` to stage and scan automatically.")
+            return
+
+        print()
+        print_dim(f"  Scanning {len(staged)} staged file(s)...")
+        ok = self._run_secret_scan()
+        if ok:
+            print()
+        # _run_secret_scan already prints the result panel
+
     def _handle_use_provider(self, provider_arg: str) -> None:
         """Switch the active LLM provider for this session.
 
@@ -2878,6 +2897,13 @@ class CliaraShell(
             errors="replace",
         )
 
+        # "?"? 5b. Secret scan on staged files "?"?
+        if self.config.get("secret_scan_on_push", True):
+            scan_ok = self._run_secret_scan()
+            if not scan_ok:
+                self._unstage_all()
+                return
+
         # "?"? 6. Gather diff for message generation "?"?
         result = subprocess.run(
             ["git", "diff", "--cached", "--stat"],
@@ -3125,6 +3151,100 @@ class CliaraShell(
     def _unstage_all(self):
         """Reset the staging area (undo git add -A)."""
         subprocess.run(["git", "reset"], capture_output=True)
+
+    # ------------------------------------------------------------------
+    # Pre-push secret scan
+    # ------------------------------------------------------------------
+
+    def _run_secret_scan(self) -> bool:
+        """Run detect-secrets on staged files via pre-commit.
+
+        Returns True → safe to push.
+        Returns False → secrets found; push is blocked (staged changes are
+                        left intact so the user can inspect them).
+
+        Disable: config set secret_scan_on_push false
+        Bypass a line: add  # cliara-noscan  as an inline comment.
+        """
+        from cliara.secret_scan import scan, BYPASS_COMMENT
+
+        console = _cliara_console()
+        repo_root = Path.cwd()
+
+        print()
+        with thinking_status("Scanning staged files for secrets..."):
+            result = scan(repo_root=repo_root, auto_install_precommit=True)
+
+        # ── Clean ────────────────────────────────────────────────────
+        if result.passed:
+            if result.new_config_created:
+                print_dim("  [Scan] Created .cliara-secret-scan.yaml")
+            engine = "pre-commit + inline" if result.precommit_used else "inline"
+            n = len(result.findings)
+            if n:
+                print_success(
+                    f"  Secret scan passed ({engine}) — "
+                    f"{n} finding(s) acknowledged with # {BYPASS_COMMENT}"
+                )
+            else:
+                print_success(f"  Secret scan passed ({engine}) — no secrets found")
+            return True
+
+        # ── Blocked ──────────────────────────────────────────────────
+        blocked  = [f for f in result.findings if not f.bypassed]
+        bypassed = [f for f in result.findings if f.bypassed]
+
+        from rich.panel import Panel
+        from rich.text import Text
+        from rich.table import Table
+        from rich import box
+
+        tbl = Table(
+            box=box.SIMPLE, show_header=True, header_style="bold red",
+            padding=(0, 1), show_lines=False,
+        )
+        tbl.add_column("File",    style="bold white", overflow="fold")
+        tbl.add_column("Line",    style="dim",        justify="right", no_wrap=True)
+        tbl.add_column("Type",    style="yellow",     no_wrap=True)
+        tbl.add_column("Content", style="dim",        overflow="fold")
+        tbl.add_column("",        justify="center",   no_wrap=True)
+
+        for f in result.findings:
+            status  = "✓ bypassed" if f.bypassed else "[bold red]✗ BLOCKED[/bold red]"
+            snippet = f.line_content[:72] + ("…" if len(f.line_content) > 72 else "")
+            label   = (f.pattern_label or "secret")[:28]
+            tbl.add_row(f.file, str(f.line_number), label, snippet, status)
+
+        console.print()
+        console.print(
+            Panel(
+                tbl,
+                title=Text(
+                    f"  Secret scan blocked {len(blocked)} finding(s)  ", style="bold red"
+                ),
+                subtitle=Text("push aborted — fix secrets or add bypass comment", style="dim"),
+                border_style="red",
+                padding=(0, 1),
+            )
+        )
+
+        console.print()
+        if bypassed:
+            print_dim(f"  {len(bypassed)} finding(s) already bypassed with # {BYPASS_COMMENT}")
+        print_error(
+            f"  Add  [bold]# {BYPASS_COMMENT}[/bold]  to the end of any line you've "
+            "intentionally reviewed as safe, then re-run push."
+        )
+        print_dim(f"  Example:  API_KEY = 'sk-proj-...'  # {BYPASS_COMMENT}") #pragma: allowlist secret
+        print_dim( "  Disable scanning:  config set secret_scan_on_push false")
+
+        if result.precommit_output:
+            low = result.precommit_output.lower()
+            if "failed" in low or "error" in low:
+                print_dim(f"\n  pre-commit output:\n{result.precommit_output[:400]}")
+
+        console.print()
+        return False
 
     def _git_detect_default_base(self, remote: str) -> Tuple[str, str]:
         """Return (base_ref, base_label).
@@ -3577,8 +3697,11 @@ class CliaraShell(
 
         print_info("  Smart Push")
         print_dim("  " + "-" * 38)
-        print_help_cmd("push", "Stage, auto-commit, and push")
-        print_dim("  Detects branch, generates a conventional commit message")
+        print_help_cmd("push", "Stage, scan for secrets, auto-commit, and push")
+        print_dim("  Runs detect-secrets on staged files before committing.")
+        print_dim("  Bypass a line: add  # cliara-noscan  inline.")
+        print_dim("  Disable scan: config set secret_scan_on_push false")
+        print_help_cmd("secret-scan", "Scan staged files for secrets on demand")
         print_dim("  (feat:, fix:, docs:, ...) from the diff. Accept, edit, or cancel.\n")
 
         print_info("  Prune Branches")

@@ -150,6 +150,11 @@ class Config:
         # 5 minutes (300 s) was too short for large builds, deploys, and test suites.
         # Set to 0 to disable the timeout entirely.
         "subprocess_timeout_seconds": 1800,
+        # Secret scanning on push (pre-push gate)
+        # Uses pre-commit + detect-secrets on staged files before every push.
+        # Bypass a specific line: add  # cliara-noscan  as an inline comment.
+        # Disable entirely:       config set secret_scan_on_push false
+        "secret_scan_on_push": True,
         # Per-task model overrides — None means fall back to llm_model then provider default
         # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "gemma4" for ollama
         "model_nl": None,       # ? natural-language → commands

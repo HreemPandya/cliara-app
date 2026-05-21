@@ -13,10 +13,13 @@ from cliara.translation.core import command_exists
 from cliara.shell_app.runtime import (
     _cliara_console,
     _print_safety_panel,
+    _ui_accent_style,
     safe_input,
     print_dim,
     print_error,
     print_header,
+    print_help_cmd,
+    print_help_example,
     print_info,
     print_success,
     print_warning,
@@ -901,43 +904,90 @@ class MacroCommandMixin:
         print_success(f"[{icons.OK}] Macro '{name}' saved!")
     
     def macro_help(self):
-        """Show macro help (short forms are the default; ``macro ...`` is optional)."""
-        print_info("\n[Macros]\n")
-        print_dim("  Default  -  short commands:")
-        print("  mc [description...]                 Create: English in  ->  suggested name + shell steps")
-        print("  ma <name>                           Add: type commands line by line")
-        print("  ma <name> --params p1,p2            Add with {p1} placeholders in commands")
-        print("  ma <name> --nl                      Add: keep name; generate steps from English")
-        print("  ma --nl                             Same as mc (infer name + steps)")
-        print("  ml                                  List all macros")
-        print("  mst                                 Macro statistics")
-        print("  msr <keyword>                       Search macros")
-        print("  msh <name>                          Show macro details")
-        print("  mr <name>                           Run (prompts for params if needed)")
-        print("  mr <name> p1=v1 p2=v2               Run with inline parameter values")
-        print("  mch <n1> <n2> [n3 ...]                Run macros in sequence")
-        print_dim('        "my macro", "other macro"         -  quoted names (multi-word)')
-        print_dim("        my macro, other macro             -  comma-separated (multi-word)")
-        print("  me <name>                           Edit a macro")
-        print("  md <name>                           Delete a macro")
-        print("  mrn <old> <new>                     Rename a macro")
-        print("  ms <name>                           Save last executed commands as this macro")
-        print("  m <subcommand> [args]               Same as the macro word: macro <subcommand> ...")
-        print("  mh                                  This help")
-        print_dim("\n  Optional full word (same behavior): macro create, macro add, macro list, ...")
-        print_dim("\nParameterised macros:")
-        print_dim("  Use {param} placeholders in commands, e.g.  kubectl apply -n {env}")
-        print_dim("  Declare: ma deploy --params env,tag")
-        print_dim("  Run: type the macro name with values, e.g.  deploy env=prod tag=v1.2")
-        print_dim("  Or run mr <name> and Cliara will prompt for each value.")
-        print_dim("\nMacro composition (a macro can call another macro):")
-        print_dim("  Inside the command list, write  mr <other-macro> [args]")
-        print_dim("  Inline args override; otherwise child inherits parent's params.")
-        print_dim("  Example:  ship = [\"mr build\", \"mr test env=ci\", \"git push\"]")
+        """Show macro help — themed, organized by purpose."""
+        from rich.panel import Panel
+        from rich.text import Text
+        from rich.rule import Rule
+        from rich import box
+
+        console = _cliara_console()
+        accent = _ui_accent_style()
+
+        def _section(title: str) -> None:
+            """Render a themed section heading."""
+            console.print()
+            console.print(Text(f"  {title}", style=f"bold {accent}"))
+            console.print(Text("  " + "─" * (len(title) + 2), style="dim"))
+
+        # ── Panel title bar ─────────────────────────────────────────
+        console.print()
+        console.print(
+            Panel(
+                Text(
+                    "Reusable command bundles  ·  one name, many steps",
+                    style="dim italic",
+                    justify="center",
+                ),
+                title=Text("  Macros  ", style=f"bold {accent}"),
+                border_style=accent,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
+        # ── Create ──────────────────────────────────────────────────
+        _section("Create")
+        print_help_cmd("mc [description]",      "Generate name + commands from English")
+        print_help_cmd("ma <name>",             "Type commands line by line")
+        print_help_cmd("ma <name> --params <p1,p2>", "Declare {p1} placeholders")
+        print_help_cmd("ma <name> --nl",        "Generate commands from English (keep name)")
+        print_help_cmd("ms <name>",             "Save last executed commands as a macro")
+
+        # ── Discover ────────────────────────────────────────────────
+        _section("Discover")
+        print_help_cmd("ml",                    "List all macros")
+        print_help_cmd("msh <name>",            "Show macro details + commands")
+        print_help_cmd("msr <keyword>",         "Search macros by name / content")
+        print_help_cmd("mst",                   "Statistics (most-run, most-recent)")
+
+        # ── Run ─────────────────────────────────────────────────────
+        _section("Run")
+        print_help_cmd("mr <name>",             "Run; prompts for any missing params")
+        print_help_cmd("mr <name> p1=v1 p2=v2", "Run with inline parameter values")
+        print_help_cmd("<name>",                "Same as mr — bare macro name at the prompt")
+        print_help_cmd("<name> p1=v1",          "Bare-name form with inline values")
+        print_help_cmd("mch <n1> <n2> [...]",   "Run multiple macros in sequence")
+        print_dim('       "my macro" "other macro"        — quoted names (multi-word)')
+        print_dim("       my macro, other macro           — comma-separated (multi-word)")
+
+        # ── Edit ────────────────────────────────────────────────────
+        _section("Edit")
+        print_help_cmd("me <name>",             "Edit commands + description + params")
+        print_help_cmd("md <name>",             "Delete a macro (with confirmation)")
+        print_help_cmd("mrn <old> <new>",       "Rename a macro")
+
+        # ── Parameters ──────────────────────────────────────────────
+        _section("Parameters")
+        print_dim("  Use {name} placeholders inside commands. Declare them, or let")
+        print_dim("  Cliara auto-detect from the curly braces.")
+        print_help_example("ma deploy --params env,tag",     label="declare")
+        print_help_example("deploy env=prod tag=v1.2",       label="run inline")
+        print_help_example("mr deploy",                       label="run + prompt")
+
+        # ── Composition ─────────────────────────────────────────────
+        _section("Composition (a macro can call another macro)")
+        # Brackets escaped so Rich does not try to parse them as markup tags.
+        print_dim(r"  Inside a command list, write  mr <other-macro> \[args]")
+        print_dim("  Inline args override; otherwise the child inherits parent's params.")
         print_dim("  Cycles and >5 levels of nesting are rejected automatically.")
-        print("\nRun a saved macro by typing its name (no prefix):")
-        print("  cliara > my-macro")
-        print("  cliara > my-macro param=value\n")
+        print_help_example('ship  →  ["mr build", "mr test env=ci", "git push"]', label="example")
+
+        # ── Aliases footer ──────────────────────────────────────────
+        _section("Aliases")
+        print_dim("  Every short form has a long equivalent — both work identically.")
+        print_dim("  Examples:  mc ↔ macro create   ml ↔ macro list   mr ↔ macro run")
+        print_dim("             m <sub> [args] ↔ macro <sub> [args]")
+        console.print()
     
     def run_macro(self, name_and_args: str):
         """Execute a macro, optionally with inline parameter values.

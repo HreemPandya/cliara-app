@@ -111,6 +111,115 @@ class MacroCommandMixin:
             cmd = cmd.replace(f'{{{param}}}', value)
         return cmd
 
+    # ------------------------------------------------------------------
+    # Macro composition: a macro can `mr <other-macro>` inside its command list.
+    # We expand recursively into a flat command list before executing so the
+    # user sees the full plan, safety checks see every command, and a single
+    # confirmation gates the whole tree.
+    # ------------------------------------------------------------------
+
+    _MACRO_CALL_RE = re.compile(
+        r"^(?:mr|macro\s+run)\s+(\S+)(?:\s+(.+))?\s*$",
+        re.IGNORECASE,
+    )
+
+    _MAX_EXPANSION_DEPTH = 5
+
+    def _parse_macro_call(self, cmd: str) -> Optional[tuple]:
+        """If *cmd* is a macro invocation, return (macro_name, args_string).
+
+        Recognises both ``mr <name> [args]`` and ``macro run <name> [args]``.
+        Returns None when *cmd* is a regular shell command.
+        """
+        m = self._MACRO_CALL_RE.match(cmd.strip())
+        if not m:
+            return None
+        name = m.group(1).strip()
+        args = (m.group(2) or "").strip()
+        return (name, args)
+
+    _UNRESOLVED_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+    def _find_unresolved_placeholders(self, commands: List[str]) -> List[str]:
+        """Return the de-duped list of {var} names that still remain after expansion."""
+        seen: List[str] = []
+        for cmd in commands:
+            for m in self._UNRESOLVED_PLACEHOLDER_RE.finditer(cmd):
+                name = m.group(1)
+                if name not in seen:
+                    seen.append(name)
+        return seen
+
+    def _expand_macro_commands(
+        self,
+        macro,
+        param_values: Dict[str, str],
+        call_stack: Optional[List[str]] = None,
+        depth: int = 0,
+    ) -> List[str]:
+        """Recursively expand a macro's command list into a flat list of shell commands.
+
+        Resolves nested ``mr <name>`` invocations, propagates parameter values
+        down the tree (nested macros inherit the parent's params; inline args
+        on the ``mr`` call override them), and protects against cycles and
+        runaway recursion.
+
+        Raises RuntimeError on cycle or when depth exceeds _MAX_EXPANSION_DEPTH.
+        """
+        call_stack = list(call_stack or [])
+
+        if depth > self._MAX_EXPANSION_DEPTH:
+            chain = " -> ".join(call_stack)
+            raise RuntimeError(
+                f"Macro nesting deeper than {self._MAX_EXPANSION_DEPTH} levels: {chain}"
+            )
+
+        if macro.name in call_stack:
+            chain = " -> ".join(call_stack + [macro.name])
+            raise RuntimeError(f"Macro cycle detected: {chain}")
+
+        new_stack = call_stack + [macro.name]
+        flat: List[str] = []
+
+        for raw_cmd in macro.commands:
+            # Substitute params using the values resolved at THIS level
+            cmd = self._substitute_params(raw_cmd, param_values)
+
+            nested = self._parse_macro_call(cmd)
+            if nested:
+                nested_name, nested_args = nested
+                nested_macro = self.macros.get(nested_name)
+
+                if not nested_macro:
+                    # Unknown macro name — keep as-is so the user sees the failure
+                    # at run time with a clear "Macro 'X' not found" from the shell.
+                    flat.append(cmd)
+                    continue
+
+                # Parse inline key=value args on the `mr ...` line and merge.
+                # Parent's params flow through; inline args override per-call.
+                nested_inline = self._parse_inline_args(nested_args) if nested_args else {}
+                merged = {**param_values, **nested_inline}
+
+                sub_commands = self._expand_macro_commands(
+                    nested_macro,
+                    merged,
+                    call_stack=new_stack,
+                    depth=depth + 1,
+                )
+                flat.extend(sub_commands)
+            else:
+                flat.append(cmd)
+
+        return flat
+
+    def _macro_uses_nested_calls(self, macro) -> bool:
+        """Fast check: True if any line in macro.commands looks like a macro call."""
+        for raw in macro.commands:
+            if self._parse_macro_call(raw):
+                return True
+        return False
+
     def _collect_param_values(self, params: List[str],
                                prefilled: Dict[str, str]) -> Optional[Dict[str, str]]:
         """
@@ -821,6 +930,11 @@ class MacroCommandMixin:
         print_dim("  Declare: ma deploy --params env,tag")
         print_dim("  Run: type the macro name with values, e.g.  deploy env=prod tag=v1.2")
         print_dim("  Or run mr <name> and Cliara will prompt for each value.")
+        print_dim("\nMacro composition (a macro can call another macro):")
+        print_dim("  Inside the command list, write  mr <other-macro> [args]")
+        print_dim("  Inline args override; otherwise child inherits parent's params.")
+        print_dim("  Example:  ship = [\"mr build\", \"mr test env=ci\", \"git push\"]")
+        print_dim("  Cycles and >5 levels of nesting are rejected automatically.")
         print("\nRun a saved macro by typing its name (no prefix):")
         print("  cliara > my-macro")
         print("  cliara > my-macro param=value\n")
@@ -876,11 +990,31 @@ class MacroCommandMixin:
             # No params  -  any inline tokens are ignored (pass-through)
             param_values = {}
 
-        # "?"? Build the final commands with substituted values "?"?"?"?"?"?"?"?"?"?"?"?"?
-        resolved_commands = [
-            self._substitute_params(cmd, param_values)
-            for cmd in macro.commands
-        ]
+        # "?"? Build the final commands with substituted values + recursive expansion "?"?
+        try:
+            resolved_commands = self._expand_macro_commands(macro, param_values)
+        except RuntimeError as exc:
+            print_error(f"[Error] {exc}")
+            return
+
+        # If the expansion introduced unresolved {var} placeholders from nested
+        # macros, prompt for them now and re-expand once.
+        unresolved = self._find_unresolved_placeholders(resolved_commands)
+        if unresolved:
+            print_dim(
+                f"\nNested macro(s) require additional values: {', '.join(unresolved)}"
+            )
+            extra = self._collect_param_values(unresolved, {})
+            if extra is None:
+                return
+            param_values = {**param_values, **extra}
+            try:
+                resolved_commands = self._expand_macro_commands(macro, param_values)
+            except RuntimeError as exc:
+                print_error(f"[Error] {exc}")
+                return
+
+        nested_used = self._macro_uses_nested_calls(macro)
 
         # "?"? Show preview "?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?
         print_info(f"\n[Macro] {name}")
@@ -891,6 +1025,11 @@ class MacroCommandMixin:
             for k, v in param_values.items():
                 print_dim(f"  {k} = {v}")
             print()
+        if nested_used:
+            print_dim(
+                f"Expanded {len(macro.commands)} step(s) -> {len(resolved_commands)} "
+                "command(s) (composed from nested macros)"
+            )
         print("Commands:")
         for i, cmd in enumerate(resolved_commands, 1):
             print(f"  {i}. {cmd}")
@@ -1019,13 +1158,14 @@ class MacroCommandMixin:
             else:
                 chain_params.append({})
 
-        # "?"? Resolve placeholders in every macro "?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?
+        # "?"? Resolve placeholders + recursively expand nested `mr` calls per macro "?"?
         chain_resolved: List[List[str]] = []
         for macro, param_values in zip(macros, chain_params):
-            resolved = [
-                self._substitute_params(cmd, param_values)
-                for cmd in macro.commands
-            ]
+            try:
+                resolved = self._expand_macro_commands(macro, param_values)
+            except RuntimeError as exc:
+                print_error(f"[Error] {macro.name}: {exc}")
+                return
             chain_resolved.append(resolved)
 
         # "?"? Show full chain preview "?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?

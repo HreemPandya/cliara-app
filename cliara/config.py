@@ -394,6 +394,8 @@ class Config:
         print("   cliara > macro run mycommand")
         print("\n4. Save your last command as a macro:")
         print("   cliara > macro save last as quickfix")
+        print("\n5. Check your setup anytime:")
+        print("   cliara > doctor")
         print("\nType 'help' anytime for more info!")
         print("="*60 + "\n")
         

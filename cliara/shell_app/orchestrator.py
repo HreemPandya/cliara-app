@@ -611,6 +611,7 @@ class CliaraShell(
             f"  {M('kbd', 'mc · ma · ml · ms')}{M('body', ' Default macro commands  -  create, add, list, save last run')}",
             f"  {M('kbd', 'push')}{M('body', '               Smart git  -  suggest commit + push')}",
             f"  {M('kbd', 'ss / se · chat copy')}{M('body', ' Start/end task sessions; copy last run for AI editors')}",
+            f"  {M('kbd', 'doctor')}{M('body', '              Health check  -  shell, LLM, macros, config')}",
             f"  {M('kbd', 'help · tips · exit')}{M('body', ' Full command list · show tips again · quit')}",
             "",
             rule,

@@ -549,6 +549,10 @@ def _handle_api_key_provider(shell: "CliaraShell", provider_info: dict) -> bool:
                     Text.from_markup(
                         "[dim]     [/][bold cyan]explain[/] [dim]git rebase -i HEAD~3[/]"
                     ),
+                    Text(""),
+                    Text.from_markup(
+                        "[dim]Run [bold]doctor[/] anytime to verify your full setup.[/]"
+                    ),
                 ),
                 title=Text.from_markup("[bold green]Connected[/]"),
                 border_style="green",

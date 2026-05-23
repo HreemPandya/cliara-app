@@ -15,6 +15,7 @@ from cliara.execution_graph import build_execution_tree, export_tree_json, rende
 from cliara.session_store import CLOSEOUT_KEYS, TaskSession, _get_branch, _get_project_root
 from cliara.shell_app.runtime import (
     _cliara_console,
+    _ui_accent_style,
     pick_thinking_word,
     print_dim,
     print_error,
@@ -343,7 +344,7 @@ class SessionCommandMixin:
                 summary_body.append(cmd + "\n", style="dim")
 
         console.print()
-        console.print(Rule("[bold cyan]Session reflection[/bold cyan]", style="cyan"))
+        console.print(Rule(Text("Session reflection", style=_ui_accent_style()), style=_ui_accent_style()))
         console.print(
             Panel(
                 summary_body,

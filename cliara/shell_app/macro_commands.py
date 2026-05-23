@@ -656,7 +656,7 @@ class MacroCommandMixin:
             elif macro.run_count >= 10:
                 run_text.append(str(macro.run_count), style="bold green")
             else:
-                run_text.append(str(macro.run_count), style="cyan")
+                run_text.append(str(macro.run_count), style=_ui_accent_style())
 
             table.add_row(
                 name,

@@ -2221,9 +2221,9 @@ class CliaraShell(
                         "(150 queries/month, no card).[/]\n\n"
                         "[dim]Press[/] [bold]Ctrl+C[/] [dim]to skip and choose Groq, Gemini, or Ollama in the menu.[/]"
                     ),
-                    title=Text.from_markup("[bold cyan]Cliara Cloud[/]"),
+                    title=Text("Cliara Cloud", style=_ui_accent_style()),
                     subtitle=Text.from_markup("[dim]Zero-friction setup[/]"),
-                    border_style="cyan",
+                    border_style=_ui_accent_style(),
                     box=box.ROUNDED,
                     padding=(0, 1),
                 )
@@ -2235,8 +2235,8 @@ class CliaraShell(
                         "[dim]Free tier:[/] 150 queries/month · no credit card · GPT-4o-mini\n\n"
                         "[dim]A browser window will open for GitHub sign-in.[/]"
                     ),
-                    title=Text.from_markup("[bold cyan]Cliara Login[/]"),
-                    border_style="cyan",
+                    title=Text("Cliara Login", style=_ui_accent_style()),
+                    border_style=_ui_accent_style(),
                     box=box.ROUNDED,
                     padding=(0, 1),
                 )
@@ -2508,8 +2508,8 @@ class CliaraShell(
         console.print()
         console.print(Panel(
             "[bold] ->  /  - [/bold]  navigate   [bold]Enter[/bold]  select   [bold]Escape[/bold]  cancel",
-            title="[bold cyan]o Theme Selector[/bold cyan]",
-            border_style="cyan",
+            title=f"[{_ui_accent_style()}]o Theme Selector[/]",
+            border_style=_ui_accent_style(),
             padding=(0, 2),
         ))
         console.print()
@@ -3068,14 +3068,14 @@ class CliaraShell(
         table = Table(
             box=box.ROUNDED,
             show_header=True,
-            header_style="bold cyan",
-            border_style="cyan",
+            header_style=_ui_accent_style(),
+            border_style=_ui_accent_style(),
             pad_edge=False,
             padding=(0, 1),
         )
         table.add_column("#", style="dim", justify="center", width=3)
         table.add_column("Branch", style="bold white", no_wrap=True)
-        table.add_column("Upstream", style="cyan", no_wrap=True)
+        table.add_column("Upstream", style=_ui_accent_style(), no_wrap=True)
         table.add_column("Last commit", min_width=18)
         table.add_column("When", style="dim", width=16, no_wrap=True)
 
@@ -3094,8 +3094,8 @@ class CliaraShell(
 
         panel = Panel(
             table,
-            title=Text.from_markup(f"[bold white]Prune branches[/] [dim]·[/] [cyan]base[/] {base_label}"),
-            border_style="cyan",
+            title=Text.from_markup(f"[bold white]Prune branches[/] [dim]·[/] [{_ui_accent_style()}]base[/] {base_label}"),
+            border_style=_ui_accent_style(),
             box=box.ROUNDED,
             padding=(0, 1),
         )
@@ -3117,7 +3117,7 @@ class CliaraShell(
         console.print(Panel(
             "\n".join(f"- {n}" for n in names),
             title="Will delete",
-            border_style="cyan",
+            border_style=_ui_accent_style(),
             box=box.ROUNDED,
         ))
         console.print()

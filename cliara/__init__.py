@@ -8,7 +8,7 @@ A shell wrapper that lets you:
 - Save command history as macros
 """
 
-__version__ = "0.4.6"
+__version__ = "0.4.7"
 __author__ = "Cliara Contributors"
 
 from cliara.shell_app.orchestrator import CliaraShell

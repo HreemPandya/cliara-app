@@ -34,6 +34,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cliara import icons
+from cliara.shell_app.runtime import _ui_accent_style
 
 if TYPE_CHECKING:
     from cliara.shell_app.orchestrator import CliaraShell
@@ -261,8 +262,8 @@ def _print_header_and_menu() -> None:
     table = Table(
         box=box.ROUNDED,
         show_header=True,
-        header_style="bold cyan",
-        border_style="cyan",
+        header_style=_ui_accent_style(),
+        border_style=_ui_accent_style(),
         pad_edge=False,
         padding=(0, 1),
     )
@@ -290,9 +291,9 @@ def _print_header_and_menu() -> None:
     body = Group(subtitle, Text(""), table)
     panel = Panel(
         body,
-        title=Text.from_markup("[bold cyan]Cliara[/] [dim]·[/] [bold white]LLM Setup[/]"),
+        title=Text.from_markup(f"[{_ui_accent_style()}]Cliara[/] [dim]·[/] [bold white]LLM Setup[/]"),
         subtitle=Text.from_markup("[dim]Powers natural language & AI-assisted workflows[/]"),
-        border_style="cyan",
+        border_style=_ui_accent_style(),
         box=box.DOUBLE,
         padding=(1, 2),
     )
@@ -461,8 +462,8 @@ def _handle_ollama(shell: "CliaraShell") -> bool:
                 "[bold]Ollama[/] runs models on your machine — no API key.\n"
                 "[dim]The next steps can install Ollama (if needed), pick a model, and connect Cliara.[/]"
             ),
-            title=Text.from_markup("[bold cyan]Local LLM[/]"),
-            border_style="cyan",
+            title=Text("Local LLM", style=_ui_accent_style()),
+            border_style=_ui_accent_style(),
             box=box.ROUNDED,
             padding=(0, 1),
         )

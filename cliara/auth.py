@@ -373,6 +373,7 @@ def login() -> "tuple[str, str]":
     from rich.text import Text
 
     from cliara.console import get_console
+    from cliara.shell_app.runtime import _ui_accent_style
 
     _c = get_console()
     _c.print()
@@ -393,8 +394,8 @@ def login() -> "tuple[str, str]":
                     style=Style(color="cyan", dim=True, link=oauth_url),
                 ),
             ),
-            title=Text.from_markup("[bold cyan]Cliara Cloud[/]"),
-            border_style="cyan",
+            title=Text("Cliara Cloud", style=_ui_accent_style()),
+            border_style=_ui_accent_style(),
             box=box.ROUNDED,
             padding=(0, 1),
         )

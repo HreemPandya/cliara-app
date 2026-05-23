@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cliara"
-version = "0.4.6"
+version = "0.4.7"
 description = "An AI-powered shell that understands natural language and macros"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -69,10 +69,21 @@ Documentation = "https://github.com/HreemPandya/cliara-app#readme"
 Repository = "https://github.com/HreemPandya/cliara-app"
 Issues = "https://github.com/HreemPandya/cliara-app/issues"
 
+[tool.setuptools]
+# Belt-and-suspenders: make sure non-Python files declared in package-data
+# (and MANIFEST.in if any) are actually copied into built wheels. Without
+# this flag set, older setuptools versions sometimes silently dropped
+# agents/prompts/*.md, causing  FileNotFoundError: Prompt file not found
+# for agent 'nl_to_commands'  at runtime after a `pip install`.
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cliara*"]
 exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
-cliara = ["agents/prompts/*.txt"]
+cliara = [
+    "agents/prompts/*.md",
+    "agents/prompts/**/*.md",
+]

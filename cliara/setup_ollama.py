@@ -32,6 +32,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cliara.console import get_console
+from cliara.shell_app.runtime import _ui_accent_style
 
 if TYPE_CHECKING:
     from cliara.shell_app.orchestrator import CliaraShell
@@ -308,14 +309,14 @@ def _print_recommended_models_table(already_have: Set[str]) -> None:
     table = Table(
         box=box.ROUNDED,
         show_header=True,
-        header_style="bold cyan",
-        border_style="cyan",
+        header_style=_ui_accent_style(),
+        border_style=_ui_accent_style(),
         pad_edge=False,
         padding=(0, 1),
     )
     table.add_column("#", style="dim", justify="center", width=3)
     table.add_column("Model", style="bold white", min_width=10, no_wrap=True)
-    table.add_column("Size", style="cyan", width=9, no_wrap=True)
+    table.add_column("Size", style=_ui_accent_style(), width=9, no_wrap=True)
     table.add_column("Description", min_width=28)
 
     for i, m in enumerate(RECOMMENDED_MODELS, 1):
@@ -335,8 +336,8 @@ def _print_recommended_models_table(already_have: Set[str]) -> None:
 
     panel = Panel(
         table,
-        title=Text.from_markup("[bold white]Choose a model[/] [dim]·[/] [cyan]ollama[/]"),
-        border_style="cyan",
+        title=Text.from_markup(f"[bold white]Choose a model[/] [dim]·[/] [{_ui_accent_style()}]ollama[/]"),
+        border_style=_ui_accent_style(),
         box=box.ROUNDED,
         padding=(0, 1),
     )

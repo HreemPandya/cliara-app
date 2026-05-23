@@ -1,0 +1,7 @@
+# Files included in the source distribution AND the wheel.
+# pyproject.toml's [tool.setuptools.package-data] already covers prompts,
+# but MANIFEST.in is an additional safety net for older setuptools versions
+# that have been known to drop non-.py files from the build silently.
+include README.md
+include LICENSE
+recursive-include cliara/agents/prompts *.md

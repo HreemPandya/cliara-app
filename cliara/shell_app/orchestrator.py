@@ -124,19 +124,25 @@ class CliaraShell(
 ):
     """Main Cliara shell - wraps user's real shell."""
     
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, quiet: bool = False):
         """
         Initialize Cliara shell.
-        
+
         Args:
             config: Configuration object (creates default if None)
+            quiet:  Suppress banner, pulse, and startup hints (tmux/minimal terminals).
+                    Also honoured via ``quiet: true`` in ~/.cliara/config.json.
         """
-        # --- Startup progress bar ---
-        progress = _StartupProgress(total_steps=6)
+        _cfg = config or Config()
+        self.quiet = quiet or bool(_cfg.get("quiet", False))
 
-        print()  # blank line before the bar
+        # --- Startup progress bar ---
+        progress = _StartupProgress(total_steps=6, silent=self.quiet)
+
+        if not self.quiet:
+            print()  # blank line before the bar
         progress.step("Loading config...")
-        self.config = config or Config()
+        self.config = _cfg
         from cliara.console import set_ui_theme
 
         set_ui_theme(self.config.get("theme"))
@@ -296,7 +302,8 @@ class CliaraShell(
         
         # Show LLM status after the progress bar (single clean line)
         if self.nl_handler.llm_enabled:
-            print_success(f"  LLM: {self._llm_status_provider_label()} connected")
+            if not self.quiet:
+                print_success(f"  LLM: {self._llm_status_provider_label()} connected")
         else:
             # Auto-detect Ollama first (silent, no prompt)
             from cliara import setup_wizard as _wiz
@@ -941,7 +948,8 @@ class CliaraShell(
     # ------------------------------------------------------------------
     def run(self, verbose_banner: bool = False):
         """Main shell loop. Set verbose_banner=True to always show full quick-tips panel (e.g. cliara --verbose)."""
-        self.print_banner(force_full=verbose_banner)
+        if not self.quiet:
+            self.print_banner(force_full=verbose_banner)
 
         # Try to set up the highlighted prompt; fall back to plain input
         self._prompt_session = self._create_prompt_session()
@@ -978,7 +986,7 @@ class CliaraShell(
 
                         # Ambient pulse glyph: synthesis-only, always glyph-only.
                         try:
-                            if pulse_snap is not None:
+                            if pulse_snap is not None and not self.quiet:
                                 from cliara.pulse import prompt_style_class
 
                                 message.append((prompt_style_class(pulse_snap.color), f"{pulse_snap.glyph} "))
@@ -1036,13 +1044,14 @@ class CliaraShell(
                             print_dim(f"  {duration_str}")
                     # Prompt line stays clean so cursor is right after "> "
                     pulse_prefix = ""
-                    try:
-                        if pulse_snap is not None:
-                            from cliara.pulse import ansi_color_prefix, ansi_color_suffix
+                    if not self.quiet:
+                        try:
+                            if pulse_snap is not None:
+                                from cliara.pulse import ansi_color_prefix, ansi_color_suffix
 
-                            pulse_prefix = f"{ansi_color_prefix(pulse_snap.color)}{pulse_snap.glyph}{ansi_color_suffix()} "
-                    except Exception:
-                        pulse_prefix = ""
+                                pulse_prefix = f"{ansi_color_prefix(pulse_snap.color)}{pulse_snap.glyph}{ansi_color_suffix()} "
+                        except Exception:
+                            pulse_prefix = ""
                     if self.current_session:
                         prompt = f"{pulse_prefix}{exit_indicator}{pfx}cliara{suf} [{self.current_session.name}] {cwd} {prompt_arrow} "
                     else:
@@ -3680,7 +3689,7 @@ class CliaraShell(
         print_help_cmd("ma <name>", "Add macro (line-by-line commands)")
         print_help_cmd("ma <name> --nl", "Keep name; steps from English")
         print_help_cmd("ma --nl", "Same as mc")
-        print_help_cmd("ml", "List macros")
+        print_help_cmd("ml [--tag <tag>]", "List macros  (filter by tag)")
         print_help_cmd("mr <name>", "Run a macro")
         print_help_cmd("ms <name>", "Save last run as macro")
         print_help_cmd("m <sub> [args]", "Passthrough  -  same as macro <sub> ...")

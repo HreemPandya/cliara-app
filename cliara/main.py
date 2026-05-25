@@ -357,6 +357,12 @@ Once in the shell:
         help='Always show full startup banner (quick tips)'
     )
 
+    parser.add_argument(
+        '--quiet',
+        action='store_true',
+        help='Suppress banner, pulse glyph, and startup hints (for tmux / minimal terminals)'
+    )
+
     subparsers = parser.add_subparsers(dest='command', help='Subcommands')
     subparsers.add_parser('login', help='Log in to Cliara Cloud (GitHub OAuth)')
     subparsers.add_parser('logout', help='Sign out and clear stored Cliara Cloud token')
@@ -452,12 +458,12 @@ Once in the shell:
         
         # Single-command mode: gate → execute → exit
         if args.c:
-            shell = CliaraShell(config)
+            shell = CliaraShell(config, quiet=args.quiet)
             exit_code = shell.run_single_command(args.c)
             sys.exit(exit_code)
         
         # Interactive mode
-        shell = CliaraShell(config)
+        shell = CliaraShell(config, quiet=args.quiet)
         shell.run(verbose_banner=args.verbose)
     
     except KeyboardInterrupt:

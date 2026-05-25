@@ -639,11 +639,12 @@ class _StartupProgress:
 
     BAR_WIDTH = 30  # characters in the bar
 
-    def __init__(self, total_steps: int):
+    def __init__(self, total_steps: int, *, silent: bool = False):
         self.total = total_steps
         self.current = 0
         self._label = ""
         self._finished = False
+        self._silent = silent
 
     # -- internal helpers ---------------------------------------------------
     def _render(self):
@@ -683,6 +684,8 @@ class _StartupProgress:
     # -- public API ---------------------------------------------------------
     def step(self, label: str):
         """Advance progress by one step and display *label*."""
+        if self._silent:
+            return
         self.current = min(self.current + 1, self.total)
         self._label = label
         self._render()
@@ -692,7 +695,7 @@ class _StartupProgress:
 
     def finish(self):
         """Complete the bar and move to the next line."""
-        if self._finished:
+        if self._silent or self._finished:
             return
         self._finished = True
         self.current = self.total

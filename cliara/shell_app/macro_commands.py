@@ -272,7 +272,7 @@ class MacroCommandMixin:
             else:
                 self.macro_add(args_rest)
         elif cmd == 'list':
-            self.macro_list()
+            self.macro_list(args_rest)
         elif cmd == 'stats':
             self.macro_stats()
         elif cmd == 'search':
@@ -673,8 +673,17 @@ class MacroCommandMixin:
         console.print(table)
         console.print()
 
-    def macro_list(self):
-        """List all macros."""
+    def macro_list(self, args: str = ""):
+        """List all macros, optionally filtered by tag (--tag <value>)."""
+        tag = ""
+        parts = args.split()
+        if "--tag" in parts:
+            idx = parts.index("--tag")
+            if idx + 1 >= len(parts):
+                print_error("[Error] --tag requires a value  (e.g. ml --tag docker)")
+                return
+            tag = parts[idx + 1].lower()
+
         macros = self.macros.list_all()
 
         if not macros:
@@ -682,10 +691,16 @@ class MacroCommandMixin:
             print_dim("Create one with: ma <name>  (or mc from English)")
             return
 
-        self._macro_table(
-            sorted(macros.items()),
-            f"[cyan][Macros][/cyan]  [bold]{len(macros)}[/bold] total",
-        )
+        if tag:
+            macros = {n: m for n, m in macros.items() if tag in [t.lower() for t in m.tags]}
+            if not macros:
+                print_dim(f"\nNo macros tagged '{tag}'.")
+                return
+            title = f"[cyan][Macros: tag={tag}][/cyan]  [bold]{len(macros)}[/bold] total"
+        else:
+            title = f"[cyan][Macros][/cyan]  [bold]{len(macros)}[/bold] total"
+
+        self._macro_table(sorted(macros.items()), title)
     
     def macro_stats(self):
         """Show macro statistics (total, most used, last used, total commands)."""
@@ -946,6 +961,7 @@ class MacroCommandMixin:
         # ── Discover ────────────────────────────────────────────────
         _section("Discover")
         print_help_cmd("ml",                    "List all macros")
+        print_help_cmd("ml --tag <tag>",        "Filter macros by tag")
         print_help_cmd("msh <name>",            "Show macro details + commands")
         print_help_cmd("msr <keyword>",         "Search macros by name / content")
         print_help_cmd("mst",                   "Statistics (most-run, most-recent)")

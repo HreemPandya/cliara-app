@@ -8,6 +8,7 @@ concrete impact so you can make an informed decision.
 """
 
 import glob
+import os
 import re
 import shlex
 import subprocess
@@ -32,23 +33,52 @@ def _format_size(size_bytes: int) -> str:
 
 
 def _dir_size(path: Path) -> int:
-    """Total size of every file beneath *path*, recursively."""
+    """Total size of every file beneath *path*, recursively (symlinks not followed)."""
     total = 0
     scanned_files = 0
     max_files = 5000
     try:
-        for entry in path.rglob("*"):
-            if entry.is_file():
+        for dirpath, _dirnames, filenames in os.walk(str(path), followlinks=False):
+            for name in filenames:
+                fp = Path(dirpath) / name
+                if fp.is_symlink():
+                    continue
                 try:
-                    total += entry.stat().st_size
+                    total += fp.stat().st_size
                 except OSError:
                     pass
                 scanned_files += 1
                 if scanned_files >= max_files:
-                    break
+                    return total
     except OSError:
         pass
     return total
+
+
+def _brace_expand(pattern: str) -> List[str]:
+    """Recursively expand one level of {a,b,c} brace expressions in *pattern*."""
+    m = re.search(r'\{([^{}]*)\}', pattern)
+    if not m:
+        return [pattern]
+    pre, post = pattern[:m.start()], pattern[m.end():]
+    result: List[str] = []
+    for alt in m.group(1).split(','):
+        result.extend(_brace_expand(pre + alt + post))
+    return result
+
+
+def _expand_pattern(pattern: str) -> List[str]:
+    """Brace-expand *pattern* then glob each result (supports ** recursive globs)."""
+    expanded: List[str] = []
+    for bp in _brace_expand(pattern):
+        hits = glob.glob(bp, recursive=True)
+        if hits:
+            expanded.extend(hits)
+        else:
+            p = Path(bp)
+            if p.exists():
+                expanded.append(bp)
+    return expanded
 
 
 def _is_root_like_path(path: Path) -> bool:
@@ -150,15 +180,11 @@ class DiffPreview:
         if not file_args:
             return None
 
-        # Expand globs / literal paths
+        # Expand globs / literal paths (handles {a,b} brace expansion and ** globs)
         matched: List[Tuple[str, int, bool]] = []  # (path, size, is_dir)
         skipped_size_scan = False
         for pattern in file_args:
-            expanded = glob.glob(pattern)
-            if not expanded:
-                p = Path(pattern)
-                if p.exists():
-                    expanded = [pattern]
+            expanded = _expand_pattern(pattern)
 
             for path_str in expanded:
                 p = Path(path_str)

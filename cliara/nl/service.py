@@ -125,11 +125,11 @@ def _first_usable_commit_line(raw: str) -> str:
         m = _CC_LINE.match(s)
         if m:
             t = m.group(0).strip()
-            t = re.sub(r"^[-*]\s+", "", t, count=1)
+            t = re.sub(r"^[-*+]\s+|^\d+[.)]\s+", "", t, count=1)
             return t
     for m in _CC_LINE.finditer(raw or ""):
         t = m.group(0).strip()
-        t = re.sub(r"^[-*]\s+", "", t, count=1)
+        t = re.sub(r"^[-*+]\s+|^\d+[.)]\s+", "", t, count=1)
         return t
     return ""
 

@@ -265,7 +265,7 @@ class CliaraShell(
                 max_entries=max_entries,
             )
             if self.config.get("semantic_history_summary_on_add", True):
-                self._semantic_history_queue = queue.Queue()
+                self._semantic_history_queue = queue.Queue(maxsize=200)
                 self._semantic_history_thread = threading.Thread(
                     target=self._semantic_history_worker,
                     daemon=True,
@@ -527,10 +527,20 @@ class CliaraShell(
             return
         if not self.config.get("semantic_history_summary_on_add", True):
             return
+        item = (command, cwd, exit_code, summary_override, git_ctx, session_name)
         try:
-            self._semantic_history_queue.put(
-                (command, cwd, exit_code, summary_override, git_ctx, session_name)
-            )
+            self._semantic_history_queue.put_nowait(item)
+        except queue.Full:
+            # Queue is at capacity (Ollama unresponsive) — drop oldest to make room.
+            try:
+                self._semantic_history_queue.get_nowait()
+                self._semantic_history_queue.task_done()
+            except queue.Empty:
+                pass
+            try:
+                self._semantic_history_queue.put_nowait(item)
+            except queue.Full:
+                pass
         except Exception:
             pass
 

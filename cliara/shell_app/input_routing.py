@@ -4,6 +4,7 @@ import os
 import platform
 
 from cliara.copilot_gate import InputSource
+from cliara.safety import DangerLevel
 from cliara.shell_app.runtime import (
     _is_explain_last_rest,
     _looks_like_fix,
@@ -13,6 +14,14 @@ from cliara.shell_app.runtime import (
     print_success,
     print_warning,
 )
+
+
+_DANGER_ORDER = {
+    DangerLevel.SAFE: 0,
+    DangerLevel.CAUTION: 1,
+    DangerLevel.DANGEROUS: 2,
+    DangerLevel.CRITICAL: 3,
+}
 
 
 class InputRoutingMixin:
@@ -80,15 +89,7 @@ class InputRoutingMixin:
     @staticmethod
     def _danger_ge(a, b) -> bool:
         """Return True when danger level *a* is >= *b* (SAFE < CAUTION < DANGEROUS < CRITICAL)."""
-        from cliara.safety import DangerLevel
-
-        order = {
-            DangerLevel.SAFE: 0,
-            DangerLevel.CAUTION: 1,
-            DangerLevel.DANGEROUS: 2,
-            DangerLevel.CRITICAL: 3,
-        }
-        return order.get(a, 0) >= order.get(b, 0)
+        return _DANGER_ORDER.get(a, 0) >= _DANGER_ORDER.get(b, 0)
 
     def run_do(self, query: str) -> int:
         """Plan then execute a natural-language request.

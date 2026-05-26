@@ -309,9 +309,9 @@ def print_header(msg: str):
     _cliara_console().print(msg, style="bold")
 
 
-def print_dim(msg: str):
+def print_dim(msg: str, end: str = "\n"):
     """Print a dimmed/muted message."""
-    _cliara_console().print(msg, style="dim")
+    _cliara_console().print(msg, style="dim", end=end)
 
 
 def safe_input(prompt: str, default: Optional[str] = None) -> Optional[str]:

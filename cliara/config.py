@@ -341,7 +341,16 @@ class Config:
     
     def is_first_run(self) -> bool:
         """Check if this is the first time running Cliara."""
-        return not self.settings.get("first_run_complete", False)
+        if self.settings.get("first_run_complete", False):
+            return False
+        # Any pre-existing config file means the user already ran setup; the
+        # first_run_complete key may simply be absent in older config versions.
+        try:
+            if self.config_file.exists() and self.config_file.stat().st_mtime > 0:
+                return False
+        except OSError:
+            pass
+        return True
     
     def complete_first_run(self):
         """Mark first-run setup as complete."""

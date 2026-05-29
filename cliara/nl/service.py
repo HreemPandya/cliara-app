@@ -2475,12 +2475,6 @@ Command: {cmd_for_prompt}"""
             "recently",
             "latest",
             "most",
-            "time",
-            "run",
-            "ran",
-            "command",
-            "commands",
-            "builds",
         }
         tokens = [t for t in raw if t not in stop]
         # De-dupe while keeping order.

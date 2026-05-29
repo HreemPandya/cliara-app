@@ -154,8 +154,10 @@ def _ollama_running(url: str = _OLLAMA_DEFAULT_URL, timeout: float = 1.0) -> boo
 
 def _mask_key(key: str) -> str:
     """Show first 6 and last 4 chars of a key, mask the middle."""
+    if len(key) <= 8:
+        return "***"
     if len(key) <= 12:
-        return key[:3] + "..." + key[-2:] if len(key) > 5 else "***"
+        return key[:3] + "..."
     return key[:6] + "..." + key[-4:]
 
 

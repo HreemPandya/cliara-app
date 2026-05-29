@@ -284,6 +284,18 @@ class InputRoutingMixin:
             self._print_full_banner()
             return
 
+        if user_input.strip().lower() in ("tips off", "tips disable"):
+            self.config.settings["show_tips"] = False
+            self.config.save()
+            print_info("[Tips disabled. Use 'tips on' to re-enable.]")
+            return
+
+        if user_input.strip().lower() in ("tips on", "tips enable"):
+            self.config.settings["show_tips"] = True
+            self.config.save()
+            print_info("[Tips enabled.]")
+            return
+
         if user_input.lower() == "history" or user_input.lower().startswith("history "):
             self.handle_history(user_input[7:].strip() if len(user_input) > 7 else "")
             return

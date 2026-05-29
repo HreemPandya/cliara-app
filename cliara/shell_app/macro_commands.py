@@ -552,7 +552,7 @@ class MacroCommandMixin:
         level, dangerous = self.safety.check_commands(commands)
         if level in (DangerLevel.DANGEROUS, DangerLevel.CRITICAL):
             _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
-            confirm = input("\nSave anyway? (yes/no): ").strip().lower()
+            confirm = (safe_input("\nSave anyway? (yes/no): ") or "").lower()
             if confirm not in ("yes", "y"):
                 print_warning("[Cancelled]")
                 return

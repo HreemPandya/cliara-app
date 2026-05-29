@@ -94,6 +94,7 @@ from cliara.shell_app.runtime import (
     print_info,
     print_success,
     print_warning,
+    safe_input,
 )
 
 
@@ -611,7 +612,7 @@ class CliaraShell(
         enc = (getattr(sys.stdout, "encoding", "") or "").lower()
         rule_char = "─" if ("utf" in enc or "65001" in enc) else "-"
         rule = f"[{s['rule']}]{rule_char * 52}[/]"
-        tip_footer = self._pick_tip()
+        show_tips = self.config.get("show_tips", True)
 
         blocks = [
             M("meta", shell_line),
@@ -632,9 +633,13 @@ class CliaraShell(
             f"  {M('kbd', 'help · tips · exit')}{M('body', ' Full command list · show tips again · quit')}",
             "",
             rule,
-            "",
-            f"{M('footer_icon', '*')} {M('footer', f'Did you know? {tip_footer}')}",
         ]
+        if show_tips:
+            tip_footer = self._pick_tip()
+            blocks += [
+                "",
+                f"{M('footer_icon', '*')} {M('footer', f'Did you know? {tip_footer}')}",
+            ]
         content = "\n".join(blocks)
 
         title = (
@@ -682,7 +687,8 @@ class CliaraShell(
         else:
             parts.append(" LLM not configured")
         n_macros = len(self.macros.list_all()) if hasattr(self.macros, "list_all") else 0
-        parts.append(f" · {n_macros} macros")
+        if n_macros > 0:
+            parts.append(f" · {n_macros} macros")
         if self.current_session:
             parts.append(f" · session: {self.current_session.name}")
         parts.append("Type help or tips")
@@ -1294,14 +1300,14 @@ class CliaraShell(
         
         # --save-as: save as macro instead of executing
         if save_as_name:
-            confirm = input(f"\nSave as macro '{save_as_name}'? (y/n): ").strip().lower()
+            confirm = (safe_input(f"\nSave as macro '{save_as_name}'? (y/n): ") or "").lower()
             if confirm not in ['y', 'yes']:
                 print_warning("[Cancelled]")
                 return
             if not self._check_macro_name_conflict(save_as_name):
                 print_warning("[Cancelled]")
                 return
-            description = input("Description (optional): ").strip() or query
+            description = safe_input("Description (optional): ") or query
             self.macros.add(save_as_name, commands, description)
             print_success(f"[{icons.OK}] Macro '{save_as_name}' saved with {len(commands)} command(s)")
             return
@@ -3620,14 +3626,14 @@ class CliaraShell(
         # Offer to run the command (skip when explaining something already executed)
         if offer_run:
             print()
-            run = input("Run this command? (y/n): ").strip().lower()
+            run = (safe_input("Run this command? (y/n): ") or "").lower()
             if run in ['y', 'yes']:
                 # Safety check first
                 level, dangerous = self.safety.check_commands([command])
                 if level != DangerLevel.SAFE:
                     _print_safety_panel(self.safety, [cmd for cmd, _ in dangerous], level)
                     prompt = self.safety.get_confirmation_prompt(level)
-                    response = input(prompt).strip()
+                    response = safe_input(prompt) or ""
                     if not self.safety.validate_confirmation(response, level):
                         print_warning("[Cancelled]")
                         return
@@ -3825,6 +3831,7 @@ class CliaraShell(
         print_dim("  " + "-" * 38)
         print_help_cmd("help", "Show this help")
         print_help_cmd("tips", "Show quick-tips panel (startup banner)")
+        print_help_cmd("tips off / tips on", "Disable or re-enable the 'Did you know?' tip footer")
         print_help_cmd("last", "Repeat the last command")
         print_help_cmd("doctor", "Setup health check (shell, LLM, macros, config)")
         print_help_cmd("history [N]", "Show last N commands (default 20)")

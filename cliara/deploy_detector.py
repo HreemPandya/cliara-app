@@ -314,8 +314,10 @@ def _detect_python_publish(cwd: Path) -> Optional[DeployPlan]:
         marker = "pyproject.toml" if (cwd / "pyproject.toml").exists() else "setup.py"
         # Align with project PUBLISH.md: tools → clean dist → build → twine as __token__
         _clean_dist = (
-            'python -c "import shutil, pathlib; '
-            "shutil.rmtree(pathlib.Path('dist'), ignore_errors=True)\""
+            'python -c "'
+            'import shutil, pathlib; '
+            "shutil.rmtree(pathlib.Path('dist'), ignore_errors=True)"
+            '"'
         )
         return DeployPlan(
             platform="pypi",

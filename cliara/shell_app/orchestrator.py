@@ -3,6 +3,7 @@ Shell wrapper/proxy for Cliara.
 Handles command pass-through, NL routing, and macro execution.
 """
 
+import collections
 import shutil
 import subprocess
 import sys
@@ -144,6 +145,7 @@ class CliaraShell(
             print()  # blank line before the bar
         progress.step("Loading config...")
         self.config = _cfg
+        self._config_undo_stack: collections.deque = collections.deque(maxlen=20)
         from cliara.console import set_ui_theme
 
         set_ui_theme(self.config.get("theme"))
@@ -1806,6 +1808,7 @@ class CliaraShell(
           config list               -  show all current settings
           config get <key>          -  print one value
           config set <key> <value>  -  persist a value to ~/.cliara/config.json
+          config undo               -  revert the last config set (up to 20 levels)
         """
         # Read-only keys that must never be set via this command
         _READONLY = {"llm_api_key", "llm_provider", "postgres"}
@@ -1839,6 +1842,22 @@ class CliaraShell(
                 print_info(f"  {key} = {val}")
             return
 
+        if sub == "undo":
+            if not self._config_undo_stack:
+                print_warning("  Nothing to undo.")
+                return
+            key, old_val = self._config_undo_stack.pop()
+            cur_val = self.config.get(key)
+            if old_val is None:
+                self.config.settings.pop(key, None)
+            else:
+                self.config.settings[key] = old_val
+            self.config.save()
+            cur_str = repr(cur_val) if cur_val is not None else "(not set)"
+            old_str = repr(old_val) if old_val is not None else "(not set)"
+            print_success(f"  Reverted {key}: {cur_str}  ->  {old_str}  {icons.OK}")
+            return
+
         if sub == "set":
             if len(parts) < 3:
                 print_error("[Cliara] Usage: config set <key> <value>")
@@ -1868,6 +1887,7 @@ class CliaraShell(
                         val = raw_val
 
             old_val = self.config.get(key)
+            self._config_undo_stack.append((key, old_val))
             self.config.set(key, val)
             old_str = repr(old_val) if old_val is not None else "(not set)"
             print_success(f"  {key}: {old_str}  ->  {val!r}  {icons.OK}")
@@ -1878,7 +1898,7 @@ class CliaraShell(
             return
 
         print_error(f"[Cliara] Unknown config subcommand: '{sub}'")
-        print_dim("  Usage: config list | config get <key> | config set <key> <value>")
+        print_dim("  Usage: config list | config get <key> | config set <key> <value> | config undo")
 
     # ------------------------------------------------------------------
     # Ollama setup wizard
@@ -3846,6 +3866,7 @@ class CliaraShell(
             "disable semantic history & ? find",
             pad_to=42,
         )
+        print_help_cmd("config undo", "Revert the last config set (up to 20 levels)")
         print_help_cmd("version / status / readme", "Show version, auth, or generate README")
         print_help_cmd("exit / Ctrl+C", "Quit Cliara")
 

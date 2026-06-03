@@ -1233,6 +1233,10 @@ class CliaraShell(
                 print_error("[Error] No answer content returned from the LLM.")
             return
 
+        if not self.nl_handler.llm_enabled:
+            print_warning("[LLM not configured  -  run 'setup-llm' to enable natural language commands]")
+            return
+
         ql = query if len(query) <= 48 else (query[:45] + "...")
         with thinking_status(ql) as status:
             progress_chars = 0

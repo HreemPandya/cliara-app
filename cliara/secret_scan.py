@@ -234,7 +234,7 @@ def get_staged_files(repo_root: Optional[Path] = None) -> List[str]:
         r = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
             cwd=str(repo_root) if repo_root else None,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         return [f.strip() for f in r.stdout.splitlines() if f.strip()]
     except Exception:
@@ -246,7 +246,7 @@ def get_staged_diff(repo_root: Optional[Path] = None) -> str:
         r = subprocess.run(
             ["git", "diff", "--cached"],
             cwd=str(repo_root) if repo_root else None,
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
         return r.stdout
     except Exception:

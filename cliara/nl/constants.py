@@ -70,6 +70,7 @@ STREAMING_SAFE_AGENTS = frozenset(
         "chat_polish",
         "cliara_qa",
         "history_answer",  # RAG prose synthesis — streams naturally like a chat response
+        "codebase_qa",     # RAG over the codebase — prose answer with file:line citations
     }
 )
 
@@ -97,6 +98,9 @@ CLIARA_BUILTIN_COMMANDS = frozenset(
         "themes",
         "setup-ollama",
         "setup-llm",
+        "index",
+        "reindex",
+        "ask",
         "cliara-login",
         "cliara-logout",
         "use",

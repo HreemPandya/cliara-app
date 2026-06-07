@@ -110,6 +110,26 @@ cliara ~/myapp ❯ deploy
 cliara ~/myapp ❯ ? fix
 ```
 
+### 4) Ask your codebase (RAG)
+
+Index every git-tracked file into a local vector store, then ask questions in
+plain English and get answers with `file:line` citations.
+
+```text
+cliara ~/myapp ❯ index
+✓ Indexed 126 file(s), 1045 chunk(s).
+cliara ~/myapp ❯ ? how does auth work
+cliara ~/myapp ❯ ask where is the config loaded
+```
+
+- `index` builds (and incrementally refreshes) the index — only changed files
+  are re-embedded; `index rebuild`, `index status`, and `index clear` are also
+  available.
+- `ask <question>` always searches the code; `? <question>` does too once an
+  index exists and the question looks code-related.
+- The store is a local SQLite database under `~/.cliara/codebase_index/`; nothing
+  leaves your machine except the embedding/answer calls to your configured LLM.
+
 ## Safety By Default
 
 Cliara is designed to help you move fast without blindly executing dangerous commands.

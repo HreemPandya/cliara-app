@@ -30,6 +30,8 @@ def _run_git(args: List[str], cwd: Path) -> str:
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     if p.returncode != 0:

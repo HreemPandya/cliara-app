@@ -766,6 +766,41 @@ class NLHandler:
         except Exception as e:
             return f"Error while answering query: {e}"
 
+    def answer_codebase_query(
+        self,
+        question: str,
+        snippets: List[Dict[str, Any]],
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Answer a question about the codebase from retrieved code *snippets*.
+
+        Each snippet is a dict with ``citation`` (``path:line`` string) and
+        ``content`` (the code). The model is instructed (see codebase_qa.md) to
+        ground its answer in these snippets and cite ``path:line`` locations.
+        """
+        if not self.llm_enabled:
+            return "LLM is not configured. Run setup-llm to enable codebase answers."
+        try:
+            prompt = self._create_codebase_prompt(question, snippets)
+            return self._call_llm_stream("codebase_qa", prompt, stream_callback).strip()
+        except Exception as e:
+            return f"Error while answering codebase query: {e}"
+
+    @staticmethod
+    def _create_codebase_prompt(question: str, snippets: List[Dict[str, Any]]) -> str:
+        """Build the codebase_qa user message: question + numbered code snippets."""
+        parts: List[str] = [f"Question: {question}", "", "Retrieved code snippets:"]
+        if not snippets:
+            parts.append("(none retrieved)")
+        for i, s in enumerate(snippets, 1):
+            citation = str(s.get("citation", "")).strip() or "unknown"
+            content = str(s.get("content", ""))
+            parts.append(f"\n[{i}] {citation}\n```\n{content}\n```")
+        parts.append(
+            "\nAnswer the question using only these snippets and cite path:line locations."
+        )
+        return "\n".join(parts)
+
     def _retry_nl_to_commands_json(self, prompt: str) -> str:
         """One-shot repair call when initial nl_to_commands output is malformed."""
         strict_prompt = (
@@ -940,6 +975,8 @@ class NLHandler:
                     cwd=str(root),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=cmd_timeout,
                 )
                 if r.returncode != 0:
@@ -2401,6 +2438,66 @@ Command: {cmd_for_prompt}"""
             return resp.data[0].embedding
         except Exception:
             return None
+
+    def embedding_model_id(self) -> Optional[str]:
+        """Return the embedding model id that :meth:`get_embedding` would use.
+
+        Lets callers (e.g. the codebase index) record which model produced the
+        stored vectors so a model switch can trigger a rebuild. Returns None
+        when no embedding backend is available.
+        """
+        client = self._client_for_embeddings()
+        if client is None:
+            return None
+        if self.llm_client is client and self.provider == "ollama":
+            return "nomic-embed-text"
+        return EMBEDDING_MODEL
+
+    def get_embeddings_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+        """Embed many texts at once, returning one vector (or None) per input.
+
+        Order is preserved and the output length always equals ``len(texts)``.
+        Tries a single batched ``embeddings.create`` call (OpenAI accepts a list
+        of inputs); if that fails — e.g. an OpenAI-compatible backend like Ollama
+        that only takes one input — it falls back to per-item calls so a single
+        bad row doesn't fail the whole batch.
+        """
+        if not texts:
+            return []
+        client = self._client_for_embeddings()
+        if client is None:
+            return [None] * len(texts)
+
+        if self.llm_client is client and self.provider == "ollama":
+            model = "nomic-embed-text"
+        else:
+            model = EMBEDDING_MODEL
+
+        cleaned = [(t or "").strip() for t in texts]
+
+        # Fast path: one batched request for all non-empty inputs.
+        nonempty_idx = [i for i, t in enumerate(cleaned) if t]
+        out: List[Optional[List[float]]] = [None] * len(texts)
+        if not nonempty_idx:
+            return out
+        try:
+            resp = client.embeddings.create(
+                model=model,
+                input=[cleaned[i] for i in nonempty_idx],
+            )
+            data = list(resp.data)
+            if len(data) == len(nonempty_idx):
+                for slot, item in zip(nonempty_idx, data):
+                    out[slot] = list(item.embedding)
+                return out
+            # Unexpected shape — fall through to per-item.
+        except Exception:
+            pass
+
+        # Fallback: per-item (slower, but robust across providers).
+        for i in nonempty_idx:
+            out[i] = self.get_embedding(cleaned[i])
+        return out
 
     @staticmethod
     def history_entry_key(e: Dict[str, Any]) -> Tuple[str, str]:

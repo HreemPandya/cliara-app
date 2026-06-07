@@ -293,7 +293,7 @@ class RiskEngine:
         try:
             result = subprocess.run(
                 ["git"] + args.split(),
-                capture_output=True, text=True, timeout=3,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
             )
             return result.stdout.strip() if result.returncode == 0 else ""
         except Exception:

@@ -230,7 +230,7 @@ def _list_local_models(ollama_bin: str) -> List[str]:
     try:
         result = subprocess.run(
             [ollama_bin, "list"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
         names: List[str] = []
         for line in result.stdout.splitlines()[1:]:   # first line is the header
@@ -253,6 +253,8 @@ def _pull_model(ollama_bin: str, model: str, print_fn) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         for raw in proc.stdout:  # type: ignore[union-attr]
             line = raw.rstrip()

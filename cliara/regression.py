@@ -23,6 +23,8 @@ def _run(cmd: List[str], cwd: Path, timeout: int = 5) -> Tuple[bool, str]:
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return r.returncode == 0, (r.stdout or "").strip()

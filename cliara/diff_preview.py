@@ -269,7 +269,7 @@ class DiffPreview:
         try:
             result = subprocess.run(
                 ["git", "diff", "--name-only"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode == 0:
                 modified = set(result.stdout.strip().splitlines())
@@ -325,7 +325,7 @@ class DiffPreview:
         """
         try:
             result = subprocess.run(
-                numstat_cmd, capture_output=True, text=True, timeout=5,
+                numstat_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return None
@@ -398,7 +398,7 @@ class DiffPreview:
 
         try:
             result = subprocess.run(
-                dry_args, capture_output=True, text=True, timeout=5,
+                dry_args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode != 0:
                 return None
@@ -528,7 +528,7 @@ class DiffPreview:
         try:
             result = subprocess.run(
                 ["git", "log", "--oneline", f"{target}..HEAD"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 commits = result.stdout.strip().splitlines()
@@ -546,7 +546,7 @@ class DiffPreview:
         try:
             result = subprocess.run(
                 ["git", "diff", "--numstat"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 rows = result.stdout.strip().splitlines()
@@ -570,7 +570,7 @@ class DiffPreview:
         try:
             result = subprocess.run(
                 ["git", "diff", "--cached", "--numstat"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 rows = result.stdout.strip().splitlines()

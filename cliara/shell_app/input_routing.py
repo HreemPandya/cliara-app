@@ -330,6 +330,25 @@ class InputRoutingMixin:
             self.handle_prune_branches()
             return
 
+        # Codebase RAG: build/refresh the index, and ask questions about the code.
+        if _ulow == "index" or _ulow == "reindex" or _ulow.startswith(("index ", "reindex ")):
+            if _ulow.startswith("reindex"):
+                rest = user_input.strip()[7:].strip()
+                self.handle_codebase_index(rest or "rebuild")
+            else:
+                rest = user_input.strip()[5:].strip() if len(user_input.strip()) > 5 else ""
+                self.handle_codebase_index(rest)
+            return
+
+        if _ulow == "ask" or _ulow.startswith("ask "):
+            rest = user_input.strip()[3:].strip() if len(user_input.strip()) > 3 else ""
+            if not rest:
+                print_error("[Error] Usage: ask <question about the code>")
+                print_dim("Example: ask how does auth work")
+                return
+            self.handle_codebase_question(rest)
+            return
+
         _sess_expanded = self._expand_session_shortcut(user_input)
         if _sess_expanded is not None:
             self.handle_session(_sess_expanded)

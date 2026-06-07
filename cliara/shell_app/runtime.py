@@ -625,6 +625,55 @@ def _is_semantic_history_search_intent(query: str) -> bool:
     return False
 
 
+# "how does X work", "where is X", "what does X do", "explain the X module" — questions
+# *about the code*, distinct from "how do I <task>" (a command-generation request).
+_CODEBASE_Q_RE = re.compile(
+    r"^\s*(?:"
+    r"how\s+(?:does|do|is|are)\b"          # how does auth work
+    r"|where\s+(?:is|are|does|do)\b"        # where is the config loaded
+    r"|what\s+(?:does|do|is|are|happens)\b" # what does run_macro do
+    r"|why\s+(?:does|do|is|are)\b"          # why does login fail
+    r"|which\s+(?:file|module|function|class)\b"
+    r"|explain\s+(?:the|this|how)\b"        # explain the auth flow
+    r"|walk\s+me\s+through\b"
+    r"|show\s+me\s+(?:where|how|the)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Code-flavored nouns that make a generic question clearly about the codebase.
+_CODEBASE_NOUN_RE = re.compile(
+    r"\b(?:function|method|class|module|file|variable|constant|import|"
+    r"endpoint|route|handler|component|config(?:uration)?|schema|model|"
+    r"interface|decorator|fixture|test|api|callback|hook|migration|"
+    r"this\s+(?:repo|repository|codebase|project|code))\b",
+    re.IGNORECASE,
+)
+
+# "how do I <task>" is a command request, not a codebase question — exclude it.
+_TASK_HOWTO_RE = re.compile(r"^\s*how\s+(?:do|can|should|would)\s+(?:i|we|you)\b", re.IGNORECASE)
+
+
+def _is_codebase_question_intent(query: str) -> bool:
+    """Return True if *query* reads like a question about this codebase.
+
+    Heuristic gate for routing ``?`` queries to RAG-over-codebase. Callers
+    should additionally require that an index actually exists, so a false
+    positive on a repo with no index simply falls through to normal handling.
+    """
+    q = (query or "").strip()
+    if not q:
+        return False
+    if _TASK_HOWTO_RE.match(q):
+        return False
+    if _CODEBASE_Q_RE.match(q):
+        return True
+    # Otherwise require both a question shape and a code-flavored noun.
+    if q.endswith("?") and _CODEBASE_NOUN_RE.search(q):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Startup progress bar
 # ---------------------------------------------------------------------------

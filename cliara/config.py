@@ -198,6 +198,16 @@ class Config:
         "semantic_history_hybrid_keyword_pool": 24,
         # Intent (LLM) fallback: how many recent entries to include in the prompt
         "semantic_history_intent_max_entries": 200,
+        # Codebase RAG (`index` + `ask` / `? how does X work`)
+        # Indexes git-tracked files into a local SQLite vector store and answers
+        # codebase questions with file:line citations.
+        "codebase_rag_enabled": True,
+        "codebase_rag_top_k": 8,              # chunks retrieved per question
+        "codebase_rag_min_score": 0.15,       # cosine floor for a chunk to count
+        "codebase_rag_max_file_kb": 256,      # skip files larger than this
+        "codebase_rag_chunk_lines": 40,       # lines per chunk
+        "codebase_rag_chunk_overlap": 10,     # overlapping lines between chunks
+        "codebase_rag_embed_batch": 64,       # embeddings requested per API call
         # Copilot Gate — AI-command interception layer
         "copilot_gate": True,
         "copilot_gate_mode": "auto",            # "auto" | "explicit" | "all"

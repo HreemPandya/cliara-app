@@ -252,6 +252,8 @@ def _get_project_root(cwd: Path) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if r.returncode == 0 and r.stdout.strip():
@@ -269,6 +271,8 @@ def _get_branch(cwd: Path) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if r.returncode == 0 and r.stdout.strip():

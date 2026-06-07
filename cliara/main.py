@@ -176,6 +176,8 @@ def _run_graph(config_dir=None):
             cwd=Path.cwd(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if r.returncode == 0 and (r.stdout or "").strip():

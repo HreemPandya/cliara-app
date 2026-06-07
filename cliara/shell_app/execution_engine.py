@@ -370,6 +370,12 @@ class ExecutionEngineMixin:
                             [ps_exe, "-NoProfile", "-Command", command],
                             capture_output=True,
                             text=True,
+                            # Decode as UTF-8 and never crash on stray bytes: the
+                            # platform default (cp1252 on Windows) raises a
+                            # UnicodeDecodeError in the reader thread, leaving
+                            # result.stdout as None -> ".splitlines() on None".
+                            encoding="utf-8",
+                            errors="replace",
                             timeout=self._subprocess_timeout(),
                         )
                     else:
@@ -378,6 +384,8 @@ class ExecutionEngineMixin:
                             shell=True,
                             capture_output=True,
                             text=True,
+                            encoding="utf-8",
+                            errors="replace",
                             timeout=self._subprocess_timeout(),
                         )
                 finally:

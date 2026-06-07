@@ -69,6 +69,7 @@ from cliara.shell_app.macro_commands import MacroCommandMixin
 from cliara.shell_app.input_routing import InputRoutingMixin
 from cliara.shell_app.execution_engine import ExecutionEngineMixin
 from cliara.shell_app.gate_flow import GateFlowMixin
+from cliara.shell_app.codebase_commands import CodebaseCommandMixin
 
 from cliara.shell_app.runtime import (
     CommandHistory,
@@ -78,6 +79,7 @@ from cliara.shell_app.runtime import (
     _cliara_console,
     _ui_accent_style,
     _fmt_path,
+    _is_codebase_question_intent,
     _is_explain_last_rest,
     _is_semantic_history_search_intent,
     _looks_like_fix,
@@ -123,6 +125,7 @@ class CliaraShell(
     DeployCommandMixin,
     ExecutionEngineMixin,
     GateFlowMixin,
+    CodebaseCommandMixin,
 ):
     """Main Cliara shell - wraps user's real shell."""
     
@@ -425,7 +428,7 @@ class CliaraShell(
         try:
             r = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=1.5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5,
                 cwd=str(Path.cwd()),
             )
             if r.returncode == 0:
@@ -1163,6 +1166,17 @@ class CliaraShell(
         # "?"? Semantic history search: ? find ... / ? when did I ... / ? what did I run ... "?"?
         if _is_semantic_history_search_intent(query):
             self.handle_semantic_history_search(query)
+            return
+
+        # "?"? RAG over the codebase: ? how does auth work / ? where is X defined "?"?
+        # Only when a non-empty index exists for this repo — otherwise fall
+        # through to the normal answer/commands routing below.
+        if (
+            "--save-as" not in query
+            and _is_codebase_question_intent(query)
+            and self.has_codebase_index()
+        ):
+            self.handle_codebase_question(query)
             return
 
         # Check for --save-as <name> flag
@@ -3721,6 +3735,19 @@ class CliaraShell(
         print_help_cmd(f"{nl} when did I ...", "e.g. when did I fix the login bug")
         print_help_cmd(f"{nl} what did I run ...", "e.g. what did I run to deploy last time")
         print_dim("  Requires LLM; uses stored summaries of your commands.\n")
+
+        print_info("  Codebase RAG")
+        print_dim("  " + "-" * 38)
+        print_help_cmd("index", "Index git-tracked files into a local vector store")
+        print_help_cmd("index rebuild", "Full re-index (e.g. after switching models)")
+        print_help_cmd("index status", "Show files/chunks indexed and embedding model")
+        print_help_cmd("index clear", "Delete the index for this repo")
+        print_help_cmd("ask <question>", "Answer from the code, with file:line citations")
+        print_help_cmd(f"{nl} how does <X> work", "Same, when an index exists")
+        print()
+        print_help_example("index")
+        print_help_example("? how does auth work")
+        print_dim("  Incremental: re-running `index` only re-embeds changed files.\n")
 
         print_info("  Macros")
         print_dim("  " + "-" * 38)

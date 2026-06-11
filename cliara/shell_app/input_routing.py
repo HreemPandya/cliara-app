@@ -321,6 +321,11 @@ class InputRoutingMixin:
             self.handle_push()
             return
 
+        if _ulow == "review" or _ulow.startswith("review "):
+            rest = user_input.strip()[6:].strip() if len(user_input.strip()) > 6 else ""
+            self.handle_code_review(rest)
+            return
+
         if _ulow == "undo" or _ulow.startswith("undo "):
             rest = user_input.strip()[4:].strip() if len(user_input.strip()) > 4 else ""
             self._handle_undo(rest)
@@ -347,6 +352,12 @@ class InputRoutingMixin:
                 print_dim("Example: ask how does auth work")
                 return
             self.handle_codebase_question(rest)
+            return
+
+        # Output Time-Machine: archive of what past commands printed.
+        if _ulow == "outputs" or _ulow.startswith("outputs "):
+            rest = user_input.strip()[7:].strip() if len(user_input.strip()) > 7 else ""
+            self.handle_output_archive(rest)
             return
 
         _sess_expanded = self._expand_session_shortcut(user_input)
@@ -513,6 +524,11 @@ class InputRoutingMixin:
 
         if low == "history clear" or low == "clear-history":
             self.handle_history("clear")
+            return True
+
+        if low == "review" or low.startswith("review "):
+            rest = raw[6:].strip() if len(raw) > 6 else ""
+            self.handle_code_review(rest)
             return True
 
         if low == "undo" or low.startswith("undo "):

@@ -198,6 +198,15 @@ class Config:
         "semantic_history_hybrid_keyword_pool": 24,
         # Intent (LLM) fallback: how many recent entries to include in the prompt
         "semantic_history_intent_max_entries": 200,
+        # Output Time-Machine (`outputs ...`)
+        # Archives a secret-scrubbed head+tail digest of every command's
+        # stdout/stderr into a per-project SQLite store so `outputs search`
+        # and `? find` answers can quote what commands actually printed.
+        # OPT-IN: output is far more secret-dense than commands, so this
+        # ships disabled. Enable with `outputs on`.
+        "output_archive_enabled": False,
+        "output_archive_max_entry_kb": 64,   # digest cap per command (KB of text)
+        "output_archive_max_db_mb": 50,      # per-project store cap (oldest evicted)
         # Codebase RAG (`index` + `ask` / `? how does X work`)
         # Indexes git-tracked files into a local SQLite vector store and answers
         # codebase questions with file:line citations.
@@ -208,6 +217,10 @@ class Config:
         "codebase_rag_chunk_lines": 40,       # lines per chunk
         "codebase_rag_chunk_overlap": 10,     # overlapping lines between chunks
         "codebase_rag_embed_batch": 64,       # embeddings requested per API call
+        # Pre-commit code review (`review` / `? review`)
+        # Reviews the staged diff for likely bugs, missing tests, and
+        # undocumented public APIs before you commit.
+        "code_review_max_diff_chars": 12000,  # cap on diff text sent to the model
         # Copilot Gate — AI-command interception layer
         "copilot_gate": True,
         "copilot_gate_mode": "auto",            # "auto" | "explicit" | "all"

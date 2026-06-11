@@ -2324,6 +2324,14 @@ Command: {cmd_for_prompt}"""
             if summary:
                 lines.append(f"  > {summary}")
 
+            # Archived output digest (Output Time-Machine) — already scrubbed
+            # and capped by the lookup that attached it.
+            digest = (e.get("output_digest") or "").strip()
+            if digest:
+                lines.append("  output:")
+                for ln in digest.splitlines():
+                    lines.append(f"  | {ln}")
+
         return "\n".join(lines)
 
     def search_history_rag(
@@ -2333,6 +2341,7 @@ Command: {cmd_for_prompt}"""
         top_k: int = 8,
         min_score: float = 0.22,
         stream_callback: Optional[Callable[[str], None]] = None,
+        output_lookup: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
     ) -> "Tuple[str, List[Dict[str, Any]]]":
         """Retrieve the most relevant history entries and synthesize a prose answer.
 
@@ -2398,6 +2407,22 @@ Command: {cmd_for_prompt}"""
 
         # Sort chronologically so the LLM can reason about sequence naturally.
         sources.sort(key=lambda e: e.get("timestamp", ""))
+
+        # --- Output Time-Machine enrichment ---
+        # When the shell provides an archive lookup, attach the scrubbed
+        # output digest for each retrieved run so the model can quote the
+        # *actual* error/output, not just the command line. Only the few
+        # retrieved sources are looked up, never the whole history.
+        if output_lookup is not None:
+            for e in sources:
+                if e.get("output_digest"):
+                    continue
+                try:
+                    digest = output_lookup(e)
+                except Exception:
+                    digest = None
+                if digest:
+                    e["output_digest"] = str(digest)
 
         # --- Context blocks ---
         context = self._format_history_context(sources)
@@ -2839,6 +2864,65 @@ Command: {cmd_for_prompt}"""
                 e["_embedding_score"] = float(scores[i])
                 out.append(e)
         return out
+
+    # ------------------------------------------------------------------
+    # Pre-commit code review (? review)
+    # ------------------------------------------------------------------
+
+    def review_changes(
+        self,
+        diff_stat: str,
+        diff_content: str,
+        files: List[str],
+        *,
+        staged: bool = True,
+        branch: str = "",
+        truncated: bool = False,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Review a git diff and return Markdown findings.
+
+        Surfaces likely bugs, missing tests, and undocumented public APIs (see
+        ``code_review.md``). The diff should already be truncated by the caller;
+        *truncated* just tells the model the tail was cut so it won't guess.
+        """
+        if not self.llm_enabled:
+            return (
+                "LLM is not configured, so automated review is unavailable. "
+                "Run `setup-llm` to enable `? review`."
+            )
+
+        prompt = self._create_code_review_prompt(
+            diff_stat, diff_content, files, staged=staged, branch=branch, truncated=truncated
+        )
+        try:
+            return self._call_llm_stream("code_review", prompt, stream_callback).strip()
+        except Exception as e:
+            return f"Error while reviewing changes: {self._brief_llm_error(e)}"
+
+    @staticmethod
+    def _create_code_review_prompt(
+        diff_stat: str,
+        diff_content: str,
+        files: List[str],
+        *,
+        staged: bool,
+        branch: str,
+        truncated: bool,
+    ) -> str:
+        """Build the code_review user message from diff facts."""
+        scope = "staged changes (what `git commit` would record)" if staged else "unstaged working-tree changes"
+        file_list = "\n".join(f"  - {f}" for f in files) or "  (no files)"
+        parts = [
+            f"Review scope: {scope}",
+        ]
+        if branch:
+            parts.append(f"Branch: {branch}")
+        parts.append(f"\nChanged files:\n{file_list}")
+        if diff_stat:
+            parts.append(f"\nDiff summary:\n{diff_stat}")
+        parts.append(f"\nUnified diff{' (truncated)' if truncated else ''}:\n{diff_content or '(empty)'}")
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # Commit-message generation (smart push)

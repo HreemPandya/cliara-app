@@ -140,6 +140,42 @@ def _is_high_entropy_secret(token: str) -> bool:
     return _shannon_entropy(token) >= _ENTROPY_THRESHOLD
 
 
+# ── Text scrubbing (shared with the output archive) ──────────────────────────
+
+def scrub_secrets(text: str) -> Tuple[str, int]:
+    """Replace likely secrets in *text* with ``<REDACTED:label>`` placeholders.
+
+    Runs the same two inline layers as the push gate (known-prefix patterns,
+    then the Shannon-entropy heuristic) but *rewrites* instead of reporting.
+    Used by the output archive so command stdout/stderr is scrubbed before it
+    is ever persisted to disk.
+
+    Returns ``(scrubbed_text, redaction_count)``.
+    """
+    if not text:
+        return text, 0
+
+    count = 0
+    out = text
+
+    # Layer 1: known secret shapes.
+    for pattern, label in _COMPILED_PATTERNS:
+        out, n = pattern.subn(f"<REDACTED:{label}>", out)
+        count += n
+
+    # Layer 2: high-entropy blobs the patterns didn't name.
+    def _entropy_sub(m: "re.Match") -> str:
+        nonlocal count
+        token = m.group(1) or m.group(2) or ""
+        if _is_high_entropy_secret(token):
+            count += 1
+            return m.group(0).replace(token, "<REDACTED:high-entropy>")
+        return m.group(0)
+
+    out = _ENTROPY_CANDIDATE_RE.sub(_entropy_sub, out)
+    return out, count
+
+
 # ── Data types ────────────────────────────────────────────────────────────────
 
 class SecretFinding(NamedTuple):

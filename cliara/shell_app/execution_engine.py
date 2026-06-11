@@ -626,6 +626,14 @@ class ExecutionEngineMixin:
                 pass
 
             self._enqueue_semantic_add(command, str(Path.cwd()), self.last_exit_code)
+
+            # Output Time-Machine: persist a scrubbed digest of what this
+            # command printed (opt-in via output_archive_enabled; silent).
+            try:
+                self._archive_last_output(command)
+            except Exception:
+                pass
+
             self.show_shell_exit_in_prompt = True
 
             # IDE bridge: publish last-run block for IDE chat/context (silent, best-effort)

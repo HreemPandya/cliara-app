@@ -71,6 +71,7 @@ STREAMING_SAFE_AGENTS = frozenset(
         "cliara_qa",
         "history_answer",  # RAG prose synthesis — streams naturally like a chat response
         "codebase_qa",     # RAG over the codebase — prose answer with file:line citations
+        "code_review",     # pre-commit diff review — streams markdown findings
     }
 )
 
@@ -90,6 +91,7 @@ CLIARA_BUILTIN_COMMANDS = frozenset(
         "explain",
         "lint",
         "push",
+        "review",
         "session",
         "deploy",
         "macro",
@@ -101,6 +103,7 @@ CLIARA_BUILTIN_COMMANDS = frozenset(
         "index",
         "reindex",
         "ask",
+        "outputs",
         "cliara-login",
         "cliara-logout",
         "use",

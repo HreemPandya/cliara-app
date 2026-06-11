@@ -525,6 +525,36 @@ def _is_explain_last_rest(rest: str) -> bool:
     return rest.strip().lower() == "last"
 
 
+# Scope keywords accepted after a bare ``review`` so ``? review`` and
+# ``? review unstaged`` route to the code-review agent, while a real NL query
+# like ``? review the deploy script`` does NOT get hijacked.
+_REVIEW_SCOPE_WORDS = frozenset({
+    "", "staged", "--staged", "cached",
+    "unstaged", "--unstaged", "working", "wip",
+    "all", "--all", "everything",
+    "help", "-h", "--help",
+})
+
+
+def _parse_review_intent(query: str) -> Optional[str]:
+    """If *query* is the ``review`` command form, return its (normalized) args.
+
+    Returns the args string (possibly empty) when *query* is ``review`` followed
+    by nothing or a known scope keyword; otherwise returns None so the input is
+    treated as an ordinary natural-language query.
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+    parts = q.split(maxsplit=1)
+    if parts[0].lower() != "review":
+        return None
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    if rest.lower() in _REVIEW_SCOPE_WORDS:
+        return rest
+    return None
+
+
 def _nl_query_plain_history_arg(query: str) -> Optional[str]:
     """
     If *query* is the built-in ``history [N]`` form (after the NL prefix), return

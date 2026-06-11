@@ -70,6 +70,8 @@ from cliara.shell_app.input_routing import InputRoutingMixin
 from cliara.shell_app.execution_engine import ExecutionEngineMixin
 from cliara.shell_app.gate_flow import GateFlowMixin
 from cliara.shell_app.codebase_commands import CodebaseCommandMixin
+from cliara.shell_app.review_commands import ReviewCommandMixin
+from cliara.shell_app.output_archive_commands import OutputArchiveCommandMixin
 
 from cliara.shell_app.runtime import (
     CommandHistory,
@@ -83,6 +85,7 @@ from cliara.shell_app.runtime import (
     _is_explain_last_rest,
     _is_semantic_history_search_intent,
     _looks_like_fix,
+    _parse_review_intent,
     _looks_like_why,
     _nl_query_plain_history_arg,
     _print_safety_panel,
@@ -126,6 +129,8 @@ class CliaraShell(
     ExecutionEngineMixin,
     GateFlowMixin,
     CodebaseCommandMixin,
+    ReviewCommandMixin,
+    OutputArchiveCommandMixin,
 ):
     """Main Cliara shell - wraps user's real shell."""
     
@@ -1151,6 +1156,12 @@ class CliaraShell(
             self.handle_why()
             return
 
+        # "?"? "? review"  -  pre-commit code review of staged changes "?"?
+        _review_args = _parse_review_intent(query)
+        if _review_args is not None:
+            self.handle_code_review(_review_args)
+            return
+
         # "?"? "? explain last"  -  same as bare explain last
         q_low = query.strip().lower()
         if q_low.startswith("explain ") and _is_explain_last_rest(q_low[8:].strip()):
@@ -1748,11 +1759,20 @@ class CliaraShell(
             def _on_hist_token(piece: str) -> None:
                 streamed.append(piece)
 
+            # Output Time-Machine: when an archive exists for this project,
+            # let the RAG synthesis quote what the retrieved commands printed.
+            _output_lookup = None
+            try:
+                _output_lookup = self._build_output_archive_lookup()
+            except Exception:
+                _output_lookup = None
+
             answer, sources = self.nl_handler.search_history_rag(
                 entries, qstrip,
                 top_k=top_k,
                 min_score=min_score,
                 stream_callback=_hist_anim.wrap(on_token=_on_hist_token),
+                output_lookup=_output_lookup,
             )
             _hist_anim.stop()  # no-op if already stopped by first token
             if streamed:
@@ -3467,6 +3487,10 @@ class CliaraShell(
     def _print_exit_message(self):
         """Styled exit message: 2 lines, plus session resume hint if a session is active."""
         self._flush_semantic_history()
+        try:
+            self._close_output_archive_store()
+        except Exception:
+            pass
         console = _cliara_console()
         console.print()
         console.print("[dim]Session ended. See you next time.[/dim]")
@@ -3736,6 +3760,15 @@ class CliaraShell(
         print_help_cmd(f"{nl} what did I run ...", "e.g. what did I run to deploy last time")
         print_dim("  Requires LLM; uses stored summaries of your commands.\n")
 
+        print_info("  Output Archive (Time-Machine)")
+        print_dim("  " + "-" * 38)
+        print_help_cmd("outputs", "Status — what command output is archived here")
+        print_help_cmd("outputs search <what>", "Search archived stdout/stderr by meaning")
+        print_help_cmd("outputs on / off", "Enable or disable archiving (off by default)")
+        print_help_cmd("outputs clear", "Delete this project's archived output")
+        print_dim("  Opt-in: stores secret-scrubbed digests of command output locally.")
+        print_dim(f"  {nl} find / when-did-I answers quote archived output automatically.\n")
+
         print_info("  Codebase RAG")
         print_dim("  " + "-" * 38)
         print_help_cmd("index", "Index git-tracked files into a local vector store")
@@ -3771,6 +3804,14 @@ class CliaraShell(
         print_dim("  Press Tab on an empty prompt to fill in the fix, then Enter.")
         print_help_cmd(f"{nl} fix", "Full interactive diagnosis")
         print()
+
+        print_info("  Code Review")
+        print_dim("  " + "-" * 38)
+        print_help_cmd("review", "Review staged changes pre-commit (bugs, tests, APIs)")
+        print_help_cmd("review unstaged", "Review unstaged working-tree changes")
+        print_help_cmd("review all", "Review staged + unstaged together")
+        print_help_cmd(f"{nl} review", "Same as review")
+        print_dim("  Read-only: surfaces likely bugs + missing tests; commits nothing.\n")
 
         print_info("  Smart Push")
         print_dim("  " + "-" * 38)

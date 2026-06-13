@@ -28,6 +28,9 @@ class CodebaseCommandMixin:
     # Lazily-created store for the current repo (keyed by repo root).
     _codebase_store = None
     _codebase_store_root: Optional[str] = None
+    # Set by the Index Sentinel's worker thread after an auto-reindex so the
+    # next main-thread access drops the stale cached connection and reopens.
+    _codebase_store_dirty_root: Optional[str] = None
 
     # -- config helpers ----------------------------------------------------
 
@@ -58,6 +61,20 @@ class CodebaseCommandMixin:
             return None, None
 
         root_key = str(repo_root)
+
+        # The auto-index worker may have rewritten this repo's DB on another
+        # thread. If so, drop our cached (now-stale) connection here on the
+        # main thread, where closing it is safe.
+        if self._codebase_store_dirty_root == root_key:
+            self._codebase_store_dirty_root = None
+            if self._codebase_store is not None and self._codebase_store_root == root_key:
+                try:
+                    self._codebase_store.close()
+                except Exception:
+                    pass
+                self._codebase_store = None
+                self._codebase_store_root = None
+
         if (
             self._codebase_store is not None
             and self._codebase_store_root == root_key
@@ -101,9 +118,14 @@ class CodebaseCommandMixin:
     # -- index command -----------------------------------------------------
 
     def handle_codebase_index(self, args: str = "") -> None:
-        """``index [refresh|rebuild|status|clear]`` — manage the codebase index."""
+        """``index [refresh|rebuild|status|clear|auto]`` — manage the codebase index."""
         sub = (args or "").strip().lower()
 
+        # Self-maintenance control surface (handled by AutoIndexMixin).
+        if sub == "auto" or sub.startswith("auto "):
+            rest = (args or "").strip()[4:].strip()
+            self.handle_index_auto(rest)
+            return
         if sub in ("status", "info", "stats"):
             self._codebase_index_status()
             return
@@ -114,7 +136,7 @@ class CodebaseCommandMixin:
         force = sub in ("rebuild", "force", "full", "--force")
         if sub and sub not in ("refresh", "update", "build", "rebuild", "force", "full", "--force"):
             print_error(f"[Error] Unknown index subcommand: {sub}")
-            print_dim("Usage: index [refresh | rebuild | status | clear]")
+            print_dim("Usage: index [refresh | rebuild | status | clear | auto]")
             return
         self._codebase_index_build(force=force)
 
@@ -205,12 +227,18 @@ class CodebaseCommandMixin:
         from rich.text import Text
 
         accent = _ui_accent_style()
+        auto_on = False
+        try:
+            auto_on = self._auto_index_enabled()
+        except Exception:
+            auto_on = False
         lines = [
             f"Repo:       {stats.get('repo_root', '')}",
             f"Files:      {stats.get('files', 0)}",
             f"Chunks:     {stats.get('chunks', 0)}",
             f"Embeddings: {stats.get('embed_model', '')} (dim {stats.get('embed_dim', '?')})",
             f"Indexed:    {stats.get('indexed_at', '') or 'never'}",
+            f"Auto:       {'on — self-maintaining' if auto_on else 'off (index auto on)'}",
             f"Store:      {stats.get('db_path', '')}",
         ]
         _cliara_console().print(

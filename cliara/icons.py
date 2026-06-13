@@ -19,3 +19,12 @@ THINK = "⟳"     # processing / AI thinking (dim)
 CANCEL = "∅"    # cancelled (dim)
 GATE = "⚑"      # Copilot Gate intercept (yellow)
 
+# Ghost Run — parallel-universe shadow execution.
+# The emoji is astral-plane (U+1F47B) and crashes legacy cp1252 console
+# rendering, so fall back to ASCII when stdout isn't UTF-8.
+import sys as _sys
+
+_enc = (getattr(_sys.stdout, "encoding", "") or "").lower()
+GHOST = "👻" if ("utf" in _enc or "65001" in _enc) else "(ghost)"
+del _sys, _enc
+

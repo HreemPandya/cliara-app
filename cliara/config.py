@@ -198,6 +198,13 @@ class Config:
         "semantic_history_hybrid_keyword_pool": 24,
         # Intent (LLM) fallback: how many recent entries to include in the prompt
         "semantic_history_intent_max_entries": 200,
+        # Ghost Run (`ghost <cmd>` / 'g' at destructive-command gates)
+        # Forks the cwd into a hardlink sandbox, runs deletion commands there,
+        # and shows the real resulting diff before anything real changes.
+        "ghost_run_enabled": True,
+        "ghost_run_max_files": 50000,       # refuse to fork trees bigger than this
+        "ghost_run_max_copy_mb": 500,       # byte cap when hardlinks unavailable
+        "ghost_run_timeout_seconds": 120,   # sandbox execution timeout
         # Output Time-Machine (`outputs ...`)
         # Archives a secret-scrubbed head+tail digest of every command's
         # stdout/stderr into a per-project SQLite store so `outputs search`
@@ -217,6 +224,13 @@ class Config:
         "codebase_rag_chunk_lines": 40,       # lines per chunk
         "codebase_rag_chunk_overlap": 10,     # overlapping lines between chunks
         "codebase_rag_embed_batch": 64,       # embeddings requested per API call
+        # Index Sentinel — keeps the codebase index fresh automatically so the
+        # user never has to re-run `index`. Cheap fingerprint check after each
+        # command; incremental reindex happens off-thread, silently.
+        "codebase_auto_index": True,             # self-maintain an existing index
+        "codebase_auto_index_bootstrap": False,  # also build one from scratch (costs embeddings)
+        "codebase_auto_index_min_interval_s": 15,  # throttle reindex for ordinary edits
+        "codebase_auto_index_notify": False,     # print a dim one-liner after auto-updates
         # Pre-commit code review (`review` / `? review`)
         # Reviews the staged diff for likely bugs, missing tests, and
         # undocumented public APIs before you commit.

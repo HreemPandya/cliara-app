@@ -391,6 +391,12 @@ class CopilotGate:
         self._auto_approve_safe = auto_approve_safe
         self._auto_approve_caution = auto_approve_caution
         self._nl_handler = nl_handler
+        # Ghost Run hook (set by the shell after construction).
+        #   shadow_runner(command)  -> Optional[bool]: True approve, False
+        #                              cancel, None = couldn't ghost-run.
+        #   shadow_eligible(command) -> bool: cheap check to advertise 'g'.
+        self.shadow_runner = None
+        self.shadow_eligible = None
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -461,6 +467,34 @@ class CopilotGate:
             return False
         return resp in ("y", "yes")
 
+    # ── Ghost Run integration ──
+
+    def _ghost_advertised(self, command: str) -> bool:
+        """True when the gate should offer 'g' (ghost-run) for *command*."""
+        if self.shadow_runner is None:
+            return False
+        if self.shadow_eligible is None:
+            return True
+        try:
+            return bool(self.shadow_eligible(command))
+        except Exception:
+            return False
+
+    def _maybe_ghost(self, command: str, resp: str) -> Optional[bool]:
+        """If *resp* asked for a ghost-run, run it and return the decision.
+
+        Returns True/False (final decision) or None (resp wasn't 'g', or the
+        ghost couldn't run — caller continues its normal flow).
+        """
+        if resp.strip().lower() not in ("g", "ghost"):
+            return None
+        if self.shadow_runner is None:
+            return None
+        try:
+            return self.shadow_runner(command)
+        except Exception:
+            return None
+
     # ── Tier 3: DANGEROUS ──
 
     def _gate_dangerous(self, console, command: str,
@@ -480,11 +514,25 @@ class CopilotGate:
         if preview:
             console.print(f"[yellow]{preview}[/yellow]")
 
+        ghost_hint = ""
+        if self._ghost_advertised(command):
+            ghost_hint = " (or 'g' to ghost-run it in a sandbox first)"
         try:
-            resp = input("  Type 'RUN' to execute: ").strip()
+            resp = input(f"  Type 'RUN' to execute{ghost_hint}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return False
+
+        ghost_decision = self._maybe_ghost(command, resp)
+        if ghost_decision is not None:
+            return bool(ghost_decision)
+        if resp.strip().lower() in ("g", "ghost"):
+            # Ghost was requested but couldn't run — re-ask plainly.
+            try:
+                resp = input("  Type 'RUN' to execute: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
         return resp == "RUN"
 
     # ── Tier 4: CRITICAL ──
@@ -506,9 +554,22 @@ class CopilotGate:
         if preview:
             console.print(f"[yellow]{preview}[/yellow]")
 
+        if self._ghost_advertised(command):
+            console.print("  [dim]Tip: type 'g' to ghost-run it in a parallel sandbox first.[/dim]")
         try:
             resp = input("  Type 'I UNDERSTAND' to execute: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return False
+
+        ghost_decision = self._maybe_ghost(command, resp)
+        if ghost_decision is not None:
+            # Even after seeing the future, CRITICAL still demands the phrase.
+            if not ghost_decision:
+                return False
+            try:
+                resp = input("  Confirmed by the ghost. Type 'I UNDERSTAND' to execute: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
         return resp == "I UNDERSTAND"

@@ -104,6 +104,7 @@ CLIARA_BUILTIN_COMMANDS = frozenset(
         "reindex",
         "ask",
         "outputs",
+        "ghost",
         "cliara-login",
         "cliara-logout",
         "use",

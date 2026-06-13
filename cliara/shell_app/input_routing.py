@@ -360,6 +360,12 @@ class InputRoutingMixin:
             self.handle_output_archive(rest)
             return
 
+        # Ghost Run: execute a destructive command in a parallel sandbox first.
+        if _ulow == "ghost" or _ulow.startswith("ghost "):
+            rest = user_input.strip()[5:].strip() if len(user_input.strip()) > 5 else ""
+            self.handle_ghost(rest)
+            return
+
         _sess_expanded = self._expand_session_shortcut(user_input)
         if _sess_expanded is not None:
             self.handle_session(_sess_expanded)

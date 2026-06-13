@@ -634,6 +634,13 @@ class ExecutionEngineMixin:
             except Exception:
                 pass
 
+            # Index Sentinel: keep the codebase RAG index fresh automatically
+            # (cheap fingerprint check; reindex happens off-thread, silent).
+            try:
+                self._auto_index_tick(command)
+            except Exception:
+                pass
+
             self.show_shell_exit_in_prompt = True
 
             # IDE bridge: publish last-run block for IDE chat/context (silent, best-effort)

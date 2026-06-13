@@ -15,6 +15,10 @@ class GateFlowMixin:
         Show a diff preview for a destructive command and ask for
         confirmation.
 
+        When the command is Ghost-Run eligible, a third option is offered:
+        ``g`` forks the cwd into a parallel sandbox, runs the command there,
+        and shows the *actual* resulting diff before anything real changes.
+
         Returns *True* if the user wants to proceed, *False* to cancel.
         """
         preview = self.diff_preview.generate_preview(command)
@@ -27,11 +31,35 @@ class GateFlowMixin:
         print()
         print_warning(preview)
 
+        ghost_ok = False
         try:
-            response = input("\n  Proceed? (y/n): ").strip().lower()
+            ghost_ok = bool(self._ghost_eligible(command))
+        except Exception:
+            ghost_ok = False
+
+        prompt = (
+            "\n  Proceed? (y/n, or g = ghost-run it in a parallel sandbox first): "
+            if ghost_ok
+            else "\n  Proceed? (y/n): "
+        )
+        try:
+            response = input(prompt).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return False
+
+        if ghost_ok and response in ("g", "ghost"):
+            decision = self._ghost_gate_offer(command)
+            if decision is not None:
+                if not decision:
+                    print_warning("  [Cancelled]")
+                return bool(decision)
+            # Ghost couldn't run — fall back to the plain question.
+            try:
+                response = input("\n  Proceed? (y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
 
         if response in ("y", "yes"):
             return True

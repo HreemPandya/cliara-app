@@ -72,6 +72,8 @@ from cliara.shell_app.gate_flow import GateFlowMixin
 from cliara.shell_app.codebase_commands import CodebaseCommandMixin
 from cliara.shell_app.review_commands import ReviewCommandMixin
 from cliara.shell_app.output_archive_commands import OutputArchiveCommandMixin
+from cliara.shell_app.ghost_commands import GhostRunCommandMixin
+from cliara.shell_app.auto_index import AutoIndexMixin
 
 from cliara.shell_app.runtime import (
     CommandHistory,
@@ -129,8 +131,10 @@ class CliaraShell(
     ExecutionEngineMixin,
     GateFlowMixin,
     CodebaseCommandMixin,
+    AutoIndexMixin,
     ReviewCommandMixin,
     OutputArchiveCommandMixin,
+    GhostRunCommandMixin,
 ):
     """Main Cliara shell - wraps user's real shell."""
     
@@ -182,6 +186,10 @@ class CliaraShell(
             auto_approve_safe=self.config.get("copilot_gate_auto_approve_safe", True),
             auto_approve_caution=self.config.get("copilot_gate_auto_approve_caution", False),
         )
+        # Ghost Run: let DANGEROUS/CRITICAL gates offer a parallel-universe
+        # dry run ('g') for eligible deletion commands.
+        self._copilot_gate.shadow_runner = self._ghost_gate_offer
+        self._copilot_gate.shadow_eligible = self._ghost_eligible
 
         progress.step("Loading history...")
         history_file = self.config.config_dir / "history.txt"
@@ -3488,6 +3496,10 @@ class CliaraShell(
         """Styled exit message: 2 lines, plus session resume hint if a session is active."""
         self._flush_semantic_history()
         try:
+            self._shutdown_auto_index()
+        except Exception:
+            pass
+        try:
             self._close_output_archive_store()
         except Exception:
             pass
@@ -3760,6 +3772,18 @@ class CliaraShell(
         print_help_cmd(f"{nl} what did I run ...", "e.g. what did I run to deploy last time")
         print_dim("  Requires LLM; uses stored summaries of your commands.\n")
 
+        print_info("  Ghost Run (parallel-universe dry run)")
+        print_dim("  " + "-" * 38)
+        print_help_cmd("ghost <command>", "Run it in a forked sandbox; see the real diff first")
+        print_dim("  Forks the cwd (hardlinks), runs the command THERE, shows exactly")
+        print_dim("  what would be deleted/modified — then one Enter makes it real.")
+        print_dim("  Also offered as 'g' at destructive-command confirmations.")
+        print()
+        print_help_example("ghost rm -rf dist")
+        print_help_example("ghost git clean -fdx")
+        print_dim("  Deletion grammar only (rm/del/erase/rd, git clean); refuses pipes,")
+        print_dim("  network commands, and absolute paths — honestly, with reasons.\n")
+
         print_info("  Output Archive (Time-Machine)")
         print_dim("  " + "-" * 38)
         print_help_cmd("outputs", "Status — what command output is archived here")
@@ -3775,12 +3799,14 @@ class CliaraShell(
         print_help_cmd("index rebuild", "Full re-index (e.g. after switching models)")
         print_help_cmd("index status", "Show files/chunks indexed and embedding model")
         print_help_cmd("index clear", "Delete the index for this repo")
+        print_help_cmd("index auto [on|off]", "Self-maintenance: keep the index fresh automatically")
         print_help_cmd("ask <question>", "Answer from the code, with file:line citations")
         print_help_cmd(f"{nl} how does <X> work", "Same, when an index exists")
         print()
         print_help_example("index")
         print_help_example("? how does auth work")
-        print_dim("  Incremental: re-running `index` only re-embeds changed files.\n")
+        print_dim("  Incremental: re-running `index` only re-embeds changed files.")
+        print_dim("  Index Sentinel keeps an existing index fresh on its own — no manual rebuilds.\n")
 
         print_info("  Macros")
         print_dim("  " + "-" * 38)

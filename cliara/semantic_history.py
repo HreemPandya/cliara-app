@@ -32,12 +32,24 @@ class SemanticHistoryStore:
         self,
         store_path: Optional[Path] = None,
         max_entries: int = 500,
+        redactor: Optional[Callable[[str], str]] = None,
     ):
         self._path = store_path or (Path.home() / ".cliara" / "semantic_history.json")
         self._max_entries = max(1, max_entries)
         self._entries: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
+        # Scrubs secrets from command/summary text. Applied at the normalize
+        # boundary so it covers both new adds AND entries loaded from an older
+        # (possibly unredacted) file. Identity by default so tests/callers that
+        # don't pass one keep verbatim behaviour. Must be set before _load().
+        self._redact: Callable[[str], str] = redactor if redactor is not None else (lambda s: s)
         self._load()
+
+    def _redact_text(self, s: str) -> str:
+        try:
+            return self._redact(s or "")
+        except Exception:
+            return s or ""
 
     def _load(self) -> None:
         """Load from disk. Treat missing or malformed file as empty."""
@@ -65,8 +77,8 @@ class SemanticHistoryStore:
 
     def _normalize_entry(self, e: Dict[str, Any]) -> Dict[str, Any]:
         out = {
-            "command": str(e.get("command", "")),
-            "summary": str(e.get("summary", "")),
+            "command": self._redact_text(str(e.get("command", ""))),
+            "summary": self._redact_text(str(e.get("summary", ""))),
             "timestamp": str(e.get("timestamp", _now_iso())),
         }
         if "cwd" in e and e["cwd"] is not None:
@@ -132,6 +144,8 @@ class SemanticHistoryStore:
             "session_name": session_name,
         }
         entry = self._normalize_entry(entry)
+        # Match dedupe against the redacted command, since that's what's stored.
+        command = entry["command"]
 
         with self._lock:
             if dedupe and self._entries:
@@ -184,6 +198,8 @@ class SemanticHistoryStore:
         """
         if not summary:
             return False
+        # Stored commands are redacted; redact the lookup key so it still matches.
+        command = self._redact_text(command)
         with self._lock:
             for i in range(len(self._entries) - 1, -1, -1):
                 e = self._entries[i]

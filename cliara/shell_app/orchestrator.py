@@ -196,6 +196,7 @@ class CliaraShell(
         self.history = CommandHistory(
             max_size=self.config.get("history_size", 1000),
             history_file=history_file,
+            redactor=self._redact_for_history,
         )
 
         # Jump store  -  zoxide-style directory learning
@@ -282,6 +283,7 @@ class CliaraShell(
             self._semantic_history = SemanticHistoryStore(
                 store_path=store_path,
                 max_entries=max_entries,
+                redactor=self._redact_for_history,
             )
             if self.config.get("semantic_history_summary_on_add", True):
                 self._semantic_history_queue = queue.Queue(maxsize=200)
@@ -420,6 +422,29 @@ class CliaraShell(
             except Exception:
                 pass
 
+    def _redact_for_history(self, text: str) -> str:
+        """Scrub likely secrets from command/summary text before it is persisted
+        or sent to the cloud.
+
+        Redaction is global: the same scrubber that protects command *output*
+        (Output Time-Machine) also protects the command *text* stored in
+        history.txt / semantic_history.json and sent to the cloud for
+        summarisation. Gated by ``redact_command_history`` (default on). Never
+        raises — on any failure it returns the text unchanged so history still
+        records, just unredacted.
+        """
+        if not text:
+            return text
+        try:
+            if not self.config.get("redact_command_history", True):
+                return text
+            from cliara.secret_scan import scrub_secrets
+
+            scrubbed, _ = scrub_secrets(text)
+            return scrubbed
+        except Exception:
+            return text
+
     # ------------------------------------------------------------------
     # Git context helper (cached, used by semantic history enrichment)
     # ------------------------------------------------------------------
@@ -521,6 +546,13 @@ class CliaraShell(
             summary_override = self._last_explained_summary or ""
             self._last_explained_command = None
             self._last_explained_summary = None
+        # Scrub secrets BEFORE the command is stored, queued, summarised by the
+        # cloud LLM, or embedded. The store redacts on write too (defence in
+        # depth), but the background worker hands `command` to the cloud before
+        # it reaches the store, so it must already be clean here.
+        command = self._redact_for_history(command)
+        if summary_override:
+            summary_override = self._redact_for_history(summary_override)
         will_enqueue = (
             self._semantic_history_queue is not None
             and self.config.get("semantic_history_summary_on_add", True)
@@ -3687,11 +3719,14 @@ class CliaraShell(
         self._last_explained_summary = one_line if one_line else None
         if self._semantic_history and one_line:
             embedding = None
+            # Scrub the command before it's embedded (cloud call). The store
+            # redacts the stored command + summary internally.
+            safe_command = self._redact_for_history(command.strip())
             if self.config.get("semantic_history_use_embeddings", False):
-                emb_text = f"{command.strip()} {one_line}".strip()
+                emb_text = f"{safe_command} {one_line}".strip()
                 embedding = self.nl_handler.get_embedding(emb_text)
             self._semantic_history.update_summary_for_command(
-                command.strip(),
+                safe_command,
                 one_line,
                 str(Path.cwd()),
                 embedding=embedding,

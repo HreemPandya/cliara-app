@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from cliara import icons
 from cliara.file_lock import with_file_lock
@@ -933,10 +933,20 @@ class CommandHistory:
     # Type for (exit_code, timestamp) per entry; None means unknown (e.g. before meta was added)
     _Meta = Tuple[Optional[int], Optional[float]]
 
-    def __init__(self, max_size: int = 1000, history_file: Optional[Path] = None):
+    def __init__(
+        self,
+        max_size: int = 1000,
+        history_file: Optional[Path] = None,
+        redactor: Optional[Callable[[str], str]] = None,
+    ):
         self.history: List[str] = []
         self.exit_meta: List["CommandHistory._Meta"] = []  # (exit_code, timestamp) per entry
         self.max_size = max_size
+        # Scrubs secrets from a command before it is stored (memory + disk +
+        # readline). Identity by default. The live command the user typed is
+        # unaffected — prompt_toolkit captures it independently — so in-session
+        # arrow-up recall still works; only the persisted copy is redacted.
+        self._redact: Callable[[str], str] = redactor if redactor is not None else (lambda s: s)
         self.last_commands: List[str] = []  # Commands from last execution
         self.history_file: Optional[Path] = history_file
         self._meta_file: Optional[Path] = (
@@ -1074,7 +1084,15 @@ class CommandHistory:
     # Public API (unchanged signatures)
     # ------------------------------------------------------------------
     def add(self, command: str):
-        """Add command to history (memory + disk + readline)."""
+        """Add command to history (memory + disk + readline).
+
+        The command is scrubbed of likely secrets before it touches memory,
+        disk, or readline, so nothing sensitive is persisted.
+        """
+        try:
+            command = self._redact(command)
+        except Exception:
+            pass
         self.history.append(command)
         self.exit_meta.append((None, None))
         if len(self.history) > self.max_size:

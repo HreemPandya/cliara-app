@@ -181,6 +181,11 @@ class Config:
         "llm_wizard_dismissed": False,  # True after user deliberately skips the setup wizard
         "regression_snapshots": True,  # Capture success snapshots; on failure compare and suggest ? why
         "stream_llm": True,  # Stream LLM responses token-by-token when enabled
+        # Scrub likely secrets (API keys, tokens, inline passwords) from command
+        # text before it is persisted to history.txt / semantic_history.json or
+        # sent to the cloud for summarisation. Redaction is global, not just for
+        # command output. Disable only if you fully trust local + cloud storage.
+        "redact_command_history": True,
         # Semantic history search (? find / ? when did I ...)
         "semantic_history_enabled": True,
         "semantic_history_max_entries": 500,

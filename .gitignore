@@ -60,6 +60,7 @@ data/macros.json
 
 # Documentation
 docs/
+docs/CLIARA_COMPLETENESS_GAPS.md
 
 # Old documentation (archived)
 ARCHITECTURE.md

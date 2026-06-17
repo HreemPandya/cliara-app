@@ -155,6 +155,14 @@ class Config:
         # Bypass a specific line: add  # cliara-noscan  as an inline comment.
         # Disable entirely:       config set secret_scan_on_push false
         "secret_scan_on_push": True,
+        # Smart-push workflow ergonomics (built-in `push`)
+        # Prompt to stage all / select files / patch hunks instead of always `git add -A`.
+        "push_selective_staging": True,
+        # Warn (and require explicit confirmation) before committing directly to a
+        # protected branch such as main/master/develop.
+        "push_protected_branch_guard": True,
+        # After a successful push of a feature branch, offer to open a GitHub PR.
+        "push_offer_pr": True,
         # Per-task model overrides — None means fall back to llm_model then provider default
         # Examples: "gpt-4o" for fix/nl, "gpt-4o-mini" for explain/history, "gemma4" for ollama
         "model_nl": None,       # ? natural-language → commands

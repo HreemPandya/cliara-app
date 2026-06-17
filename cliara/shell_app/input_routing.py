@@ -317,8 +317,9 @@ class InputRoutingMixin:
             self._handle_lint(cmd)
             return
 
-        if user_input.lower() == "push":
-            self.handle_push()
+        if _ulow == "push" or _ulow.startswith("push "):
+            rest = user_input.strip()[5:].strip() if len(user_input.strip()) > 5 else ""
+            self.handle_push(rest)
             return
 
         if _ulow == "review" or _ulow.startswith("review "):

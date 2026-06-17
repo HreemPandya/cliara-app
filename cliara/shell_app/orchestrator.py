@@ -2944,149 +2944,269 @@ class CliaraShell(
     # ------------------------------------------------------------------
     # Smart Push  -  auto-commit-message + branch detection
     # ------------------------------------------------------------------
-    def handle_push(self):
+    def handle_push(self, args: str = ""):
         """
-        Built-in smart push: detect branch, stage changes, generate a
-        conventional commit message via LLM, commit, and push.
+        Built-in smart push: detect branch, (selectively) stage changes,
+        generate a conventional commit message via LLM, commit (with pre-commit
+        hook recovery), push (setting upstream on first push), and optionally
+        open a pull request.
+
+        Flags (space-separated, after ``push``):
+          amend / --amend   Amend the last commit instead of creating a new one.
+          --no-pr           Skip the "open a PR?" prompt after pushing.
+          --no-verify       Commit without running pre-commit hooks.
         """
-        # "?"? 1. Are we in a git repo? "?"?
-        result = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        if result.returncode != 0:
+        flags = self._parse_push_flags(args)
+
+        # --- 1. Are we in a git repo? ---
+        if _git_run(["git", "rev-parse", "--is-inside-work-tree"]).returncode != 0:
             print_error("[Cliara] Not inside a git repository.")
             return
 
-        # "?"? 2. Current branch "?"?
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        branch = (result.stdout or "").strip()
+        # --- 2. Current branch ---
+        branch = (_git_run(["git", "branch", "--show-current"]).stdout or "").strip()
         if not branch:
             print_error("[Cliara] Detached HEAD state  -  checkout a branch first.")
             return
 
-        # "?"? 3. Anything to commit? "?"?
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        status_output = (result.stdout or "").strip()
-
-        if not status_output:
-            # Nothing to commit  -  maybe there are unpushed commits?
-            result = subprocess.run(
-                ["git", "log", f"origin/{branch}..HEAD", "--oneline"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-            )
-            unpushed = (result.stdout or "").strip()
-            if unpushed:
-                count = len(unpushed.splitlines())
-                print_info(
-                    f"\n[Cliara] {count} unpushed commit(s) on '{branch}':\n"
-                )
-                print(unpushed)
-                try:
-                    confirm = input(
-                        f"\nPush to '{branch}'? (y/n): "
-                    ).strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    return
-                if confirm in ("y", "yes"):
-                    print()
-                    self.execute_shell_command(f"git push origin {branch}")
-                else:
-                    print_warning("[Cancelled]")
-            else:
-                print_info(
-                    f"[Cliara] Everything up to date on '{branch}'. "
-                    "Nothing to commit or push."
-                )
+        # --- 2b. Protected-branch guard (commit straight to main/master/...) ---
+        if not self._push_protected_guard(branch):
+            print_warning("[Cancelled]")
             return
 
-        # "?"? 4. Show what changed "?"?
+        # --- Amend takes a dedicated path ("one more tweak") ---
+        if flags["amend"]:
+            self._handle_push_amend(branch, flags)
+            return
+
+        # --- 3. Anything to commit? ---
+        status_output = (_git_run(["git", "status", "--porcelain"]).stdout or "").strip()
+        if not status_output:
+            self._push_existing_commits(branch, flags)
+            return
+
+        # --- 4. Show what changed ---
         print_info(f"\n[Cliara] Changes detected on '{branch}':\n")
-        # Coloured status from git
         subprocess.run(["git", "-c", "color.status=always", "status", "--short"])
 
-        # "?"? 5. Stage everything "?"?
-        print_dim("\nStaging all changes...")
-        subprocess.run(
-            ["git", "add", "-A"],
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        # --- 5. Stage (all / select files / patch hunks) ---
+        if not self._stage_for_push():
+            print_warning("[Cancelled] Nothing staged.")
+            self._unstage_all()
+            return
 
-        # "?"? 5b. Secret scan on staged files "?"?
+        # --- 5b. Secret scan on staged files ---
         if self.config.get("secret_scan_on_push", True):
-            scan_ok = self._run_secret_scan()
-            if not scan_ok:
+            if not self._run_secret_scan():
                 self._unstage_all()
                 return
 
-        # "?"? 6. Gather diff for message generation "?"?
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--stat"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        # --- 6. Gather diff for message generation ---
+        diff_stat, diff_content, files = self._staged_diff_bundle()
+        if not files:
+            print_warning("[Cancelled] Nothing staged.")
+            self._unstage_all()
+            return
+
+        # --- 7. Generate commit message ---
+        commit_msg = self._generate_commit_message(diff_stat, diff_content, files, branch)
+        if not commit_msg:
+            print_error(
+                "[Cliara] Could not generate commit message. "
+                "Try again or use: git commit -m \"your message\""
+            )
+            self._unstage_all()
+            return
+
+        # --- 8. Show message and confirm ---
+        commit_msg = self._confirm_commit_message(commit_msg, branch, len(files))
+        if commit_msg is None:
+            self._unstage_all()
+            return
+
+        # --- 9. Commit (with pre-commit hook recovery) ---
+        print()
+        if not self._commit_with_hook_recovery(commit_msg, no_verify=flags["no_verify"]):
+            print_error("[Cliara] Commit aborted.")
+            return
+
+        # --- 10. Push (set upstream on first push) ---
+        if not self._push_current_branch(branch):
+            return
+        print_success(f"\n[Cliara] Successfully pushed to '{branch}'!")
+
+        # --- 11. Offer to open a PR (connects in-shell push to `cliara gh pr`) ---
+        if not flags["no_pr"]:
+            self._offer_pull_request(branch)
+
+    # ------------------------------------------------------------------
+    # Smart-push helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_push_flags(args: str) -> Dict[str, bool]:
+        """Parse the optional flags that follow ``push``."""
+        toks = (args or "").lower().split()
+        return {
+            "amend": any(t in ("amend", "--amend") for t in toks),
+            "no_pr": "--no-pr" in toks,
+            "no_verify": "--no-verify" in toks,
+        }
+
+    def _push_protected_guard(self, branch: str) -> bool:
+        """Warn before committing directly to a protected branch.
+
+        Returns True to proceed, False to abort. The prompt defaults to *No*.
+        """
+        if not self.config.get("push_protected_branch_guard", True):
+            return True
+        if not self._git_branch_is_protected(branch):
+            return True
+        if not sys.stdin.isatty():
+            # Non-interactive: don't silently push to a shared branch.
+            print_warning(
+                f"[Cliara] '{branch}' is a protected branch and this is non-interactive; "
+                "refusing to push directly. Use a feature branch."
+            )
+            return False
+        print_warning(
+            f"\n[Cliara] '{branch}' is a protected branch — this writes directly to a shared line."
         )
-        diff_stat = (result.stdout or "").strip()
+        print_dim("  Consider a feature branch instead:  git checkout -b my-change")
+        try:
+            resp = input(f"  Continue pushing directly to '{branch}'? (y/N): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        return resp in ("y", "yes")
 
-        result = subprocess.run(
-            ["git", "diff", "--cached"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        diff_content = (result.stdout or "").strip()
+    def _stage_for_push(self) -> bool:
+        """Stage changes for the commit. Returns True if something is staged.
 
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        files = [f for f in (result.stdout or "").strip().splitlines() if f]
+        Offers all / select-files / patch-hunks when ``push_selective_staging``
+        is on and we're interactive; otherwise falls back to ``git add -A``.
+        """
+        interactive = sys.stdin.isatty() and self.config.get("push_selective_staging", True)
+        if not interactive:
+            subprocess.run(["git", "add", "-A"], capture_output=True, encoding="utf-8", errors="replace")
+            return self._has_staged_changes()
 
-        # "?"? 7. Generate commit message with animated spinner "?"?
-        # Don't stream to stdout — the message will be displayed formatted in a
-        # confirmation panel below. Showing the same text twice (raw stream +
-        # panel) looks redundant for a one-line output.
-        _commit_anim = StreamingThinkingAnimation().start()
+        try:
+            choice = input(
+                "\nStage changes — (a)ll / (s)elect files / (p)atch hunks / (c)ancel [a]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
 
+        if choice in ("", "a", "all"):
+            subprocess.run(["git", "add", "-A"], capture_output=True, encoding="utf-8", errors="replace")
+        elif choice in ("s", "select"):
+            self._stage_select_files()
+        elif choice in ("p", "patch"):
+            # Hand off to git's own interactive hunk picker (needs a real TTY).
+            subprocess.run(["git", "add", "-p"])
+        else:
+            return False
+        return self._has_staged_changes()
+
+    def _stage_select_files(self) -> None:
+        """List changed files and stage the ones the user picks by number."""
+        r = _git_run(["git", "-c", "core.quotepath=false", "status", "--porcelain"])
+        entries: List[str] = []
+        for line in (r.stdout or "").splitlines():
+            if not line.strip():
+                continue
+            path = line[3:].strip()
+            if " -> " in path:  # rename: "old -> new"
+                path = path.split(" -> ", 1)[1].strip()
+            entries.append(path)
+        if not entries:
+            print_dim("  Nothing to stage.")
+            return
+        for i, p in enumerate(entries, 1):
+            print(f"  {i}. {p}")
+        print_dim("  Enter numbers to stage (e.g. 1 3 4), 'a' for all, or blank to cancel:")
+        try:
+            sel = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not sel:
+            return
+        if sel in ("a", "all"):
+            subprocess.run(["git", "add", "-A"], capture_output=True, encoding="utf-8", errors="replace")
+            return
+        chosen: List[str] = []
+        for tok in sel.replace(",", " ").split():
+            if tok.isdigit():
+                idx = int(tok)
+                if 1 <= idx <= len(entries):
+                    chosen.append(entries[idx - 1])
+        if chosen:
+            subprocess.run(
+                ["git", "add", "--", *chosen],
+                capture_output=True, encoding="utf-8", errors="replace",
+            )
+        else:
+            print_dim("  No valid selection; nothing staged.")
+
+    @staticmethod
+    def _has_staged_changes() -> bool:
+        """True when the index has changes staged for commit."""
+        return subprocess.run(
+            ["git", "diff", "--cached", "--quiet"]
+        ).returncode != 0
+
+    @staticmethod
+    def _staged_diff_bundle() -> Tuple[str, str, List[str]]:
+        """Return (diff --stat, full diff, changed files) for the staged index."""
+        diff_stat = (_git_run(["git", "diff", "--cached", "--stat"]).stdout or "").strip()
+        diff_content = (_git_run(["git", "diff", "--cached"]).stdout or "").strip()
+        files = [
+            f for f in (_git_run(["git", "diff", "--cached", "--name-only"]).stdout or "").strip().splitlines()
+            if f
+        ]
+        return diff_stat, diff_content, files
+
+    def _generate_commit_message(
+        self, diff_stat: str, diff_content: str, files: List[str], branch: str
+    ) -> Optional[str]:
+        """Generate a commit message via the LLM. Returns None on empty output."""
+        # Don't stream to stdout — the message is shown in a confirmation panel
+        # below, and printing it twice looks redundant.
+        anim = StreamingThinkingAnimation().start()
         context = {
             "cwd": str(Path.cwd()),
             "os": platform.system(),
             "shell": self.shell_path or os.environ.get("SHELL", "bash"),
             "branch": branch,
         }
-        commit_msg = self.nl_handler.generate_commit_message(
-            diff_stat, diff_content, files, context,
-            stream_callback=_commit_anim.wrap(print_to_stdout=False),
-        )
-        _commit_anim.stop()
-        if not commit_msg or not commit_msg.strip():
-            print_error("[Cliara] Could not generate commit message. Try again or use: git commit -m \"your message\"")
-            self._unstage_all()
-            return
+        try:
+            commit_msg = self.nl_handler.generate_commit_message(
+                diff_stat, diff_content, files, context,
+                stream_callback=anim.wrap(print_to_stdout=False),
+            )
+        finally:
+            anim.stop()
+        return (commit_msg or "").strip() or None
 
-        # "?"? 8. Show message and confirm "?"?
-        # Always print the commit message so it's visible even when streaming
-        # output was buffered or didn't display (e.g. rapid successive runs)
+    def _confirm_commit_message(
+        self, commit_msg: str, branch: str, n_files: int
+    ) -> Optional[str]:
+        """Show the message and let the user accept/edit/reject.
+
+        Returns the (possibly edited) message, or None if cancelled.
+        """
         print_info("[Cliara] Commit message:")
         print(f"\n  {commit_msg}\n")
         print_dim(f"  Branch: {branch}")
-        print_dim(f"  Files:  {len(files)} changed")
+        print_dim(f"  Files:  {n_files} changed")
         print()
-
         try:
-            response = input(
-                "Accept? (y)es / (e)dit / (n)o: "
-            ).strip().lower()
+            response = input("Accept? (y)es / (e)dit / (n)o: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
-            self._unstage_all()
-            return
-
+            return None
         if response in ("e", "edit"):
             try:
                 from prompt_toolkit import prompt as pt_prompt
@@ -3095,39 +3215,355 @@ class CliaraShell(
                 custom = input("Edit commit message: ").strip() or commit_msg
             if not custom:
                 print_warning("[Cancelled]")
-                self._unstage_all()
-                return
-            commit_msg = custom
-        elif response not in ("y", "yes"):
+                return None
+            return custom
+        if response not in ("y", "yes"):
             print_warning("[Cancelled]")
-            self._unstage_all()
-            return
+            return None
+        return commit_msg
 
-        # "?"? 9. Commit (use subprocess list form to safely handle quotes) "?"?
-        print()
-        proc = subprocess.run(
-            ["git", "commit", "-m", commit_msg],
-        )
-        if proc.returncode != 0:
-            print_error("[Cliara] Commit failed.")
-            return
+    def _commit_with_hook_recovery(
+        self,
+        commit_msg: Optional[str],
+        *,
+        amend: bool = False,
+        no_verify: bool = False,
+        no_edit: bool = False,
+    ) -> bool:
+        """Run ``git commit`` with guided recovery when a pre-commit hook fails.
 
-        # "?"? 10. Push "?"?
-        # Check if the remote branch already exists
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", "origin", branch],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        Returns True on a successful commit.
+        """
+        cmd = ["git", "commit"]
+        if amend:
+            cmd.append("--amend")
+        if no_edit:
+            cmd.append("--no-edit")
+        elif commit_msg is not None:
+            cmd += ["-m", commit_msg]
+        if no_verify:
+            cmd.append("--no-verify")
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="")
+        if proc.returncode == 0:
+            return True
+
+        if no_verify:
+            # Already bypassing hooks and still failing → a real error, not a hook.
+            print_error("[Cliara] git commit failed.")
+            return False
+        if not sys.stdin.isatty():
+            print_error("[Cliara] Commit blocked (pre-commit hook or empty commit).")
+            return False
+
+        print_warning("\n[Cliara] Commit was blocked — a pre-commit hook likely failed.")
+        print_dim(
+            "  Many hooks (formatters, import sorters) auto-fix files in place; "
+            "re-staging and retrying often passes."
         )
-        if (result.stdout or "").strip():
-            success = self.execute_shell_command(f"git push origin {branch}")
-        else:
-            print_dim(f"Branch '{branch}' is new on remote  -  setting up tracking...")
-            success = self.execute_shell_command(
-                f"git push -u origin {branch}"
+        try:
+            resp = input(
+                "  (r)e-stage hook edits & retry / (s)kip hooks / (a)bort [a]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if resp in ("r", "retry"):
+            subprocess.run(["git", "add", "-A"], capture_output=True)
+            return self._commit_with_hook_recovery(
+                commit_msg, amend=amend, no_verify=False, no_edit=no_edit
             )
+        if resp in ("s", "skip"):
+            print_warning("  Skipping hooks (git commit --no-verify)...")
+            return self._commit_with_hook_recovery(
+                commit_msg, amend=amend, no_verify=True, no_edit=no_edit
+            )
+        return False
 
-        if success:
+    def _push_current_branch(self, branch: str, *, amended: bool = False) -> bool:
+        """Push ``branch`` to origin, setting upstream on first push.
+
+        When ``amended`` is set (history was rewritten), uses
+        ``--force-with-lease`` so we never clobber concurrent remote work.
+        """
+        remote_exists = bool(
+            (_git_run(["git", "ls-remote", "--heads", "origin", branch]).stdout or "").strip()
+        )
+        if not remote_exists:
+            print_dim(f"Branch '{branch}' is new on remote  -  setting up tracking...")
+            return self.execute_shell_command(f"git push -u origin {branch}")
+        if amended:
+            print_dim("Amended commit rewrites history  -  pushing with --force-with-lease...")
+            return self.execute_shell_command(f"git push --force-with-lease origin {branch}")
+        return self.execute_shell_command(f"git push origin {branch}")
+
+    def _push_existing_commits(self, branch: str, flags: Dict[str, bool]) -> None:
+        """Clean tree path: push any unpushed commits, then offer a PR."""
+        remote_branch_exists = _git_ok(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"]
+        )
+        if remote_branch_exists:
+            unpushed = (
+                _git_run(["git", "log", f"origin/{branch}..HEAD", "--oneline"]).stdout or ""
+            ).strip()
+            if not unpushed:
+                print_info(
+                    f"[Cliara] Everything up to date on '{branch}'. "
+                    "Nothing to commit or push."
+                )
+                return
+            count = len(unpushed.splitlines())
+            print_info(f"\n[Cliara] {count} unpushed commit(s) on '{branch}':\n")
+            print(unpushed)
+        else:
+            recent = (_git_run(["git", "log", "HEAD", "--oneline", "-n", "10"]).stdout or "").strip()
+            if not recent:
+                print_info(f"[Cliara] No commits on '{branch}' yet.")
+                return
+            print_info(f"\n[Cliara] '{branch}' has no remote branch yet. Recent commits:\n")
+            print(recent)
+
+        try:
+            confirm = input(f"\nPush to '{branch}'? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if confirm not in ("y", "yes"):
+            print_warning("[Cancelled]")
+            return
+        print()
+        if self._push_current_branch(branch):
             print_success(f"\n[Cliara] Successfully pushed to '{branch}'!")
+            if not flags["no_pr"]:
+                self._offer_pull_request(branch)
+
+    def _handle_push_amend(self, branch: str, flags: Dict[str, bool]) -> None:
+        """``push amend``: fold staged changes and/or reword the last commit."""
+        if not _git_ok(["git", "rev-parse", "--verify", "--quiet", "HEAD"]):
+            print_error("[Cliara] No commit to amend yet. Make a commit first.")
+            return
+        last = (_git_run(["git", "log", "-1", "--pretty=format:%h %s"]).stdout or "").strip()
+        print_info(f"\n[Cliara] Amending last commit on '{branch}':")
+        print(f"\n  {last}\n")
+
+        # Optionally fold uncommitted changes into the amend.
+        status_output = (_git_run(["git", "status", "--porcelain"]).stdout or "").strip()
+        if status_output:
+            print_info("[Cliara] Uncommitted changes that can be folded into the amend:\n")
+            subprocess.run(["git", "-c", "color.status=always", "status", "--short"])
+            if self._stage_for_push():
+                if self.config.get("secret_scan_on_push", True):
+                    if not self._run_secret_scan():
+                        self._unstage_all()
+                        return
+            else:
+                print_dim("  No new changes staged; amending message only.")
+        else:
+            print_dim("  No new changes; you can reword the commit message.")
+
+        current_msg = (_git_run(["git", "log", "-1", "--pretty=format:%B"]).stdout or "").strip()
+        commit_msg = self._amend_message(current_msg, branch)
+        if commit_msg is None:
+            print_warning("[Cancelled]")
+            return
+
+        print()
+        if commit_msg == current_msg:
+            ok = self._commit_with_hook_recovery(
+                None, amend=True, no_verify=flags["no_verify"], no_edit=True
+            )
+        else:
+            ok = self._commit_with_hook_recovery(
+                commit_msg, amend=True, no_verify=flags["no_verify"]
+            )
+        if not ok:
+            print_error("[Cliara] Amend aborted.")
+            return
+
+        if not self._push_current_branch(branch, amended=True):
+            return
+        print_success(f"\n[Cliara] Amended and pushed to '{branch}'!")
+        if not flags["no_pr"]:
+            self._offer_pull_request(branch)
+
+    def _amend_message(self, current_msg: str, branch: str) -> Optional[str]:
+        """Keep / edit / regenerate the commit message for an amend."""
+        first_line = current_msg.splitlines()[0] if current_msg else "(empty)"
+        print_info("[Cliara] Current commit message:")
+        print(f"\n  {first_line}\n")
+        try:
+            resp = input("Message — (k)eep / (e)dit / (r)egenerate [k]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if resp in ("", "k", "keep"):
+            return current_msg
+        if resp in ("r", "regenerate"):
+            diff_stat, diff_content, files = self._staged_diff_bundle()
+            if not files and _git_ok(["git", "rev-parse", "--verify", "--quiet", "HEAD~1"]):
+                # No new staged changes: regenerate from the whole existing commit.
+                diff_stat = (_git_run(["git", "diff", "--stat", "HEAD~1..HEAD"]).stdout or "").strip()
+                diff_content = (_git_run(["git", "diff", "HEAD~1..HEAD"]).stdout or "").strip()
+                files = [
+                    f for f in (_git_run(["git", "diff", "--name-only", "HEAD~1..HEAD"]).stdout or "").strip().splitlines()
+                    if f
+                ]
+            new_msg = self._generate_commit_message(diff_stat, diff_content, files, branch)
+            if not new_msg:
+                print_error("[Cliara] Could not generate a message; keeping the current one.")
+                return current_msg
+            confirmed = self._confirm_commit_message(new_msg, branch, len(files))
+            return confirmed if confirmed is not None else current_msg
+        # edit
+        try:
+            from prompt_toolkit import prompt as pt_prompt
+            custom = pt_prompt("Edit commit message: ", default=first_line if current_msg else "").strip()
+        except Exception:
+            custom = input("Edit commit message: ").strip()
+        return custom or current_msg
+
+    def _offer_pull_request(self, branch: str) -> None:
+        """After a successful push, offer to open a GitHub PR for ``branch``."""
+        if not self.config.get("push_offer_pr", True):
+            return
+        if not sys.stdin.isatty():
+            return
+        try:
+            from cliara.auth import get_github_provider_token
+            from cliara.gh_api import (
+                GitHubClient,
+                resolve_repo,
+                git_diff_range,
+                git_recent_commits_messages,
+            )
+        except Exception:
+            return
+
+        tok = get_github_provider_token()
+        if not tok:
+            print_dim("  (Tip: run 'cliara login' to enable one-step 'Open a PR' after push.)")
+            return
+        try:
+            ref = resolve_repo(Path.cwd())
+        except Exception:
+            return  # origin isn't a recognizable GitHub remote
+
+        try:
+            resp = input("\nOpen a pull request for this branch? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if resp not in ("y", "yes"):
+            return
+
+        client = GitHubClient(tok, ref.api_base)
+        try:
+            repo_meta = client.get_repo(ref.owner, ref.repo)
+        except RuntimeError as e:
+            print_error(f"[Cliara] Could not reach GitHub: {e}")
+            return
+        base = str(repo_meta.get("default_branch") or "main")
+        if branch == base:
+            print_dim(f"  '{branch}' is the default branch; no PR needed.")
+            return
+
+        # Don't try to open a duplicate — surface the existing PR instead.
+        try:
+            for pr in client.list_pulls(ref.owner, ref.repo, state="open"):
+                head_ref = ((pr.get("head") or {}).get("ref")) or ""
+                if head_ref == branch:
+                    print_info(
+                        f"[Cliara] A PR already exists for '{branch}': {pr.get('html_url', '')}"
+                    )
+                    return
+        except RuntimeError:
+            pass
+
+        try:
+            diff = git_diff_range(Path.cwd(), base, branch)
+        except Exception:
+            diff = ""
+        commits = git_recent_commits_messages(Path.cwd(), base, branch)
+
+        title, body = self._generate_pr_text(diff, commits, base, branch)
+        if title is None:
+            return  # cancelled
+
+        draft = False
+        try:
+            draft = input("Open as draft? (y/N): ").strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        try:
+            pr = client.create_pull(
+                ref.owner, ref.repo, title=title, body=body, head=branch, base=base, draft=draft
+            )
+        except RuntimeError as e:
+            print_error(f"[Cliara] Could not open PR: {e}")
+            print_dim(
+                f"  Open it in the browser:  "
+                f"https://{ref.web_host}/{ref.owner}/{ref.repo}/pull/new/{branch}"
+            )
+            return
+        print_success(f"[Cliara] PR opened: {pr.get('html_url', '')}")
+
+    def _generate_pr_text(
+        self, diff: str, commits: str, base: str, branch: str
+    ) -> Tuple[Optional[str], str]:
+        """Draft PR title/body via the LLM (with a commit-based fallback) and confirm.
+
+        Returns (title, body); title is None if the user cancels.
+        """
+        anim = StreamingThinkingAnimation().start()
+        try:
+            from cliara.gh_llm import gh_llm_pr_title_body
+            title, body = gh_llm_pr_title_body(
+                diff_excerpt=diff,
+                commit_messages=commits,
+                base=base,
+                head=branch,
+                config=self.config,
+            )
+            anim.stop()
+        except Exception as e:
+            anim.stop()
+            print_warning(f"[Cliara] Could not draft PR text with the model ({e}). Using commit summaries.")
+            lines = [l for l in commits.splitlines() if l.strip()] if commits else []
+            title = lines[0].strip() if lines else f"Changes on {branch}"
+            body = "## Commits\n\n" + (commits or "(no commit summaries)")
+
+        print_info("\n[Cliara] PR title:")
+        print(f"\n  {title}\n")
+        if body:
+            print_dim("  Body preview:")
+            body_lines = body.splitlines()
+            for line in body_lines[:8]:
+                print_dim(f"    {line}")
+            if len(body_lines) > 8:
+                print_dim("    ...")
+        print()
+        try:
+            resp = input("Open PR with this? (y)es / (e)dit title / (n)o: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None, body
+        if resp in ("e", "edit"):
+            try:
+                from prompt_toolkit import prompt as pt_prompt
+                new_title = pt_prompt("Edit PR title: ", default=title).strip()
+            except Exception:
+                new_title = input("Edit PR title: ").strip() or title
+            title = new_title or title
+        elif resp not in ("y", "yes"):
+            print_warning("[Cancelled]")
+            return None, body
+        return title, body
 
     # ------------------------------------------------------------------
     # Prune branches  -  delete merged local branches + prune remotes

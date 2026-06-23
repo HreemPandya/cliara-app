@@ -14,6 +14,7 @@ from cliara.deploy_prereqs import (
     get_requirements,
     is_authenticated,
 )
+from cliara.safety import DangerLevel
 from cliara.shell_app.runtime import (
     print_dim,
     print_error,
@@ -723,22 +724,31 @@ class DeployCommandMixin:
 
             if success:
                 print_success(f"  [{i}/{total}] Done")
-            else:
-                print_error(f"\n  [{i}/{total}] Failed: {step}")
-                if i < total:
-                    try:
-                        resp = input(
-                            "\n  Continue with remaining steps? (y/n): "
-                        ).strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        print()
-                        all_ok = False
-                        break
-                    if resp not in ("y", "yes"):
-                        all_ok = False
-                        break
-                else:
+                continue
+
+            print_error(f"\n  [{i}/{total}] Failed: {step}")
+
+            # Explain the failure in plain English and, if a fix is available,
+            # offer to run it and retry the step before giving up.
+            if self._deploy_diagnose_failure(cwd, step):
+                print_success(f"  [{i}/{total}] Done (recovered)")
+                continue
+
+            if i < total:
+                try:
+                    resp = input(
+                        "\n  Continue with remaining steps? (y/n): "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
                     all_ok = False
+                    break
+                if resp not in ("y", "yes"):
+                    all_ok = False
+                    break
+                all_ok = False
+            else:
+                all_ok = False
 
         if all_ok:
             self.deploy_store.record_deploy(cwd)
@@ -749,6 +759,91 @@ class DeployCommandMixin:
             print_warning(
                 "\n[Cliara] Deploy did not complete successfully."
             )
+
+    def _deploy_diagnose_failure(self, cwd: Path, step: str) -> bool:
+        """
+        Translate a failed deploy step's stderr into a plain-English explanation
+        and, when a fix is available, offer to run it and retry the step.
+
+        Returns True only if a fix was applied and the step then succeeded.
+        """
+        if not getattr(self.nl_handler, "llm_enabled", False):
+            return False
+        stderr = (self.last_stderr or "").strip()
+        if not stderr:
+            return False
+
+        context = {
+            "cwd": str(cwd),
+            "os": platform.system(),
+            "shell": self.shell_path or os.environ.get("SHELL", "bash"),
+        }
+
+        print_dim("  Analyzing the failure...")
+        try:
+            result = self.nl_handler.translate_error(
+                step,
+                self.last_exit_code,
+                stderr,
+                context,
+                stream_callback=None,
+            )
+        except Exception:
+            return False
+
+        explanation = (result.get("explanation") or "").strip()
+        fix_commands = result.get("fix_commands") or []
+        fix_explanation = (result.get("fix_explanation") or "").strip()
+
+        if explanation:
+            print_info(f"  [Cliara] {explanation}")
+
+        if not fix_commands:
+            return False
+
+        fix_display = " && ".join(fix_commands)
+        print_info(f"  Suggested fix: {fix_display}")
+        if fix_explanation:
+            print_dim(f"  ({fix_explanation})")
+
+        if not self._deploy_yn("  Run fix and retry this step? (y/n): "):
+            return False
+
+        if not self._deploy_run_fix(fix_commands):
+            return False
+
+        # Retry the original step now that the fix has run.
+        print_info(f"  Retrying: {step}")
+        return self.execute_shell_command(step)
+
+    def _deploy_run_fix(self, fix_commands: list) -> bool:
+        """Run LLM-suggested fix commands, gated by the safety checker."""
+        safety = getattr(self, "safety", None)
+        if safety is not None:
+            level, dangerous = safety.check_commands(fix_commands)
+            if level != DangerLevel.SAFE:
+                print_warning(
+                    "  [Caution] The suggested fix includes commands that change "
+                    "your system:"
+                )
+                for cmd, reason in dangerous:
+                    print_dim(f"    {cmd}  ({reason})")
+                prompt = safety.get_confirmation_prompt(level)
+                try:
+                    confirm = input(f"  {prompt}").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return False
+                if not safety.validate_confirmation(confirm, level):
+                    print_warning("  [Cancelled]")
+                    return False
+
+        for fix_cmd in fix_commands:
+            print_info(f"  > {fix_cmd}")
+            if not self.execute_shell_command(fix_cmd):
+                print_error(f"  Fix command failed: {fix_cmd}")
+                return False
+        return True
 
     # -- Subcommands ---------------------------------------------------------
 
@@ -822,5 +917,6 @@ class DeployCommandMixin:
         print_dim("    - you're logged in (offers to run the login command)")
         print_dim("    - for npm/PyPI/crates.io: the version isn't already published (offers to bump)")
         print_dim("    - Docker images get a real registry/namespace before pushing")
+        print_dim("  If a step fails, Cliara explains why in plain English and can run a fix + retry.")
         print_dim("  PyPI: upload step uses twine --username __token__; paste your full pypi-... API token at the password prompt.")
         print()

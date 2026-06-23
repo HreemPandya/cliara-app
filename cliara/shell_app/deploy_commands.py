@@ -2,11 +2,18 @@
 
 import os
 import platform
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from cliara.deploy_detector import DeployPlan, detect_all as detect_deploy_targets
+from cliara import deploy_publish
+from cliara.deploy_prereqs import (
+    docker_daemon_running,
+    get_requirements,
+    is_authenticated,
+)
 from cliara.shell_app.runtime import (
     print_dim,
     print_error,
@@ -175,7 +182,17 @@ class DeployCommandMixin:
         if not self._deploy_pre_checks(cwd, plan):
             return
 
-        self._deploy_execute(cwd, saved.steps, saved.platform)
+        # Preflight may rewrite steps (e.g. resolving a Docker registry), so
+        # run what the plan holds now, not the original saved list.
+        if plan.steps != saved.steps:
+            self.deploy_store.save(
+                cwd,
+                platform=saved.platform,
+                steps=plan.steps,
+                project_name=saved.project_name,
+                framework=saved.framework,
+            )
+        self._deploy_execute(cwd, plan.steps, saved.platform)
 
     # -- Multiple targets ----------------------------------------------------
 
@@ -342,7 +359,275 @@ class DeployCommandMixin:
                     print_warning("  [Cancelled]")
                     return False
 
+        # Prerequisite preflight: tooling installed, authenticated, and
+        # (for package publishing) the version isn't already on the registry.
+        if not self._deploy_preflight(cwd, plan):
+            return False
+
         return True
+
+    # -- Prerequisite preflight ----------------------------------------------
+
+    def _deploy_yn(self, prompt: str) -> bool:
+        """Yes/No prompt that treats Ctrl+C / EOF / anything-but-yes as No."""
+        try:
+            resp = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        return resp in ("y", "yes")
+
+    def _deploy_preflight(self, cwd: Path, plan: DeployPlan) -> bool:
+        """
+        Make sure the user can actually deploy: resolve any unqualified Docker
+        image target, ensure the required CLI(s) are installed and the user is
+        logged in, and (for publishing) that the version isn't already taken.
+
+        Returns True to proceed, False to abort.
+        """
+        if not self._deploy_resolve_docker_target(cwd, plan):
+            return False
+        if not self._deploy_check_clis(plan):
+            return False
+        if not self._deploy_check_auth(cwd, plan):
+            return False
+        if not self._deploy_publish_preflight(cwd, plan):
+            return False
+        return True
+
+    # -- CLI install checks --------------------------------------------------
+
+    def _deploy_check_clis(self, plan: DeployPlan) -> bool:
+        """Ensure each required CLI is installed; offer to install if missing."""
+        for req in get_requirements(plan.platform):
+            if req.is_installed():
+                continue
+
+            print_warning(
+                f"\n  [Missing] {req.display_name} ('{req.binary}') isn't installed."
+            )
+            install_cmd = req.install_command()
+
+            if install_cmd and not req.install_is_url():
+                print_dim(f"  Cliara can install it with:  {install_cmd}")
+                if self._deploy_yn(f"  Install {req.display_name} now? (y/n): "):
+                    self.execute_shell_command(install_cmd)
+                    if not req.is_installed():
+                        print_warning(
+                            f"  '{req.binary}' still isn't on PATH. You may need to "
+                            "restart your terminal so the new install is picked up."
+                        )
+                        if not self._deploy_yn("  Continue anyway? (y/n): "):
+                            return False
+                elif not self._deploy_yn("  Continue without installing? (y/n): "):
+                    return False
+            else:
+                # Manual install (URL) or no automatic option.
+                if install_cmd:
+                    print_dim(f"  Install it from: {install_cmd}")
+                if req.docs_url and req.docs_url != install_cmd:
+                    print_dim(f"  Docs: {req.docs_url}")
+                if not self._deploy_yn("  Continue anyway? (y/n): "):
+                    return False
+        return True
+
+    # -- Authentication checks -----------------------------------------------
+
+    def _deploy_check_auth(self, cwd: Path, plan: DeployPlan) -> bool:
+        """Probe auth for each required CLI; offer to log in if needed."""
+        # Docker has no whoami; the meaningful pre-check is the daemon.
+        if plan.platform in ("docker", "docker-compose"):
+            if not docker_daemon_running():
+                print_warning(
+                    "\n  [Docker] The Docker daemon doesn't appear to be running."
+                )
+                print_dim("  Start Docker Desktop (or the docker service), then retry.")
+                if not self._deploy_yn("  Continue anyway? (y/n): "):
+                    return False
+
+        for req in get_requirements(plan.platform):
+            if not req.is_installed():
+                continue  # already surfaced (and accepted) in the CLI step
+            authed = is_authenticated(req, cwd=str(cwd))
+            if authed is not False:
+                continue  # True (logged in) or None (couldn't tell) -> don't block
+
+            print_warning(
+                f"\n  [Auth] You don't appear to be logged in to {req.display_name}."
+            )
+            if req.login_cmd:
+                if self._deploy_yn(f"  Run '{req.login_cmd}' now? (y/n): "):
+                    self.execute_shell_command(req.login_cmd)
+                    if is_authenticated(req, cwd=str(cwd)) is False:
+                        if not self._deploy_yn(
+                            "  Still not logged in. Continue anyway? (y/n): "
+                        ):
+                            return False
+                elif not self._deploy_yn("  Continue without logging in? (y/n): "):
+                    return False
+            else:
+                print_dim("  Authenticate with this platform, then re-run 'deploy'.")
+                if not self._deploy_yn("  Continue anyway? (y/n): "):
+                    return False
+        return True
+
+    # -- Publish version preflight -------------------------------------------
+
+    def _deploy_publish_preflight(self, cwd: Path, plan: DeployPlan) -> bool:
+        """
+        For npm / PyPI / crates.io: if the current version is already on the
+        registry, offer to bump it so the publish doesn't fail.
+        """
+        if plan.platform not in ("npm", "pypi", "crates.io"):
+            return True
+
+        info = deploy_publish.read_publish_info(cwd, plan.platform)
+        if info is None:
+            return True
+
+        published = deploy_publish.is_version_published(info)
+        if published is None:
+            print_dim(
+                f"  Couldn't verify whether {info.package_name} "
+                f"{info.current_version} is already published — continuing."
+            )
+            return True
+        if not published:
+            print_dim(
+                f"  {info.package_name} {info.current_version} is not yet on "
+                f"{plan.platform} — good to publish."
+            )
+            return True
+
+        # Already published: publishing this version will fail.
+        print_warning(
+            f"\n  [Version] {info.package_name} {info.current_version} is already "
+            f"published on {plan.platform}."
+        )
+        patch = deploy_publish.bump_semver(info.current_version, "patch")
+        minor = deploy_publish.bump_semver(info.current_version, "minor")
+        major = deploy_publish.bump_semver(info.current_version, "major")
+        if patch is None:
+            print_dim(
+                f"  Couldn't auto-bump '{info.current_version}'. Update the version "
+                f"in {info.manifest_path.name} manually."
+            )
+            if not self._deploy_yn("  Continue anyway? (y/n): "):
+                return False
+            return True
+
+        print_dim(
+            f"  Bump to: (p)atch {patch}  /  (m)inor {minor}  /  "
+            f"(M)ajor {major}  /  (k)eep / (c)ancel"
+        )
+        try:
+            choice = input("  Choice: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+        low = choice.lower()
+        if low in ("c", "cancel", "n", "no", ""):
+            print_warning("  [Cancelled]")
+            return False
+        if low in ("k", "keep"):
+            print_dim("  Keeping current version (publish will likely fail).")
+            return True
+
+        if choice == "M" or low == "major":
+            new_version = major
+        elif low in ("m", "minor"):
+            new_version = minor
+        else:  # patch / default
+            new_version = patch
+
+        if deploy_publish.write_new_version(info, new_version):
+            print_success(
+                f"  Bumped {info.package_name}: {info.current_version} -> {new_version} "
+                f"({info.manifest_path.name})"
+            )
+        else:
+            print_error(
+                f"  Couldn't write the new version to {info.manifest_path.name}; "
+                "update it manually."
+            )
+            if not self._deploy_yn("  Continue anyway? (y/n): "):
+                return False
+        return True
+
+    # -- Docker image target resolution --------------------------------------
+
+    def _deploy_resolve_docker_target(self, cwd: Path, plan: DeployPlan) -> bool:
+        """
+        A bare ``docker push <name>`` resolves to docker.io/library/<name>, which
+        a normal user can't push to. Qualify the image with a real registry /
+        namespace (guessed from the git remote, or asked for), or drop the push.
+        """
+        if plan.platform != "docker":
+            return True
+
+        push_ref = None
+        for step in plan.steps:
+            toks = step.split()
+            if len(toks) >= 3 and toks[0] == "docker" and toks[1] == "push":
+                push_ref = toks[2]
+                break
+        if push_ref is None or "/" in push_ref:
+            return True  # nothing to push, or already qualified
+
+        guess = self._deploy_guess_docker_namespace(cwd)
+        print_info("\n  [Docker] The image needs a registry/namespace to push.")
+        print_dim("  e.g. ghcr.io/you, docker.io/you, registry.example.com/team")
+        prompt = (
+            f"  Registry/namespace [{guess}]: " if guess
+            else "  Registry/namespace (blank to skip push): "
+        )
+        try:
+            entered = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        namespace = (entered or guess or "").rstrip("/")
+
+        if not namespace:
+            plan.steps = [
+                s for s in plan.steps
+                if not (s.split()[:2] == ["docker", "push"])
+            ]
+            print_dim("  Skipping push — building the image locally only.")
+            return True
+
+        new_ref = f"{namespace}/{push_ref}"
+        new_steps = []
+        for step in plan.steps:
+            toks = step.split()
+            if toks[:2] == ["docker", "build"]:
+                new_steps.append(step.replace(f"-t {push_ref}", f"-t {new_ref}"))
+            elif toks[:2] == ["docker", "push"]:
+                new_steps.append(f"docker push {new_ref}")
+            else:
+                new_steps.append(step)
+        plan.steps = new_steps
+        print_dim(f"  Image: {new_ref}")
+        return True
+
+    def _deploy_guess_docker_namespace(self, cwd: Path) -> Optional[str]:
+        """Guess ghcr.io/<owner> from a GitHub origin remote, else None."""
+        try:
+            result = subprocess.run(
+                ["git", "config", "--get", "remote.origin.url"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(cwd), timeout=5,
+            )
+        except Exception:
+            return None
+        url = (result.stdout or "").strip()
+        if not url or "github" not in url.lower():
+            return None
+        m = re.search(r"[:/]([^/:]+)/[^/]+?(?:\.git)?/?$", url)
+        if not m:
+            return None
+        return f"ghcr.io/{m.group(1).lower()}"
 
     # -- Plan display & confirmation -----------------------------------------
 
@@ -531,5 +816,11 @@ class DeployCommandMixin:
         print()
         print_dim("  First run: Cliara detects your project type and proposes a plan.")
         print_dim("  After confirming, the plan is saved  -  next time it's instant.")
+        print()
+        print_dim("  Before each deploy Cliara also checks prerequisites for you:")
+        print_dim("    - the platform CLI is installed (offers to install it if not)")
+        print_dim("    - you're logged in (offers to run the login command)")
+        print_dim("    - for npm/PyPI/crates.io: the version isn't already published (offers to bump)")
+        print_dim("    - Docker images get a real registry/namespace before pushing")
         print_dim("  PyPI: upload step uses twine --username __token__; paste your full pypi-... API token at the password prompt.")
         print()
